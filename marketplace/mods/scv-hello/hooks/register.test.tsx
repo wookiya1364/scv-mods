@@ -26,7 +26,19 @@ import {
   buildStepPrompt,
   checkSignal,
   mergeMarks,
-  stepTimesFromSignals,
+  stepDurationsFromSignals,
+  estimateFromDurations,
+  buildAlertText,
+  classifyTurnEnd,
+  isMainLoop,
+  permissionWaitOf,
+  agentLines,
+  applyAgentEvent,
+  ancestorsOf,
+  planPromptFill,
+  suggestNext,
+  usageAlerts,
+  usageLine,
 } from './model'
 
 const PANE = {
@@ -85,8 +97,14 @@ const engine = (
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('clock.now', () => ({ value: clock.at }))
   on('clock.every', () => ({ value: undefined }))
+  const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
   on('fs.list', (_, e) => ({
-    value: Object.keys(e.path.endsWith('scv/archive') ? archived : files).map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
+    value:
+      e.path === '/work'
+        ? [dir('scv'), dir('marketplace')]
+        : /scv\/(promote|archive)$/.test(e.path)
+          ? Object.keys(e.path.endsWith('scv/archive') ? archived : files).map(dir)
+          : [],
   }))
   on('fs.read', (_, e) => {
     const [, where, slug, file] = e.path.match(/scv\/(promote|archive)\/([^/]+)\/(PLAN|TESTS)\.md$/) ?? []
@@ -663,6 +681,14 @@ test('step-signal T3 틀린 신호는 거절하고 이유를 돌려준다', asyn
   await ui.unmount()
 })
 
+test('step-signal T3b 한꺼번에 온 신호도 모두 남는다', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  await Promise.all([signal($, 1, 'done'), signal($, 2, 'done'), signal($, 3, 'done')])
+
+  expect((store.get('signals:/work') as { step: number }[]).map(one => one.step).sort()).toEqual([1, 2, 3])
+})
+
 test('step-signal T4 막힘 신호는 지금 단계를 빨강으로, 막힌 작업 카드에 이유', async ($, on) => {
   engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
   await start($)
@@ -684,11 +710,10 @@ test('step-signal T4 막힘 신호는 지금 단계를 빨강으로, 막힌 작�
 })
 
 test('step-signal T5 예상 완료 시간을 신호 시각으로 계산한다', async ($, on) => {
-  const parsed = parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
   const signals = [1, 2, 3].map((step, i) => ({ plan: 'a', step, state: 'done' as const, note: '', at: i * 10 * 60_000 }))
-  const times = stepTimesFromSignals(signals, parsed)
-  expect(times.map(time => time.done)).toEqual([1, 2, 3])
-  expect(estimateEta(times, 'a', 2)).toEqual({ kind: 'estimate', ms: 20 * 60_000, basis: 2 })
+  const durations = stepDurationsFromSignals(signals, 'a')
+  expect(durations).toEqual([10 * 60_000, 10 * 60_000])
+  expect(estimateFromDurations(durations, 2)).toEqual({ kind: 'estimate', ms: 20 * 60_000, basis: 2 })
 
   const { clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
   await start($)
@@ -698,6 +723,28 @@ test('step-signal T5 예상 완료 시간을 신호 시각으로 계산한다', 
   }
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await text(ui, /^예상 완료 시간/)).toBe('예상 완료 시간: 약 20분 0초 남음 (추정 · 단계 2개 평균)')
+  await ui.unmount()
+})
+
+test('step-signal T5b 단계 시간은 시작 신호부터 재고, 한꺼번에 보고한 끝은 시간으로 치지 않는다', async ($, on) => {
+  let kept = applySignal([], { plan: 'a', step: 1, state: 'doing' }, 0)
+  kept = applySignal(kept, { plan: 'a', step: 1, state: 'done' }, 10 * 60_000)
+  expect(kept).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 10 * 60_000, startedAt: 0 }])
+  kept = applySignal(kept, { plan: 'a', step: 2, state: 'done' }, 10 * 60_000 + 5_000)
+  kept = applySignal(kept, { plan: 'a', step: 3, state: 'done' }, 10 * 60_000 + 6_000)
+  expect(stepDurationsFromSignals(kept, 'a')).toEqual([10 * 60_000])
+
+  const { clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  await signal($, 1, 'doing')
+  clock.at += 10 * 60_000
+  await signal($, 1, 'done')
+  for (const step of [2, 3]) {
+    clock.at += 1_000
+    await signal($, step, 'done')
+  }
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^예상 완료 시간/)).toBe('예상 완료 시간: 약 20분 0초 남음 (추정 · 단계 1개 평균)')
   await ui.unmount()
 })
 
@@ -749,6 +796,19 @@ test('step-signal T8 세션을 새로 열어도 신호가 이어진다', async (
   await ui.unmount()
 })
 
+test('step-signal T8b 세션이 하위 폴더에서 열려도 가장 가까운 scv 폴더의 계획을 따른다', async ($, on) => {
+  expect(ancestorsOf('/work/marketplace/mods')).toEqual(['/work/marketplace/mods', '/work/marketplace', '/work', '/'])
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('session.root', () => ({ value: '/work/marketplace/mods/scv-hello' }))
+  await $.session.start({ cwd: '/work/marketplace/mods/scv-hello', surface: 'desktop', isInteractive: true })
+  expect((await signal($, 1, 'done')).deny).toBeUndefined()
+  expect(store.get('signals:/work')).toHaveLength(1)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^1\/5$/)).toBe('1/5')
+  await ui.unmount()
+})
+
 test('step-signal T9 신호도 표시도 없으면 지금처럼 (추정)', async ($, on) => {
   expect(applySignal([], { plan: 'a', step: 1, state: 'doing' }, 5)).toEqual([{ plan: 'a', step: 1, state: 'doing', note: '', at: 5 }])
   expect(checkSignal({ plan: 'a', step: 1, state: 'doing' }, [], [])).toEqual({ isOk: false, reason: '그런 진행 중 계획이 없습니다: a — 진행 중: 없음' })
@@ -760,5 +820,500 @@ test('step-signal T9 신호도 표시도 없으면 지금처럼 (추정)', async
   expect(await text(ui, /^단계 흐름/)).toBe('단계 흐름 (추정)')
   expect(await text(ui, /^0\/5$/)).toBe('0/5')
   expect(await text(ui, /^예상 완료 시간/)).toBe('예상 완료 시간: 아직 추정 불가')
+  await ui.unmount()
+})
+
+// ── alerts plan ──────────────────────────────────────────────────────────────
+
+const turnEngine = (on: On) => {
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', () => ({ text: '', reason: 'answer' as const }))
+}
+
+const turnEnd = ($: Engine, reason: string, durationMs: number, agentId?: string) =>
+  $.turn.complete({ turnId: 't1', answer: '', durationMs, isAborted: reason === 'aborted', reason, ...(agentId ? { agentId } : {}) } as never)
+
+test('alerts T1 2분 넘게 걸린 메인 차례가 답으로 끝나면 끝 알림', async ($, on) => {
+  expect(classifyTurnEnd('answer', 192_000)).toEqual({ kind: 'done' })
+  const { notices } = engine(on, { a: plan({ title: '대시보드', status: 'in_progress', steps: FIVE }) })
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'answer', 192_000)
+
+  expect(notices).toHaveLength(1)
+  expect(notices[0]).toContain('끝났어요')
+  expect(notices[0]).toContain('3분 12초')
+  expect(notices[0]).toContain('대시보드 0/5')
+})
+
+test('alerts T2 2분 안에 끝난 차례는 알리지 않는다', async ($, on) => {
+  expect(classifyTurnEnd('answer', 119_000)).toEqual({ kind: 'none' })
+  const { notices } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'answer', 119_000)
+
+  expect(notices).toEqual([])
+})
+
+test('alerts T3 오류로 끝나면 바로 알리고 칸에 빨간 멈춤 — 오류, 다음 차례에 사라진다', async ($, on) => {
+  const { notices } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'error', 5_000)
+  expect(notices).toHaveLength(1)
+  expect(notices[0]).toContain('오류로 멈춤')
+
+  const stopped = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(stopped, /^멈춤 — 오류$/)).toBe('멈춤 — 오류')
+  expect(await text(stopped, /^다음: /)).toBe('다음: 멈췄어요 — 대화창에서 다시 시키기')
+  await stopped.unmount()
+
+  await $.turn.start({ text: 'again', turnId: 't2' })
+  const resumed = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(resumed, /멈춤/)).toBeUndefined()
+  await resumed.unmount()
+})
+
+test('alerts T4 답을 거절하고 끝나면 거절로 멈춤', async ($, on) => {
+  const { notices } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'refusal', 3_000)
+  expect(notices[0]).toContain('거절로 멈춤')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^멈춤 — 거절$/)).toBe('멈춤 — 거절')
+  await ui.unmount()
+})
+
+test('alerts T5 사용자가 멈춘 차례는 알리지 않는다', async ($, on) => {
+  expect(classifyTurnEnd('aborted', 600_000)).toEqual({ kind: 'none' })
+  const { notices } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'aborted', 600_000)
+  expect(notices).toEqual([])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /멈춤/)).toBeUndefined()
+  await ui.unmount()
+})
+
+test('alerts T6 하위 에이전트의 차례가 끝나도 칸은 일하는 중, 알림 없음', async ($, on) => {
+  expect(isMainLoop({ agentId: 'ag1' })).toBe(false)
+  expect(isMainLoop({})).toBe(true)
+  const { notices } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.turn.start({ text: 'look around', turnId: 'a1', agentId: 'ag1' } as never)
+  await $.turn.complete({ turnId: 'a1', answer: '', durationMs: 180_000, isAborted: false, reason: 'answer', agentId: 'ag1' } as never)
+
+  expect(notices).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^일하는 중/)).toBe('일하는 중 · 0초')
+  await ui.unmount()
+})
+
+test('alerts T7 허락 창이 뜨면 허락 기다림을 보이고 알린다, 도구가 끝나면 사라진다', async ($, on) => {
+  expect(permissionWaitOf('Bash', { command: 'npm test' }, 5)).toEqual({ tool: 'Bash', target: 'npm test', at: 5 })
+  const { notices } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('tool.call', () => ({ result: { stdout: '', stderr: '' } }))
+  on('classic.PermissionRequest', () => ({}))
+  await start($)
+
+  // the prompt is shown while the Bash call waits; the call then runs and ends
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test' } } as never)
+  const waitingFor = await drawnText($)
+  expect(waitingFor).toContain('허락 기다림 — Bash: npm test')
+  expect(waitingFor).toContain('Claude가 허락을 기다려요')
+  expect(notices).toContain('허락 기다림 — Bash: npm test')
+
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  expect(await drawnText($)).not.toContain('허락 기다림')
+})
+
+test('alerts T7b 설정 훅이 이미 답한 허락 요청은 창이 없으니 기다림도 없다', async ($, on) => {
+  const { notices } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('classic.PermissionRequest', () => ({ decision: { behavior: 'allow' as const } }))
+  await start($)
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'ls' } } as never)
+
+  expect(await drawnText($)).not.toContain('허락 기다림')
+  expect(notices).toEqual([])
+})
+
+test('alerts T8 허락을 거절해도 허락 기다림이 사라진다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('tool.call', () => ({ deny: '사용자가 거절함' }))
+  on('classic.PermissionRequest', () => ({}))
+  await start($)
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } } as never)
+  expect(await drawnText($)).toContain('허락 기다림 — Bash: rm -rf build')
+
+  await $.tool.call({ tool: 'Bash', command: 'rm -rf build' })
+  expect(await drawnText($)).not.toContain('허락 기다림')
+})
+
+test('alerts T9 모든 알림이 Claude 자체 알림 도구로도 간다, 실패해도 다른 길은 그대로', async ($, on) => {
+  expect(buildAlertText(['a'.repeat(300)]).length).toBeLessThanOrEqual(200)
+  expect(buildAlertText(['끝났어요', '3분\n12초', null])).toBe('끝났어요 · 3분 12초')
+
+  const { notices } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  const pushes: string[] = []
+  let isPushDown = false
+  on('tool.call', (_, e) => {
+    if (e.tool === 'PushNotification') {
+      if (isPushDown) throw new Error('no such tool')
+      pushes.push(String((e as { message?: string }).message))
+    }
+    return { result: {} }
+  })
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'error', 1_000)
+  expect(pushes).toHaveLength(1)
+  expect(pushes[0]?.startsWith('SCV: ')).toBe(true)
+  expect(pushes[0]?.length).toBeLessThanOrEqual(200)
+  expect(pushes[0]).not.toContain('\n')
+
+  isPushDown = true
+  await $.turn.start({ text: 'go', turnId: 't2' })
+  await turnEnd($, 'error', 1_000)
+  expect(notices).toHaveLength(2)
+  expect(await drawnText($)).toContain('멈춤 — 오류')
+})
+
+test('alerts T10 지금 있는 알림(답 기다림 · 시험 실패)도 같은 길로 간다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'testing', steps: ['a'], tests: ['one', 'two'] }) })
+  const pushes: string[] = []
+  on('tool.call', (_, e) => {
+    if (e.tool === 'PushNotification') pushes.push(String((e as { message?: string }).message))
+    return e.tool === 'Bash' ? { isError: true, result: {}, text: '(fail) T2 two' } : { result: { answers: {} } }
+  })
+  await start($)
+  await $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{ question: 'Q?', header: 'h', multiSelect: false, options: [{ label: 'a', description: '' }, { label: 'b', description: '' }] }],
+  })
+  await $.tool.call({ tool: 'Bash', command: 'npm run verify-dashboard' })
+
+  expect(pushes).toEqual(['SCV: 답을 기다리는 중 — Q?', 'SCV: 시험 실패 — T2'])
+})
+
+// ── work-view plan ───────────────────────────────────────────────────────────
+
+const ASK = {
+  tool: 'AskUserQuestion' as const,
+  questions: [{ question: 'Q?', header: 'h', multiSelect: false, options: [{ label: 'a', description: '' }, { label: 'b', description: '' }] }],
+}
+
+const spawn = ($: Engine, description: string) =>
+  $.agent.spawn({ tool_use_id: `u-${description}`, prompt: 'look', description, subagentType: 'Explore', parentModel: 'm', background: false, fork: false } as never)
+
+const agentTool = ($: Engine, agentId: string, tool: string, input: Record<string, unknown>) =>
+  $.tool.call({ tool, ...input, agentId } as never)
+
+const agentEngine = (on: On) => on('agent.spawn', (_, e) => ({ model: 'm', agentId: `ag-${(e as { description: string }).description}` }))
+
+test('work-view T1 메시지 뒤에 생긴 일을 세 줄로 요약한다', async ($, on) => {
+  const { clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  let bashRuns = 0
+  const seen: string[] = []
+  on('tool.call', async (_, e) => {
+    if (e.tool === 'Bash') {
+      bashRuns += 1
+      return bashRuns === 1 ? { isError: true, result: {}, text: '(fail) T1' } : { result: { stdout: '(pass) T1', stderr: '' } }
+    }
+    if (e.tool === 'AskUserQuestion') seen.push(await drawnText($))
+    return { result: { answers: {} } }
+  })
+  await start($)
+  await $.prompt.submit(typed('계속해'))
+  clock.at += 60_000
+  await signal($, 1, 'done')
+  await signal($, 2, 'done')
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  await $.tool.call(ASK)
+
+  expect(seen[0]).toContain('단계 2개 끝 — a, b')
+  expect(seen[0]).toContain('시험 2번 — 실패 1번 뒤 통과')
+  expect(seen[0]).toContain('질문 1개 기다림')
+})
+
+test('work-view T2 메시지를 새로 보내면 요약이 비고 카드가 숨겨진다', async ($, on) => {
+  const { clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  await $.prompt.submit(typed('계속해'))
+  clock.at += 60_000
+  await signal($, 1, 'done')
+  expect(await drawnText($)).toContain('그 사이')
+
+  clock.at += 60_000
+  await $.prompt.submit(typed('다음'))
+  expect(await drawnText($)).not.toContain('그 사이')
+})
+
+test('work-view T3 그 사이 아무 일도 없으면 카드가 없다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  await start($)
+  expect(await drawnText($)).not.toContain('그 사이')
+  await $.prompt.submit(typed('계속해'))
+
+  expect(await drawnText($)).not.toContain('그 사이')
+})
+
+test('work-view T4 메시지를 보내기 전 일은 들어가지 않는다', async ($, on) => {
+  const { clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: { stdout: '(pass) T1', stderr: '' } }))
+  await start($)
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+  clock.at += 60_000
+  await $.prompt.submit(typed('계속해'))
+  clock.at += 60_000
+  await $.tool.call({ tool: 'Bash', command: 'npm test' })
+
+  expect(await drawnText($)).toContain('시험 1번 — 모두 통과')
+})
+
+test('work-view T5 오류 멈춤과 허락 기다림도 셋째 줄에 나온다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  on('classic.PermissionRequest', () => ({}))
+  turnEngine(on)
+  await start($)
+  await $.prompt.submit(typed('계속해'))
+  await $.turn.start({ text: '계속해', turnId: 't1' })
+  await turnEnd($, 'error', 1_000)
+  const halted = await drawnText($)
+  expect(halted).toContain('그 사이')
+  expect(halted).toContain('오류로 멈춤')
+
+  await $.turn.start({ text: '다시', turnId: 't2' })
+  await $.classic.PermissionRequest({ tool_name: 'Bash', tool_input: { command: 'npm test' } } as never)
+  expect(await drawnText($)).toContain('허락 기다림 — Bash')
+})
+
+test('work-view T6 에이전트 2개가 동시에 도구를 쓰면 메인 줄과 에이전트 줄 2개가 보인다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  agentEngine(on)
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  await spawn($, 'A')
+  await spawn($, 'B')
+  await agentTool($, 'ag-A', 'Grep', { pattern: 'alert' })
+  await agentTool($, 'ag-B', 'Bash', { command: 'npm test', description: '시험 돌리기' })
+  const drawn = await drawnText($)
+
+  expect(drawn).toContain('단계: a')
+  expect(drawn).toContain('A · Grep: alert')
+  expect(drawn).toContain('B · Bash: 시험 돌리기')
+})
+
+test('work-view T7 에이전트가 끝나면 그 줄이 사라진다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  agentEngine(on)
+  turnEngine(on)
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  await spawn($, 'A')
+  await spawn($, 'B')
+  await agentTool($, 'ag-A', 'Grep', { pattern: 'alert' })
+  await $.turn.complete({ turnId: 'a1', answer: '', durationMs: 1, isAborted: false, reason: 'answer', agentId: 'ag-A' } as never)
+  const drawn = await drawnText($)
+
+  expect(drawn).not.toContain('A · Grep')
+  expect(drawn).toContain('B · 준비 중')
+})
+
+test('work-view T8 에이전트가 6개면 5줄과 +1개 더', async ($, on) => {
+  const six = [1, 2, 3, 4, 5, 6].reduce((list, n) => applyAgentEvent(list, { kind: 'start', id: `x${n}`, name: `일꾼 ${n}`, at: 0 }), [] as ReturnType<typeof applyAgentEvent>)
+  const lines = agentLines(six, 5_000, formatDuration)
+  expect(lines).toHaveLength(6)
+  expect(lines[5]).toBe('+1개 더')
+  expect(lines[0]).toBe('일꾼 1 · 준비 중 · 5초')
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  agentEngine(on)
+  await start($)
+  for (const name of ['1', '2', '3', '4', '5', '6']) await spawn($, name)
+  const drawn = await drawnText($)
+  expect(drawn).toContain('+1개 더')
+  expect(drawn).not.toContain('6 · 준비 중')
+})
+
+test('work-view T9 에이전트 안 도구가 메인 줄을 덮어쓰지 않는다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  agentEngine(on)
+  const seen: string[] = []
+  on('tool.call', async (_, e) => {
+    if (e.tool === 'Edit') seen.push(await drawnText($))
+    return { result: {} }
+  })
+  await start($)
+  await spawn($, 'A')
+  await agentTool($, 'ag-A', 'Read', { file_path: '/work/notes.md' })
+  await $.tool.call({ tool: 'Edit', file_path: '/work/view.tsx', old_string: 'a', new_string: 'b' })
+
+  expect(seen[0]).toContain('Edit: view.tsx')
+  expect(seen[0]).toContain('A · Read: notes.md')
+
+  await agentTool($, 'ag-A', 'Grep', { pattern: 'x' })
+  const after = await drawnText($)
+  expect(after).toContain('A · Grep: x')
+  // the 'now' line reads '<tool>: <target> · <time>'; the agent's Grep must not become it
+  expect(after).not.toContain('"Grep: x ·')
+})
+
+// ── prompt-usage plan ────────────────────────────────────────────────────────
+
+const promptEngine = (on: On, draft = '', isFilled = true) => {
+  const fills: { text: string; mode?: string }[] = []
+  const suggestions: string[] = []
+  on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }) as never)
+  on('prompt.fill', (_, e) => {
+    fills.push({ text: e.text, mode: e.mode })
+    return { isFilled } as never
+  })
+  on('prompt.suggest', (_, e) => {
+    suggestions.push(e.text)
+    return { isShown: true } as never
+  })
+
+  return { fills, suggestions }
+}
+
+// 17:40 in Seoul (UTC+9) is 08:40 UTC
+const KST = 9 * 60
+const LIMITS = [
+  { kind: 'seven_day', percentUsed: 31, resetsAt: '2026-10-27T01:00:00Z' },
+  { kind: 'five_hour', percentUsed: 72, resetsAt: '2026-10-23T08:40:00Z' },
+]
+
+test('prompt-usage T1 빈 입력창에 입력창에 넣기를 누르면 다음 명령이 들어간다', async ($, on) => {
+  expect(planPromptFill('/scv:work a', '')).toEqual({ text: '/scv:work a', mode: 'replace' })
+  engine(on, { a: plan({ title: 'p', status: 'planned', steps: FIVE }) })
+  const { fills } = promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'next-fill' })
+
+  expect(fills).toEqual([{ text: '/scv:work a', mode: 'replace' }])
+  expect(await text(ui, /^입력창에/)).toBe('입력창에 넣음: /scv:work a')
+  await ui.unmount()
+})
+
+test('prompt-usage T2 입력창에 글이 있으면 지우지 않고 뒤에 붙인다', async ($, on) => {
+  expect(planPromptFill('/scv:work a', '이것도 봐 줘 ')).toEqual({ text: '/scv:work a', mode: 'append' })
+  engine(on, { a: plan({ title: 'p', status: 'planned', steps: FIVE }) })
+  const { fills } = promptEngine(on, '이것도 봐 줘')
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'next-fill' })
+
+  expect(fills).toEqual([{ text: ' /scv:work a', mode: 'append' }])
+  await ui.unmount()
+})
+
+test('prompt-usage T3 못 넣으면 복사로 대신하고 그렇게 알린다', async ($, on) => {
+  const { copies } = engine(on, { a: plan({ title: 'p', status: 'planned', steps: FIVE }) })
+  promptEngine(on, '', false)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'next-fill' })
+
+  expect(copies).toEqual(['/scv:work a'])
+  expect(await text(ui, /^입력창에/)).toBe('입력창에 못 넣어 복사함: /scv:work a')
+  await ui.unmount()
+})
+
+test('prompt-usage T4 메인 차례가 끝났고 다음 할 일이 명령이면 제안을 띄운다', async ($, on) => {
+  expect(suggestNext({ text: '시작하기', command: '/scv:work a' })).toBe('/scv:work a')
+  expect(suggestNext({ text: '진행 중 — 기다리면 됩니다', command: null })).toBeNull()
+
+  engine(on, { a: plan({ title: 'p', status: 'planned', steps: FIVE }) })
+  const { suggestions } = promptEngine(on)
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.turn.start({ text: 'look', turnId: 'a1', agentId: 'ag1' } as never)
+  await $.turn.complete({ turnId: 'a1', answer: '', durationMs: 1, isAborted: false, reason: 'answer', agentId: 'ag1' } as never)
+  expect(suggestions).toEqual([])
+
+  await turnEnd($, 'answer', 1_000)
+  expect(suggestions).toEqual(['/scv:work a'])
+})
+
+test('prompt-usage T4b 다음 할 일에 명령이 없으면 제안하지 않는다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  const { suggestions } = promptEngine(on)
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'answer', 1_000)
+
+  expect(suggestions).toEqual([])
+})
+
+test('prompt-usage T5 한도 줄을 한 줄로 보인다', async ($, on) => {
+  expect(usageLine(LIMITS, KST)).toBe('5시간 72% · 17:40 초기화 · 7일 31%')
+  expect(usageLine([{ kind: 'seven_day', percentUsed: 93.5, resetsAt: '2026-10-27T01:00:00Z' }], KST)).toBe('7일 93.5% · 10/27 10:00 초기화')
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: LIMITS } }) as never)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^5시간 /)).toMatch(/^5시간 72% · \d\d:40 초기화 · 7일 31%$/)
+  expect(await text(ui, /^사용 한도$/)).toBe('사용 한도')
+  await ui.unmount()
+})
+
+test('prompt-usage T6 90%를 넘으면 한 번만 알리고, 초기화된 뒤 다시 넘으면 또 알린다', async ($, on) => {
+  const first = usageAlerts([{ kind: 'five_hour', percentUsed: 91, resetsAt: '2026-10-23T08:40:00Z' }], [], KST)
+  expect(first.texts).toEqual(['5시간 사용 한도 91% — 17:40 초기화'])
+  expect(usageAlerts([{ kind: 'five_hour', percentUsed: 95, resetsAt: '2026-10-23T08:40:00Z' }], first.alerted, KST).texts).toEqual([])
+
+  const { notices, store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  let limits = [{ kind: 'five_hour', percentUsed: 91, resetsAt: '2026-10-23T08:40:00Z' }]
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: limits } }) as never)
+  await start($)
+  await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: true })
+  limits = [{ kind: 'five_hour', percentUsed: 92, resetsAt: '2026-10-23T13:40:00Z' }]
+  await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: true })
+
+  expect(notices.filter(notice => notice.includes('사용 한도'))).toHaveLength(2)
+  expect(store.get('usageAlerted')).toEqual(['five_hour:2026-10-23T08:40:00Z', 'five_hour:2026-10-23T13:40:00Z'])
+})
+
+test('prompt-usage T7 한도 정보가 없으면 줄이 없다', async ($, on) => {
+  expect(usageLine([], KST)).toBeNull()
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('session.usage', () => ({ value: { startedAt: 0, context: {}, rateLimits: [] } }) as never)
+  await start($)
+
+  expect(await drawnText($)).not.toContain('5시간')
+  expect(await drawnText($)).not.toContain('사용 한도')
+})
+
+test('prompt-usage T8 명령 복사 버튼은 그대로 있다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'planned', steps: FIVE }) })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect((await ui.find({ type: 'Button', key: 'next-fill' }))?.text).toBe('입력창에 넣기')
+  expect((await ui.find({ type: 'Button', key: 'next-copy' }))?.text).toBe('명령 복사')
   await ui.unmount()
 })

@@ -119,3 +119,11 @@ merge_policy: preserve
 - discarded alternatives: 80% 기준 — 이른 알림 / 표시만 — 한도 직전을 놓칠 수 있음 / 복사 버튼만 유지 — 붙여 넣기 단계가 남음
 - refs: scv/promote/20261022-wookiya1364-scv-dashboard-prompt-usage/PLAN.md
 - conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-23 08:05] wookiya1364 — SCV 칸 다음 기능 — 구현하며 배운 것
+
+- verdict: lesson
+- why: 신호는 세션 값이 아니라 모드 저장소를 먼저 읽고 한 번에 하나씩 쓴다 — 연달아·동시에 온 신호가 사라지는 것을 시험(T5·T3b)이 잡음. 예상 시간은 단계마다 시작 신호부터 재고, 30초 안에 몰아 보고한 끝은 시간으로 치지 않는다 — 몰아 보내면 '약 1초 남음'이 나왔을 것. 칸은 세션 뿌리(셸 cd 로 안 움직임)에서 가장 가까운 scv 폴더를 따른다 — 이 세션에서 모드가 하위 폴더 기준으로 다시 시작돼 계획을 못 찾은 것을 확인함(다시 시작된 이유는 확인 못 함). 시험 틀에서는 시험용 도구 안에서 다시 도구를 부를 수 없어, 허락 기다림 시험은 실제 순서(허락 요청 → 도구 끝)로 썼다.
+- path delta: ① 저장소 우선 기록 · 한 번에 하나씩 · 단계 시간 계산(stepTimesFromSignals → stepDurationsFromSignals) · 세션 뿌리에서 scv 폴더 찾기를 더함. ② 계획대로(허락 기다림은 허락 요청 신호로, 알림은 휴대폰 길 추가). ③ 계획대로(그 사이 기준 시각에 그때 끝나 있던 단계도 함께 저장). ④ 계획대로(7일 한도는 90% 넘을 때만 초기화 날짜 표시).
+- refs: scv/promote/20261022-wookiya1364-scv-dashboard-step-signal/PLAN.md, scv/promote/20261022-wookiya1364-scv-dashboard-alerts/PLAN.md, scv/promote/20261022-wookiya1364-scv-dashboard-work-view/PLAN.md, scv/promote/20261022-wookiya1364-scv-dashboard-prompt-usage/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md

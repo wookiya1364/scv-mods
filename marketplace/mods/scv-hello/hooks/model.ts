@@ -1,7 +1,26 @@
 // Pure steps of the SCV dashboard: text in, values out, nothing read or written.
 // The hooks module reads the files and watches the session; these only shape what it saw.
 
-import type { Block, Dreams, PipelineStep, PlanFile, Plan, Stage, StageState, StepMark, StepSignal, Task, TestRow, TestRun, WorkEntry } from '../types'
+import type {
+  AgentState,
+  Block,
+  Dreams,
+  Permit,
+  PipelineStep,
+  PlanFile,
+  Plan,
+  Since,
+  Stage,
+  StageState,
+  StepMark,
+  StepSignal,
+  Stopped,
+  Task,
+  TestRow,
+  TestRun,
+  UsageLimit,
+  WorkEntry,
+} from '../types'
 
 const STATUS_ORDER = ['in_progress', 'testing', 'planned', 'done', 'archived']
 
@@ -152,7 +171,19 @@ export const runFor = (plan: Plan, runs: readonly TestRun[]): TestRun | undefine
 export const mergeTests = (plan: Plan, run: TestRun | undefined): TestRow[] =>
   plan.scenarios.map(scenario => ({ ...scenario, result: run?.byId[scenario.id] ?? 'none' }))
 
-export const findBlocks = (stages: readonly Stage[], run: TestRun | undefined, waiting: string | null): Block[] => [
+export const findBlocks = (
+  stages: readonly Stage[],
+  run: TestRun | undefined,
+  waiting: string | null,
+  permit: Permit | null = null,
+  stopped: Stopped | null = null,
+): Block[] => [
+  ...(stopped
+    ? [{ kind: 'stopped' as const, title: `멈춤 — ${stopped.why === 'error' ? '오류' : '거절'}`, detail: '대화창에서 다시 시키면 이어집니다' }]
+    : []),
+  ...(permit
+    ? [{ kind: 'permit' as const, title: `허락 기다림 — ${permit.tool}${permit.target ? `: ${permit.target}` : ''}`, detail: '대화창에서 허락하거나 거절하면 사라집니다' }]
+    : []),
   ...(waiting ? [{ kind: 'waiting' as const, title: '답을 기다리는 중', detail: waiting }] : []),
   ...(run && !run.isOk
     ? [{
@@ -266,6 +297,13 @@ export const estimateEta = (history: readonly StepTime[], slug: string, remainin
   return { kind: 'estimate' as const, ms: Math.round(average * remaining), basis: perStep.length }
 }
 
+// The folders from `dir` up to the root, nearest first: where to look for the project's scv folder.
+export const ancestorsOf = (dir: string): string[] => {
+  const parts = dir.split('/').filter(Boolean)
+
+  return [...parts.map((_, i) => `/${parts.slice(0, parts.length - i).join('/')}`), '/']
+}
+
 // ── step signals: Claude reports a step of the Suggested path; the mod keeps it in its own store ──
 
 export const STEP_TOOL = 'mcp__scv-hello__scv_step'
@@ -313,19 +351,46 @@ export const checkSignal = (input: SignalInput, plans: readonly Plan[], signals:
   return { isOk: true }
 }
 
-// The newest signal for a step replaces the one before it.
-export const applySignal = (signals: readonly StepSignal[], input: SignalInput, at: number): StepSignal[] => [
-  ...signals.filter(signal => !(signal.plan === input.plan && signal.step === input.step)),
-  { plan: input.plan, step: input.step, state: input.state as StepSignal['state'], note: input.note?.trim() ?? '', at },
-].slice(-300)
+// The newest signal for a step replaces the one before it; a step still open keeps the time it started.
+export const applySignal = (signals: readonly StepSignal[], input: SignalInput, at: number): StepSignal[] => {
+  const before = signals.find(signal => signal.plan === input.plan && signal.step === input.step)
+  const startedAt = before && before.state !== 'done' ? (before.startedAt ?? before.at) : undefined
 
-// When each step finished, as the times the ETA averages over: steps done by plan marks alone count first.
-export const stepTimesFromSignals = (signals: readonly StepSignal[], plan: Plan): StepTime[] => {
-  const done = signals.filter(signal => signal.plan === plan.slug && signal.state === 'done').sort((a, b) => a.at - b.at)
-  const signalled = new Set(done.map(signal => signal.step))
-  const base = plan.steps.filter((step, i) => step.mark === 'done' && !signalled.has(i + 1)).length
+  return [
+    ...signals.filter(signal => signal !== before),
+    {
+      plan: input.plan,
+      step: input.step,
+      state: input.state as StepSignal['state'],
+      note: input.note?.trim() ?? '',
+      at,
+      ...(startedAt !== undefined ? { startedAt } : {}),
+    },
+  ].slice(-300)
+}
 
-  return done.map((signal, i) => ({ slug: plan.slug, done: base + i + 1, at: signal.at }))
+// Steps reported done within this of each other were reported together; the gap says nothing of the work.
+const TOGETHER_MS = 30_000
+
+// How long each finished step took: from its start when one was reported, else from the step finished
+// before it — unless the two were reported together.
+export const stepDurationsFromSignals = (signals: readonly StepSignal[], slug: string): number[] => {
+  const done = signals.filter(signal => signal.plan === slug && signal.state === 'done').sort((a, b) => a.at - b.at)
+
+  return done.flatMap((signal, i) => {
+    if (signal.startedAt !== undefined) return signal.at > signal.startedAt ? [signal.at - signal.startedAt] : []
+    const before = done[i - 1]
+
+    return before && signal.at - before.at >= TOGETHER_MS ? [signal.at - before.at] : []
+  })
+}
+
+export const estimateFromDurations = (durations: readonly number[], remaining: number): ReturnType<typeof estimateEta> => {
+  if (remaining <= 0) return { kind: 'done' }
+  if (durations.length === 0) return { kind: 'unknown' }
+  const average = durations.reduce((sum, ms) => sum + ms, 0) / durations.length
+
+  return { kind: 'estimate', ms: Math.round(average * remaining), basis: durations.length }
 }
 
 // The few lines added to Claude's instructions, only while a plan is in progress.
@@ -340,6 +405,175 @@ export const buildStepPrompt = (plans: readonly Plan[], tool = STEP_TOOL): strin
     'If the tool is listed as deferred, load it with ToolSearch first.',
     `Open plans (scv/promote): ${open.map(plan => `${plan.slug} (${plan.steps.length} steps)`).join(', ')}.`,
   ].join(' ')
+}
+
+// ── alerts: the moments worth calling the person back for ──
+
+export const ALERT_AFTER_MS = 2 * 60_000
+
+// A subagent's or teammate's turn carries its loop's id; the main conversation's carries none.
+export const isMainLoop = (e: { agentId?: string }) => !e.agentId
+
+export type TurnEnd = { kind: 'none' } | { kind: 'done' } | { kind: 'stopped'; why: Stopped['why'] }
+
+// A long answer that finished is worth a call back, and so is a turn an error or a refusal stopped;
+// an interrupt is the person's own doing.
+export const classifyTurnEnd = (reason: string, durationMs: number, afterMs = ALERT_AFTER_MS): TurnEnd => {
+  if (reason === 'error' || reason === 'refusal') return { kind: 'stopped', why: reason }
+  if (reason === 'answer' && durationMs >= afterMs) return { kind: 'done' }
+
+  return { kind: 'none' }
+}
+
+export const permissionWaitOf = (tool: string, input: Record<string, unknown>, at: number): Permit => ({ tool, target: describeTool(tool, input), at })
+
+// One line of at most 200 characters, the most a phone notification shows.
+export const buildAlertText = (parts: readonly (string | null | undefined | false)[]) =>
+  shorten(parts.filter(Boolean).join(' · ').replace(/\s+/g, ' ').trim(), 200)
+
+// ── while the person was away: what happened since their last message, and who is working now ──
+
+export type AwayInput = {
+  slug: string
+  stages: readonly Stage[]
+  runs: readonly TestRun[]
+  waiting: string | null
+  permit: Permit | null
+  stopped: Stopped | null
+}
+
+export type AwayEvents = { steps: string[]; runs: TestRun[]; waits: string[] }
+
+// What happened after the last message: steps finished since (the plan on screen then), test runs since,
+// and whatever waits on the person now.
+export const eventsSince = (input: AwayInput, since: Since): AwayEvents => ({
+  steps:
+    input.slug === since.slug ? input.stages.filter((stage, i) => stage.state === 'done' && !since.doneSteps.includes(i)).map(stage => stage.name) : [],
+  runs: input.runs.filter(run => run.at > since.at),
+  waits: [
+    ...(input.stopped ? [input.stopped.why === 'error' ? '오류로 멈춤' : '거절로 멈춤'] : []),
+    ...(input.permit ? [`허락 기다림 — ${input.permit.tool}`] : []),
+    ...(input.waiting ? ['질문 1개 기다림'] : []),
+  ],
+})
+
+const describeRuns = (runs: readonly TestRun[]) => {
+  const failed = runs.filter(run => !run.isOk).length
+  if (failed === 0) return '모두 통과'
+  if (runs[runs.length - 1]?.isOk) return `실패 ${failed}번 뒤 통과`
+
+  return failed === runs.length ? '모두 실패' : `실패 ${failed}번 · 마지막 실패`
+}
+
+// At most three lines in plain words; nothing at all when nothing happened.
+export const summarizeAway = (events: AwayEvents, elapsedMs: number, format: (ms: number) => string): { title: string; lines: string[] } | null => {
+  const lines = [
+    events.steps.length > 0 ? shorten(`단계 ${events.steps.length}개 끝 — ${events.steps.join(', ')}`, 80) : null,
+    events.runs.length > 0 ? `시험 ${events.runs.length}번 — ${describeRuns(events.runs)}` : null,
+    events.waits.length > 0 ? events.waits.join(' · ') : null,
+  ].filter((line): line is string => line !== null)
+
+  return lines.length > 0 ? { title: `그 사이 · ${format(elapsedMs)}`, lines } : null
+}
+
+export type AgentEvent =
+  | { kind: 'start'; id: string; name: string; at: number }
+  | { kind: 'tool'; id: string; tool: string; target: string; at: number }
+  | { kind: 'end'; id: string }
+
+const agentNamed = (agents: readonly AgentState[], id: string, name: string, at: number): AgentState => ({
+  id,
+  name: shorten(name, 24) || `에이전트 ${agents.length + 1}`,
+  tool: '',
+  target: '',
+  at,
+})
+
+// An agent appears when it starts (or first uses a tool), moves with each tool it uses, and leaves when its run ends.
+export const applyAgentEvent = (agents: readonly AgentState[], event: AgentEvent): AgentState[] => {
+  if (event.kind === 'end') return agents.filter(agent => agent.id !== event.id)
+  const known = agents.find(agent => agent.id === event.id)
+  if (event.kind === 'start') {
+    if (!known) return [...agents, agentNamed(agents, event.id, event.name, event.at)]
+
+    return event.name ? agents.map(agent => (agent.id === event.id ? { ...agent, name: shorten(event.name, 24) } : agent)) : [...agents]
+  }
+  const moved = { ...(known ?? agentNamed(agents, event.id, '', event.at)), tool: event.tool, target: event.target, at: event.at }
+
+  return known ? agents.map(agent => (agent.id === event.id ? moved : agent)) : [...agents, moved]
+}
+
+// One line per agent, five at most, the rest counted.
+export const agentLines = (agents: readonly AgentState[], now: number, format: (ms: number) => string, max = 5): string[] => {
+  const lines = agents
+    .slice(0, max)
+    .map(agent => `${agent.name} · ${agent.tool ? `${agent.tool}${agent.target ? `: ${agent.target}` : ''}` : '준비 중'} · ${format(now - agent.at)}`)
+
+  return agents.length > max ? [...lines, `+${agents.length - max}개 더`] : lines
+}
+
+// ── the next command into the prompt box, and the usage limits ──
+
+export type PromptFill = { text: string; mode: 'replace' | 'append' }
+
+// An empty box takes the command; what the person already typed stays, the command after it.
+export const planPromptFill = (command: string, draft: string): PromptFill =>
+  draft.trim() === '' ? { text: command, mode: 'replace' } : { text: `${/\s$/.test(draft) ? '' : ' '}${command}`, mode: 'append' }
+
+// The dim suggestion after a turn: only when the next thing to do is a command.
+export const suggestNext = (action: NextAction): string | null => action.command
+
+const LIMIT_LABEL: Record<string, string> = { five_hour: '5시간', seven_day: '7일', spend_limit: '지출 한도' }
+
+const LIMIT_ORDER = ['five_hour', 'seven_day', 'spend_limit']
+
+// A reset time in the person's own clock: 'HH:MM', or 'M/D HH:MM' when it is days away.
+export const formatReset = (iso: string, offsetMinutes: number, withDate: boolean) => {
+  const local = new Date(Date.parse(iso) + offsetMinutes * 60_000)
+  const time = `${String(local.getUTCHours()).padStart(2, '0')}:${String(local.getUTCMinutes()).padStart(2, '0')}`
+
+  return withDate ? `${local.getUTCMonth() + 1}/${local.getUTCDate()} ${time}` : time
+}
+
+const percentOf = (limit: UsageLimit) => `${Math.round(limit.percentUsed * 10) / 10}%`
+
+// '5시간 72% · 17:40 초기화 · 7일 31%': the 5-hour reset always, a longer window's when it is nearly used up.
+export const usageLine = (limits: readonly UsageLimit[], offsetMinutes: number, nearlyAt = 90): string | null => {
+  if (limits.length === 0) return null
+  const ordered = [...limits].sort((a, b) => rankOf(a.kind) - rankOf(b.kind))
+
+  return ordered
+    .map(limit => {
+      const label = `${LIMIT_LABEL[limit.kind] ?? limit.kind} ${percentOf(limit)}`
+      const showReset = limit.resetsAt && (limit.kind === 'five_hour' || limit.percentUsed >= nearlyAt)
+
+      return showReset && limit.resetsAt ? `${label} · ${formatReset(limit.resetsAt, offsetMinutes, limit.kind !== 'five_hour')} 초기화` : label
+    })
+    .join(' · ')
+}
+
+const rankOf = (kind: string) => {
+  const at = LIMIT_ORDER.indexOf(kind)
+
+  return at < 0 ? LIMIT_ORDER.length : at
+}
+
+// Each window over the line is announced once until it resets: its kind and reset time are its name.
+export const usageAlerts = (
+  limits: readonly UsageLimit[],
+  alerted: readonly string[],
+  offsetMinutes: number,
+  threshold = 90,
+): { texts: string[]; alerted: string[] } => {
+  const due = limits.filter(limit => limit.percentUsed >= threshold && !alerted.includes(`${limit.kind}:${limit.resetsAt ?? ''}`))
+
+  return {
+    texts: due.map(
+      limit =>
+        `${LIMIT_LABEL[limit.kind] ?? limit.kind} 사용 한도 ${percentOf(limit)}${limit.resetsAt ? ` — ${formatReset(limit.resetsAt, offsetMinutes, limit.kind !== 'five_hour')} 초기화` : ''}`,
+    ),
+    alerted: [...alerted, ...due.map(limit => `${limit.kind}:${limit.resetsAt ?? ''}`)].slice(-20),
+  }
 }
 
 export const formatDuration = (ms: number) => {
@@ -419,6 +653,8 @@ export type NextAction = { text: string; command: string | null }
 // What the person can do next, and the command for it when there is one.
 export const nextAction = (slug: string, status: string, stages: readonly Stage[], blocks: readonly Block[]): NextAction => {
   const isAllDone = stages.length > 0 && stages.every(stage => stage.state === 'done')
+  if (blocks.some(block => block.kind === 'stopped')) return { text: '멈췄어요 — 대화창에서 다시 시키기', command: null }
+  if (blocks.some(block => block.kind === 'permit')) return { text: 'Claude가 허락을 기다려요 — 대화창에서 허락하기', command: null }
   if (blocks.some(block => block.kind === 'waiting')) return { text: 'Claude가 묻고 있어요 — 대화창에서 답하기', command: null }
   if (blocks.some(block => block.kind === 'test')) return { text: '시험 실패 — 고쳐서 다시 시험하기', command: `/scv:work ${slug}` }
   if (status === 'archived' || status === 'done') return { text: '끝난 계획 — 할 일 없음', command: null }

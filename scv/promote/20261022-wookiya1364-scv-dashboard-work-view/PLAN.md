@@ -3,7 +3,7 @@ title: SCV 칸 — 자리 비운 사이 요약과 에이전트별 줄
 slug: 20261022-wookiya1364-scv-dashboard-work-view
 author: wookiya1364
 created_at: 2026-10-23
-status: planned
+status: testing
 kind: feature
 lang: korean
 epic: 20261022-scv-dashboard-next
@@ -82,10 +82,10 @@ agentLines          // (에이전트 목록, 지금, 최대 5) → 줄들 + '+N�
 
 ## Suggested path
 
-1. 그 사이 요약 · 에이전트 목록 순수 함수 + 단위 시험 — `eventsSince` `summarizeAway` `applyAgentEvent` `agentLines`
-2. 메시지 시각 기록, 그 사이 카드 그리기 — `메시지·도구·차례 관찰` `그리기`
-3. 에이전트별 도구 기억, 진행 중 카드에 줄 — `applyAgentEvent` `agentLines`
-4. 자동 시험 · 검사 · (물어본 뒤) 올리기 · 맥 앱에서 확인
+1. [x] 그 사이 요약 · 에이전트 목록 순수 함수 + 단위 시험 — `eventsSince` `summarizeAway` `applyAgentEvent` `agentLines`
+2. [x] 메시지 시각 기록, 그 사이 카드 그리기 — `메시지·도구·차례 관찰` `그리기`
+3. [x] 에이전트별 도구 기억, 진행 중 카드에 줄 — `applyAgentEvent` `agentLines`
+4. [~] 자동 시험 · 검사 · (물어본 뒤) 올리기 · 맥 앱에서 확인
 
 ## Related Documents
 

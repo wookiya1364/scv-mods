@@ -1,24 +1,31 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Expanded, Live, Plan, PlanFile, Snapshot, StageState, StepSignal, TestRun, WorkEntry } from '../types'
+import type { AgentState, Expanded, Live, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepSignal, Stopped, TestRun, UsageLimit, WorkEntry } from '../types'
 import {
   STEP_TOOL,
+  agentLines,
+  ancestorsOf,
+  applyAgentEvent,
   applyBlocks,
   applySignal,
   applyTaskEvent,
   barColor,
+  buildAlertText,
   buildStepPrompt,
   checkSignal,
+  classifyTurnEnd,
   countStages,
   describeRole,
   nodeIconSvg,
   deriveStages,
   describeTool,
   estimateEta,
+  eventsSince,
   findBlocks,
   formatDuration,
   headline,
+  isMainLoop,
   isTestCommand,
   logWork,
   mergeMarks,
@@ -27,19 +34,26 @@ import {
   parseDreams,
   parsePlans,
   parseTestOutput,
+  permissionWaitOf,
   pickPlan,
+  planPromptFill,
   recordStepTimes,
   runFor,
   stageRole,
   statusWords,
-  stepTimesFromSignals,
+  suggestNext,
+  summarizeAway,
+  usageAlerts,
+  usageLine,
+  estimateFromDurations,
+  stepDurationsFromSignals,
 } from './model'
 
 const PANE = 'scv-hello'
 const TITLE = 'SCV'
 const REFRESH_MS = 3000
 
-const snapshot = atom({ plugin: 'scv-hello', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '' } as Snapshot)
+const snapshot = atom({ plugin: 'scv-hello', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '', root: '' } as Snapshot)
 const chosen = atom({ plugin: 'scv-hello', key: 'chosen' } as const, null as string | null)
 const expanded = atom({ plugin: 'scv-hello', key: 'expanded' } as const, { steps: false, tests: false, blocks: true, dreams: false } as Expanded)
 const runs = atom({ plugin: 'scv-hello', key: 'runs' } as const, [])
@@ -52,6 +66,11 @@ const note = atom({ plugin: 'scv-hello', key: 'note' } as const, null as string 
 const focusStep = atom({ plugin: 'scv-hello', key: 'focusStep' } as const, null as number | null)
 const stepLog = atom({ plugin: 'scv-hello', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
 const signals = atom({ plugin: 'scv-hello', key: 'signals' } as const, [] as StepSignal[])
+const permit = atom({ plugin: 'scv-hello', key: 'permit' } as const, null as Permit | null)
+const stopped = atom({ plugin: 'scv-hello', key: 'stopped' } as const, null as Stopped | null)
+const agents = atom({ plugin: 'scv-hello', key: 'agents' } as const, [] as AgentState[])
+const since = atom({ plugin: 'scv-hello', key: 'since' } as const, null as Since | null)
+const limits = atom({ plugin: 'scv-hello', key: 'limits' } as const, [] as UsageLimit[])
 
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
 const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○' }
@@ -80,9 +99,21 @@ const readPlans = async ($: Api, dir: string, isArchived: boolean): Promise<Plan
   return plans
 }
 
+// The project the pane follows: the nearest folder at or above the working folder that holds an scv folder,
+// as SCV itself finds it — so a session that moved into a subfolder still sees its plans. Else the folder itself.
+const projectOf = async ($: Api, cwd: string) => {
+  if (!cwd.startsWith('/')) return cwd
+  for (const dir of ancestorsOf(cwd)) {
+    const entries = await $.fs.list(dir).catch(() => [])
+    if (entries.some(entry => entry.name === 'scv' && entry.kind === 'dir')) return dir
+  }
+
+  return cwd
+}
+
 // The entry of the pipeline: the session's SCV files, read and never written.
 // With no plan in progress, the plans already archived stand in, newest first.
-const readSources = async ($: Api, cwd: string): Promise<Snapshot> => {
+const readSources = async ($: Api, cwd: string): Promise<Omit<Snapshot, 'root'>> => {
   const scv = cwd ? `${cwd}/scv` : 'scv'
   const active = await readPlans($, `${scv}/promote`, false)
   const plans = active.length > 0 ? active : (await readPlans($, `${scv}/archive`, true)).sort((a, b) => b.slug.localeCompare(a.slug))
@@ -107,18 +138,60 @@ const planInView = async ($: Api): Promise<Plan | undefined> => {
   return plan && mergeMarks(plan, await read($, signals))
 }
 
+// The session's root does not move with a shell `cd`, only with /cd or the host; the project is looked up again then.
+const sessionRoot = async ($: Api, fallback: string) => (await $.session.root().catch(() => '')) || fallback
+
+const loadRuns = async ($: Api, project: string) => {
+  const kept = await $.store.get(runsKey(project)).catch(() => undefined)
+  await update($, runs, () => (Array.isArray(kept) ? (kept as TestRun[]) : []))
+}
+
 const refresh = async ($: Api) => {
   const at = await $.clock.now()
   const current = await read($, snapshot)
-  const next = await readSources($, current.cwd)
+  const root = await sessionRoot($, current.root)
+  const project = root === current.root && current.cwd ? current.cwd : await projectOf($, root)
+  if (current.cwd && project !== current.cwd) await loadRuns($, project)
+  const next = { ...(await readSources($, project)), root }
   await update($, snapshot, () => next)
   await update($, now, () => at)
   await loadSignals($, next.cwd)
+  await checkUsage($, at)
   const plan = await planInView($)
   if (plan) {
     const done = countStages(deriveStages(plan).stages).done
     await update($, history, list => recordStepTimes(list, plan.slug, done, at))
   }
+}
+
+// Notes the next-action buttons leave (copied, put in the prompt box) show under them; others are errors.
+const isActionNote = (message: string) => message.startsWith('복사') || message.startsWith('입력창')
+
+// The person's minutes ahead of UTC, so a reset time reads in their own clock.
+const offsetAt = (at: number) => -new Date(at).getTimezoneOffset()
+
+// The usage windows, read each refresh (free without a breakdown); a window past 90% is announced once.
+const checkUsage = async ($: Api, at: number) => {
+  const usage = await $.session.usage().catch(() => undefined)
+  const windows: UsageLimit[] = (usage?.rateLimits ?? []).map(limit => ({ kind: limit.kind, percentUsed: limit.percentUsed, ...(limit.resetsAt ? { resetsAt: limit.resetsAt } : {}) }))
+  await update($, limits, () => windows)
+  if (!windows.some(limit => limit.percentUsed >= 90)) return
+  const kept = await $.store.get('usageAlerted').catch(() => undefined)
+  const due = usageAlerts(windows, Array.isArray(kept) ? (kept as string[]) : [], offsetAt(at))
+  if (due.texts.length === 0) return
+  await $.store.set('usageAlerted', due.alerted).catch(() => undefined)
+  for (const text of due.texts) await alert($, text)
+}
+
+// What the person can do next on the plan in view, as the pane says it.
+const actionInView = async ($: Api) => {
+  const plan = await planInView($)
+  if (!plan) return null
+  const derived = deriveStages(plan)
+  const run = runFor(plan, await read($, runs))
+  const blocks = findBlocks(derived.stages, run, await read($, waiting), await read($, permit), await read($, stopped))
+
+  return nextAction(plan.slug, plan.status, applyBlocks(derived.stages, blocks), blocks)
 }
 
 const STATE_WORD = { doing: '시작', done: '끝', blocked: '막힘' } as const
@@ -143,34 +216,49 @@ const STEP_TOOL_SPEC = {
   },
 }
 
-// One alert per event: the host's notification, else the system's own (the desktop app has no terminal to ring), and a toast.
+// One alert per event: the host's notification, else the system's own (the desktop app has no terminal to ring),
+// then Claude's own notification tool, which reaches the phone while Remote Control is connected and skips itself
+// when the person is at the screen, and a toast. A way that fails leaves the others to go.
 const alert = async ($: Api, text: string) => {
-  const sent = await $.ui.notify(text, { title: 'SCV' }).catch(() => undefined)
+  const line = buildAlertText([text])
+  const sent = await $.ui.notify(line, { title: 'SCV' }).catch(() => undefined)
   if (!sent?.isSent) {
     for (const argv of [
-      ['osascript', '-e', `display notification ${JSON.stringify(text)} with title "SCV"`],
-      ['notify-send', 'SCV', text],
+      ['osascript', '-e', `display notification ${JSON.stringify(line)} with title "SCV"`],
+      ['notify-send', 'SCV', line],
     ]) {
       const ran = await $.process.run(argv).catch(() => undefined)
       if (ran?.exitCode === 0) break
     }
   }
   try {
-    await $.ui.toast(`SCV: ${text}`)
+    await $.tool.call({ tool: 'PushNotification', message: buildAlertText([`SCV: ${line}`]), status: 'proactive' })
+  } catch {
+    // no such tool in this session, or it declined: the computer has been told
+  }
+  try {
+    await $.ui.toast(`SCV: ${line}`)
   } catch {
     // a toast is a courtesy; the alert has been raised
   }
 }
+
+// Calls the mod makes itself (its phone notification) are not the work it watches.
+const OWN_TOOLS = new Set<string>([STEP_TOOL, 'PushNotification'])
+
+const isOwnCall = (origin: { plugin: string }) => origin.plugin === 'scv-hello' || origin.plugin.startsWith('scv-hello@')
 
 const openPane = ($: Api) => $.ui.open({ id: PANE, title: TITLE })
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
-    await update($, snapshot, value => ({ ...value, cwd: e.cwd }))
-    const kept = await $.store.get(runsKey(e.cwd)).catch(() => undefined)
+    const root = await sessionRoot($, e.cwd)
+    const project = await projectOf($, root)
+    await update($, snapshot, value => ({ ...value, cwd: project, root }))
+    const kept = await $.store.get(runsKey(project)).catch(() => undefined)
     if (Array.isArray(kept)) await update($, runs, () => kept as TestRun[])
-    await loadSignals($, e.cwd)
+    await loadSignals($, project)
     await $.command.register({ name: 'scv-hello', description: 'Open the SCV dashboard pane' })
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     await refresh($)
@@ -182,6 +270,14 @@ export const register: Register = on => {
 
   on('prompt.submit', async ($, e, next) => {
     const submitted = await next(e)
+    // The person's own message (not one a plugin sent) starts a new 'while you were away'.
+    const origin = (e as { origin?: { kind?: string } }).origin
+    if (origin?.kind !== 'plugin' && !e.isMeta) {
+      const plan = await planInView($)
+      const at = await $.clock.now()
+      const doneSteps = plan ? deriveStages(plan).stages.flatMap((stage, i) => (stage.state === 'done' ? [i] : [])) : []
+      await update($, since, () => ({ at, slug: plan?.slug ?? '', doneSteps }))
+    }
     const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
     if (!isOpen) await openPane($)
 
@@ -194,18 +290,78 @@ export const register: Register = on => {
     return { text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}.` }
   })
 
+  // Only the main conversation's turns move 'working / resting'; a subagent's run is a turn of its own loop.
   on('turn.start', async ($, e, next) => {
+    if (!isMainLoop(e)) {
+      const at = await $.clock.now()
+      await update($, agents, list => applyAgentEvent(list, { kind: 'start', id: e.agentId ?? '', name: '', at }))
+
+      return next(e)
+    }
     const at = await $.clock.now()
     await update($, live, value => ({ ...value, isWorking: true, turnStartedAt: at }))
+    await update($, stopped, () => null)
+    await update($, permit, () => null)
 
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
-    await update($, live, value => ({ ...value, isWorking: false, tool: null }))
+    const ended = await next(e)
+    if (!isMainLoop(e)) {
+      await update($, agents, list => applyAgentEvent(list, { kind: 'end', id: e.agentId ?? '' }))
 
-    return next(e)
+      return ended
+    }
+    await update($, live, value => ({ ...value, isWorking: false, tool: null }))
+    await update($, permit, () => null)
+    const end = classifyTurnEnd(e.reason, e.durationMs)
+    if (end.kind === 'stopped') {
+      const at = await $.clock.now()
+      await update($, stopped, () => ({ why: end.why, at }))
+      await alert($, buildAlertText([end.why === 'error' ? '오류로 멈춤' : '거절로 멈춤', formatDuration(e.durationMs)]))
+    }
+    if (e.reason === 'answer') {
+      const action = await actionInView($)
+      const command = action ? suggestNext(action) : null
+      if (command) await $.prompt.suggest({ text: command }).catch(() => undefined)
+    }
+    if (end.kind === 'done') {
+      const plan = await planInView($)
+      const count = plan ? countStages(deriveStages(plan).stages) : undefined
+      await alert($, buildAlertText(['끝났어요', formatDuration(e.durationMs), plan && count ? `${plan.title} ${count.done}/${count.total}` : null]))
+    }
+
+    return ended
   })
+
+  // A permission prompt about to be shown: the work waits on the person. A settings hook that answered
+  // it means no prompt; the mod's own phone notification never asks the person about itself.
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const answered = await next(e)
+    if (answered?.decision || OWN_TOOLS.has(e.tool_name)) return answered
+    const input = (e.tool_input ?? {}) as Record<string, unknown>
+    const waitingFor = permissionWaitOf(e.tool_name, input, await $.clock.now())
+    await update($, permit, () => waitingFor)
+    await alert($, buildAlertText([`허락 기다림 — ${waitingFor.tool}${waitingFor.target ? `: ${waitingFor.target}` : ''}`]))
+
+    return answered
+  })
+
+  // A subagent that started: named by the task it was given.
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (!started.deny && started.agentId) {
+      const id = started.agentId
+      const at = await $.clock.now()
+      await update($, agents, list => applyAgentEvent(list, { kind: 'start', id, name: e.description || e.subagentType, at }))
+    }
+
+    return started
+  })
+
+  // The mod's own phone notification asks no permission; the person's calls to it are judged as ever.
+  on('tool.check', { tool: 'PushNotification' }, ($, e, next) => (isOwnCall(next.origin) ? { decision: 'allow' as const } : next(e)))
 
   // Claude's instructions carry the step signal only while a plan is in progress.
   on('prompt.compose', async ($, e, next) => {
@@ -218,7 +374,16 @@ export const register: Register = on => {
   // The mod's own tool asks no permission; every other tool's verdict is left as it is.
   on('tool.check', { tool: STEP_TOOL_NAME }, () => ({ decision: 'allow' as const }))
 
-  on('tool.call', { tool: STEP_TOOL_NAME }, async ($, e) => {
+  // Signals are written one at a time, so two sent together cannot both build on the same old record.
+  let signalQueue: Promise<unknown> = Promise.resolve()
+  const oneAtATime = <T,>(work: () => Promise<T>): Promise<T> => {
+    const run = signalQueue.then(work, work)
+    signalQueue = run.catch(() => undefined)
+
+    return run
+  }
+
+  on('tool.call', { tool: STEP_TOOL_NAME }, ($, e) => oneAtATime(async () => {
     const input = e as unknown as Record<string, unknown>
     const asked = {
       plan: typeof input.plan === 'string' ? input.plan : '',
@@ -244,14 +409,20 @@ export const register: Register = on => {
     return {
       result: `기록함: ${asked.plan} ${asked.step}단계 ${STATE_WORD[asked.state as keyof typeof STATE_WORD]}${count ? ` — 진행 ${count.done}/${count.total}` : ''}`,
     }
-  })
+  }))
 
   on('tool.call', async ($, e, next) => {
-    if ((e.tool as string) === STEP_TOOL) return next(e)
+    if (OWN_TOOLS.has(e.tool)) return next(e)
     const input = e as unknown as Record<string, unknown>
     const at = await $.clock.now()
-    await update($, live, value => ({ ...value, tool: { name: e.tool, target: describeTool(e.tool, input), startedAt: at } }))
-    await update($, tasks, list => applyTaskEvent(list, e.tool, input))
+    // The main conversation's tool is the 'now' line; a subagent's goes on that agent's own line.
+    const isMain = isMainLoop(e)
+    if (isMain) {
+      await update($, live, value => ({ ...value, tool: { name: e.tool, target: describeTool(e.tool, input), startedAt: at } }))
+      await update($, tasks, list => applyTaskEvent(list, e.tool, input))
+    } else {
+      await update($, agents, list => applyAgentEvent(list, { kind: 'tool', id: e.agentId ?? '', tool: e.tool, target: describeTool(e.tool, input), at }))
+    }
     const plan = await planInView($)
     const current = plan ? deriveStages(plan).stages.findIndex(stage => stage.state === 'doing') : -1
     if (plan && current >= 0) {
@@ -286,7 +457,9 @@ export const register: Register = on => {
       return ran
     } finally {
       if (e.tool === 'AskUserQuestion') await update($, waiting, () => null)
-      await update($, live, value => (value.tool?.startedAt === at ? { ...value, tool: null } : value))
+      // allowed and run, or refused: either way the prompt is gone
+      await update($, permit, value => (value?.tool === e.tool ? null : value))
+      if (isMain) await update($, live, value => (value.tool?.startedAt === at ? { ...value, tool: null } : value))
     }
   })
 
@@ -305,10 +478,24 @@ export const register: Register = on => {
     const state = await read($, live)
     const todo = await read($, tasks)
     const asked = await read($, waiting)
+    const asking = await read($, permit)
+    const halted = await read($, stopped)
+    const sinceAt = await read($, since)
+    const team = await read($, agents)
+    const allRuns = await read($, runs)
     const dreams = parseDreams(shot.dreamsText)
     const message = await read($, note)
 
     const toggle = (key: keyof Expanded) => () => void update($, expanded, value => ({ ...value, [key]: !value[key] }))
+
+    // The next command into the prompt box, keeping what the person typed; where the box will not take it, copied.
+    const fillNext = async (command: string) => {
+      const box = await $.prompt.read().catch(() => ({ text: '', cursor: 0 }))
+      const filled = await $.prompt.fill(planPromptFill(command, box.text)).catch(() => ({ isFilled: false }))
+      if (filled.isFilled) return void (await update($, note, () => `입력창에 넣음: ${command}`))
+      const copied = await $.ui.copy({ text: command, surface: e.surface }).catch(() => ({ isCopied: false }))
+      await update($, note, () => (copied.isCopied ? `입력창에 못 넣어 복사함: ${command}` : `입력창에 못 넣음 — ${command}`))
+    }
 
     const openReport = async () => {
       const path = dreams?.reportPath
@@ -340,23 +527,35 @@ export const register: Register = on => {
 
     const derived = deriveStages(plan)
     const isEstimated = derived.isEstimated
-    const run = runFor(plan, await read($, runs))
+    const run = runFor(plan, allRuns)
     const rows = mergeTests(plan, run)
-    const blocks = findBlocks(derived.stages, run, asked)
+    const blocks = findBlocks(derived.stages, run, asked, asking, halted)
     const stages = applyBlocks(derived.stages, blocks)
     const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked')
     const focused = (await read($, focusStep)) ?? (here >= 0 ? here : null)
     const focusedStage = focused === null ? undefined : stages[focused]
     const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
     const count = countStages(stages)
-    // Step times from Claude's signals survive a new session; the times seen here are the fallback.
-    const signalTimes = picked ? stepTimesFromSignals(reported, picked) : []
-    const eta = estimateEta(signalTimes.length >= 2 ? signalTimes : await read($, history), plan.slug, count.total - count.done)
+    // Step times from Claude's signals survive a new session; the times seen in this session are the fallback.
+    const durations = stepDurationsFromSignals(reported, plan.slug)
+    const eta =
+      durations.length > 0
+        ? estimateFromDurations(durations, count.total - count.done)
+        : estimateEta(await read($, history), plan.slug, count.total - count.done)
     const action = nextAction(plan.slug, plan.status, stages, blocks)
     const percent = count.total ? Math.round((count.done / count.total) * 100) : 0
     const current = stages.find(stage => stage.state === 'doing' || stage.state === 'blocked')
     const doneTasks = todo.filter(task => task.status === 'completed').length
     const doingTask = todo.find(task => task.status === 'in_progress')
+    const away = sinceAt
+      ? summarizeAway(
+          eventsSince({ slug: plan.slug, stages, runs: allRuns, waiting: asked, permit: asking, stopped: halted }, sinceAt),
+          at - sinceAt.at,
+          formatDuration,
+        )
+      : null
+    const agentRows = agentLines(team, at, formatDuration)
+    const usage = usageLine(await read($, limits), offsetAt(at))
 
     function dreamsPart() {
       return card(
@@ -371,7 +570,7 @@ export const register: Register = on => {
                 <Button key="dreams-toggle" label={open.dreams ? '개선점 접기' : '개선점 펼치기'} onPress={toggle('dreams')} />
                 {dreams.reportPath && <Button key="dreams-report" label="보고서 열기" onPress={() => void openReport()} />}
               </Box>
-              {message && !message.startsWith('복사') && <Text color="#f85149">{message}</Text>}
+              {message && !isActionNote(message) && <Text color="#f85149">{message}</Text>}
             </>
           ) : (
             <Text dimColor>아직 드림 없음 — /scv:dreams 로 만들 수 있습니다.</Text>
@@ -400,21 +599,35 @@ export const register: Register = on => {
             <Box flexDirection="row" justifyContent="space-between" alignItems="center">
               <Text color={action.command ? STATE_COLOR.doing : '#8b949e'}>{`다음: ${action.text}`}</Text>
               {action.command ? (
-                <Button
-                  key="next-copy"
-                  label="명령 복사"
-                  onPress={() =>
-                    void $.ui.copy({ text: action.command ?? '', surface: e.surface }).then(copied =>
-                      update($, note, () => (copied.isCopied ? `복사함: ${action.command}` : `복사 못 함 — ${action.command}`)),
-                    )
-                  }
-                />
+                <Box flexDirection="row" gap={1}>
+                  <Button key="next-fill" label="입력창에 넣기" onPress={() => void fillNext(action.command ?? '')} />
+                  <Button
+                    key="next-copy"
+                    label="명령 복사"
+                    onPress={() =>
+                      void $.ui.copy({ text: action.command ?? '', surface: e.surface }).then(copied =>
+                        update($, note, () => (copied.isCopied ? `복사함: ${action.command}` : `복사 못 함 — ${action.command}`)),
+                      )
+                    }
+                  />
+                </Box>
               ) : null}
             </Box>
-            {message && message.startsWith('복사') ? <Text dimColor>{message}</Text> : null}
+            {message && isActionNote(message) ? <Text dimColor>{message}</Text> : null}
           </>,
           barColor(stages, blocks),
         )}
+
+        {away
+          ? card(
+              <>
+                <Text bold>{away.title}</Text>
+                {away.lines.map(line => (
+                  <Text>{line}</Text>
+                ))}
+              </>,
+            )
+          : null}
 
         {card(
           <>
@@ -439,8 +652,12 @@ export const register: Register = on => {
           <>
             <Box flexDirection="row" justifyContent="space-between">
               <Text bold>진행 중</Text>
-              <Text color={state.isWorking ? '#4f8cff' : '#8b949e'}>
-                {state.isWorking ? `일하는 중 · ${formatDuration(at - state.turnStartedAt)}` : '쉬는 중'}
+              <Text color={halted ? STATE_COLOR.blocked : state.isWorking ? '#4f8cff' : '#8b949e'}>
+                {halted
+                  ? `멈춤 — ${halted.why === 'error' ? '오류' : '거절'}`
+                  : state.isWorking
+                    ? `일하는 중 · ${formatDuration(at - state.turnStartedAt)}`
+                    : '쉬는 중'}
               </Text>
             </Box>
             <Text>{current ? `단계: ${current.name}` : '진행 중인 단계 없음'}</Text>
@@ -451,6 +668,15 @@ export const register: Register = on => {
             ) : null}
             {todo.length > 0 ? (
               <Text dimColor>{`할 일 ${doneTasks}/${todo.length}${doingTask ? ` · ${doingTask.subject}` : ''}`}</Text>
+            ) : null}
+            {agentRows.map(line => (
+              <Text dimColor>{`└ ${line}`}</Text>
+            ))}
+            {usage ? (
+              <Box flexDirection="row" gap={1}>
+                <Text bold>사용 한도</Text>
+                <Text dimColor>{usage}</Text>
+              </Box>
             ) : null}
           </>,
           '#4f8cff',

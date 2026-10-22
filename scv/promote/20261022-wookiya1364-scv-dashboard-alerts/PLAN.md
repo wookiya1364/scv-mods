@@ -3,7 +3,7 @@ title: SCV 칸 — 끝·오류·허락 기다림 알림과 휴대폰 알림
 slug: 20261022-wookiya1364-scv-dashboard-alerts
 author: wookiya1364
 created_at: 2026-10-23
-status: planned
+status: testing
 kind: feature
 lang: korean
 epic: 20261022-scv-dashboard-next
@@ -85,11 +85,11 @@ permissionWaitOf     // (허락 요청 도구, 입력, 시각) → 허락 기다
 
 ## Suggested path
 
-1. 차례 구분 · 끝 분류 · 허락 기다림 · 알림 문구 순수 함수 + 단위 시험 — `isMainLoop` `classifyTurnEnd` `permissionWaitOf` `buildAlertText`
-2. 메인 차례만 '일하는 중/쉬는 중'에 반영, 끝·멈춤 알림 — `차례·허락 관찰` `classifyTurnEnd`
-3. 허락 기다림 기록 · 표시 · 지우기 — `permissionWaitOf` `findBlocks`
-4. 알림에 Claude 자체 알림 도구 길 더하기 — `알리기 · 그리기`
-5. 자동 시험 · 검사 · (물어본 뒤) 올리기 · 맥 앱과 휴대폰에서 확인
+1. [x] 차례 구분 · 끝 분류 · 허락 기다림 · 알림 문구 순수 함수 + 단위 시험 — `isMainLoop` `classifyTurnEnd` `permissionWaitOf` `buildAlertText`
+2. [x] 메인 차례만 '일하는 중/쉬는 중'에 반영, 끝·멈춤 알림 — `차례·허락 관찰` `classifyTurnEnd`
+3. [x] 허락 기다림 기록 · 표시 · 지우기 — `permissionWaitOf` `findBlocks`
+4. [x] 알림에 Claude 자체 알림 도구 길 더하기 — `알리기 · 그리기`
+5. [~] 자동 시험 · 검사 · (물어본 뒤) 올리기 · 맥 앱과 휴대폰에서 확인
 
 ## Related Documents
 
