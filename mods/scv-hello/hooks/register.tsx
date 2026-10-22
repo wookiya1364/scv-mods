@@ -6,6 +6,7 @@ import {
   applyBlocks,
   applyTaskEvent,
   countStages,
+  describeRole,
   deriveStages,
   describeTool,
   estimateEta,
@@ -20,8 +21,6 @@ import {
   pickPlan,
   recordStepTimes,
   runFor,
-  stageGraphAlt,
-  stageGraphSvg,
   stageRole,
 } from './model'
 
@@ -43,7 +42,7 @@ const focusStep = atom({ plugin: 'scv-hello', key: 'focusStep' } as const, null 
 const stepLog = atom({ plugin: 'scv-hello', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
 
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
-const STATE_MARK: Record<StageState, string> = { done: '✓', doing: '▶', blocked: '⛔', waiting: '○' }
+const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○' }
 const STATE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#8b949e' }
 const RESULT_LABEL = { pass: '통과', fail: '실패', none: '결과 없음' } as const
 const RESULT_COLOR = { pass: '#3fb950', fail: '#f85149', none: '#8b949e' } as const
@@ -162,7 +161,6 @@ export const register: Register = on => {
     const elements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
     const Select = 'Select' in elements ? elements.Select : undefined
-    const Svg = 'Svg' in elements ? elements.Svg : undefined
     const shot = await read($, snapshot)
     const plans = parsePlans(shot.plans)
     const plan = pickPlan(plans, await read($, chosen))
@@ -320,37 +318,32 @@ export const register: Register = on => {
             <Box flexDirection="row" justifyContent="space-between">
               <Text bold>단계 흐름{isEstimated ? ' (추정)' : ''}</Text>
             </Box>
-            {Svg ? (
-              <Svg source={stageGraphSvg(stages)} alt={stageGraphAlt(stages)} isInteractive />
-            ) : (
-              <Box flexDirection="row" flexWrap="wrap" gap={1}>
-                {stages.map(stage => <Text color={STATE_COLOR[stage.state]}>{STATE_MARK[stage.state]}</Text>)}
-              </Box>
-            )}
-            <Text dimColor>{`완료 ${count.done} · 진행 ${count.doing} · 막힘 ${count.blocked} · 대기 ${count.waiting}`}</Text>
-            <Box flexDirection="row" flexWrap="wrap" gap={1}>
+            <Box flexDirection="column">
               {stages.map((stage, i) => (
-                <Button
-                  key={`step-${i + 1}`}
-                  label={`${i + 1}`}
-                  variant={i === focused ? 'primary' : 'secondary'}
-                  onPress={() => void update($, focusStep, value => (value === i ? null : i))}
-                />
+                <Box flexDirection="column">
+                  <Box backgroundColor={i === focused ? '#1f242c' : undefined}>
+                    <Button key={`step-${i + 1}`} plain onPress={() => void update($, focusStep, value => (value === i ? null : i))}>
+                      <Text color={STATE_COLOR[stage.state]}>{STATE_MARK[stage.state]}</Text>
+                      <Text color={stage.state === 'waiting' ? '#8b949e' : undefined}>{` ${i + 1}. ${stage.name} `}</Text>
+                      <Text color={STATE_COLOR[stage.state]}>{STATE_LABEL[stage.state]}</Text>
+                      {i === here ? <Text bold color={STATE_COLOR[stage.state]}>{'  ◀ 지금 여기'}</Text> : null}
+                    </Button>
+                  </Box>
+                  {i < stages.length - 1 ? (
+                    <Text color={stage.state === 'done' ? STATE_COLOR.done : '#6e7681'}>{stage.state === 'done' ? '│' : '┆'}</Text>
+                  ) : null}
+                </Box>
               ))}
             </Box>
+            <Text dimColor>{`완료 ${count.done} · 진행 ${count.doing} · 막힘 ${count.blocked} · 대기 ${count.waiting} — 단계를 누르면 자세히`}</Text>
             {focusedStage && focused !== null ? (
               <Box flexDirection="column" borderStyle="round" borderColor={STATE_COLOR[focusedStage.state]} paddingX={1} marginTop={1}>
                 <Text bold color={STATE_COLOR[focusedStage.state]}>{`${focused + 1}. ${focusedStage.name} — ${STATE_LABEL[focusedStage.state]}`}</Text>
-                <Text bold>만드는 역할</Text>
+                <Text bold>하는 일</Text>
                 {stageRole(focusedStage, plan.pipeline).length > 0 ? (
-                  stageRole(focusedStage, plan.pipeline).map(role => (
-                    <>
-                      <Text>{`${role.name} — ${role.kind}`}</Text>
-                      <Text dimColor>{`  ${role.io}`}</Text>
-                    </>
-                  ))
+                  stageRole(focusedStage, plan.pipeline).map(role => <Text>{`• ${describeRole(role)}`}</Text>)
                 ) : (
-                  <Text dimColor>계획서 파이프라인 표에서 이 단계와 이어진 역할을 찾지 못했습니다.</Text>
+                  <Text dimColor>계획서 파이프라인 표에서 이 단계가 하는 일을 찾지 못했습니다.</Text>
                 )}
                 <Text bold>이 단계에서 한 일</Text>
                 {work.length > 0 ? (

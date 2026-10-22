@@ -2,7 +2,7 @@ export type StageState = 'done' | 'doing' | 'blocked' | 'waiting'
 
 export type StepMark = { name: string; mark: StageState | undefined; refs: string[] }
 
-export type PipelineStep = { name: string; io: string; kind: string }
+export type PipelineStep = { name: string; role: string; io: string; kind: string }
 
 export type PlanFile = { slug: string; planText: string; testsText: string }
 
