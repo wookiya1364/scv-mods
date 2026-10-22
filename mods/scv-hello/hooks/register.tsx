@@ -39,7 +39,7 @@ const note = atom({ plugin: 'scv-hello', key: 'note' } as const, null as string 
 
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행', blocked: '막힘', waiting: '대기' }
 const STATE_MARK: Record<StageState, string> = { done: '✓', doing: '▶', blocked: '⛔', waiting: '○' }
-const STATE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#4f8cff', blocked: '#f85149', waiting: '#8b949e' }
+const STATE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#8b949e' }
 const RESULT_LABEL = { pass: '통과', fail: '실패', none: '결과 없음' } as const
 const RESULT_COLOR = { pass: '#3fb950', fail: '#f85149', none: '#8b949e' } as const
 
