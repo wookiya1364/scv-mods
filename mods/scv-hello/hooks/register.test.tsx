@@ -242,6 +242,16 @@ test('progress T10 프로젝트 파일을 쓰지 않는다', async ($, on) => {
   expect(writes).toEqual([])
 })
 
+test('progress T11 계획이 없으면 확인한 폴더 경로를 보여 준다', async ($, on) => {
+  engine(on, {})
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /진행 중인 SCV 계획이 없습니다/)).toContain('계획이 없습니다')
+  expect(await text(ui, /^확인한 곳/)).toBe('확인한 곳: /work/scv/promote')
+  await ui.unmount()
+})
+
 // ── live plan ────────────────────────────────────────────────────────────────
 
 test('live T1 진행 중 카드에 지금 단계 이름 + 도구 + 대상 파일', async ($, on) => {
