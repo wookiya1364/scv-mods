@@ -132,7 +132,7 @@ test('progress T2b 단계 흐름 그래프 — 노드가 선으로 이어지고 
   expect((svg.match(/<circle [^>]*r="12"/g) ?? []).length).toBe(3)
   expect((svg.match(/<line /g) ?? []).length).toBe(2)
   expect(svg).toContain('#3fb950')
-  expect(svg).toContain('#4f8cff')
+  expect(svg).toContain('#e3b341')
   expect(svg).toContain('stroke-dasharray')
   expect((svg.match(/지금 여기/g) ?? []).length).toBe(1)
   expect(svg.indexOf('지금 여기')).toBeGreaterThan(svg.indexOf('2. 화면 만들기'))

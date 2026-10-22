@@ -244,7 +244,7 @@ export const parseDreams = (text: string | null): Dreams | undefined => {
   }
 }
 
-const GRAPH_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#4f8cff', blocked: '#f85149', waiting: '#6e7681' }
+const GRAPH_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#6e7681' }
 const GRAPH_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
 
 const escapeXml = (text: string) =>
