@@ -59,6 +59,7 @@ const engine = (
   files: Files,
   dreams: string | null = DREAMS,
   clock = { at: 1_000_000 },
+  archived: Files = {},
 ) => {
   const opened: string[] = []
   const panes: { id: string }[] = []
@@ -77,12 +78,12 @@ const engine = (
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('clock.now', () => ({ value: clock.at }))
   on('clock.every', () => ({ value: undefined }))
-  on('fs.list', () => ({
-    value: Object.keys(files).map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
+  on('fs.list', (_, e) => ({
+    value: Object.keys(e.path.endsWith('scv/archive') ? archived : files).map(name => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })),
   }))
   on('fs.read', (_, e) => {
-    const [, slug, file] = e.path.match(/scv\/promote\/([^/]+)\/(PLAN|TESTS)\.md$/) ?? []
-    const found = slug ? files[slug] : undefined
+    const [, where, slug, file] = e.path.match(/scv\/(promote|archive)\/([^/]+)\/(PLAN|TESTS)\.md$/) ?? []
+    const found = slug ? (where === 'archive' ? archived : files)[slug] : undefined
     if (found) return { value: file === 'PLAN' ? found.planText : found.testsText }
     if (e.path.endsWith('scv/dreams/latest.json') && dreams) return { value: dreams }
     return { deny: `ENOENT ${e.path}` }
@@ -412,6 +413,23 @@ test('progress T15 진행률 막대도 신호등 색', () => {
   expect(barColor([st2('done'), st2('done')], [])).toBe('#3fb950')
   expect(barColor([st2('done'), st2('doing')], [])).toBe('#e3b341')
   expect(barColor([st2('doing')], [{ kind: 'test', title: '', detail: '' }])).toBe('#f85149')
+})
+
+test('progress T16 진행 중 계획이 없으면 최근 보관한 계획을 끝난 계획으로 보여 준다', async ($, on) => {
+  engine(on, {}, DREAMS, { at: 1_000_000 }, {
+    '20261020-old': plan({ title: '예전 계획', status: 'done', steps: ['[x] a'] }),
+    '20261022-new': plan({ title: '최근 계획', status: 'done', steps: ['[x] a', '[x] b'] }),
+  })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /최근 끝난 계획/)).toBe('진행 중인 계획이 없어 최근 끝난 계획을 보여 줍니다.')
+  expect((await ui.find({ type: 'Select', key: 'plan' }))?.props.value).toBe('20261022-new')
+  expect(await text(ui, /^상태: /)).toBe('상태: 보관됨')
+  expect(await text(ui, /^2\/2$/)).toBe('2/2')
+  expect(await text(ui, /^다음: /)).toBe('다음: 끝난 계획 — 할 일 없음')
+  expect(await text(ui, /계획이 없습니다/)).toBeUndefined()
+  await ui.unmount()
 })
 
 // ── live plan ────────────────────────────────────────────────────────────────

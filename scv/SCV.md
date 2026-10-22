@@ -180,5 +180,5 @@ workspace:
 
 - Template version: <!-- STANDARD:VERSION -->2.3.0<!-- /STANDARD:VERSION -->
 - Last sync: <!-- STANDARD:SYNCED_AT -->2026-10-22<!-- /STANDARD:SYNCED_AT -->
-- Template digest: <!-- STANDARD:DIGEST -->4981200b12a4696806b4ba1504fd9a051c0713901083fffa372853130781fd28<!-- /STANDARD:DIGEST -->
+- Template digest: <!-- STANDARD:DIGEST -->654cacd34661fc2c79ccca4448d9b82686ee64fe78a623eee29ff91f1d1f621c<!-- /STANDARD:DIGEST -->
 - Collab tool: `scv/scv_settings.json`'s `NOTIFIER_PROVIDER` (slack | discord)

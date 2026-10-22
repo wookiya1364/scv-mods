@@ -4,7 +4,7 @@ export type StepMark = { name: string; mark: StageState | undefined; refs: strin
 
 export type PipelineStep = { name: string; role: string; io: string; kind: string }
 
-export type PlanFile = { slug: string; planText: string; testsText: string }
+export type PlanFile = { slug: string; planText: string; testsText: string; isArchived?: boolean }
 
 export type Plan = {
   slug: string
@@ -14,6 +14,7 @@ export type Plan = {
   scenarios: { id: string; name: string }[]
   howToRun: string[]
   pipeline: PipelineStep[]
+  isArchived: boolean
 }
 
 export type Stage = { name: string; state: StageState; refs: string[] }
