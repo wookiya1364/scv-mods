@@ -184,6 +184,7 @@ export const register: Register = on => {
         <Box flexDirection="column">
           <Text bold>SCV 대시보드</Text>
           <Text dimColor>이 폴더에 진행 중인 SCV 계획이 없습니다. /scv:promote 로 계획을 만들면 여기에 보입니다.</Text>
+          <Text dimColor>{`확인한 곳: ${shot.cwd || '(작업 폴더 모름)'}/scv/promote`}</Text>
           {dreamsPart()}
         </Box>
       )
