@@ -209,11 +209,29 @@ export const formatDuration = (ms: number) => {
   return `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
 }
 
+// Splits on `separator` only outside parentheses: "a(x · y) · b" → ["a(x · y)", "b"].
+export const splitTopLevel = (text: string, separator: string) => {
+  const parts: string[] = []
+  let depth = 0
+  let from = 0
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === '(') depth += 1
+    if (text[i] === ')') depth = Math.max(0, depth - 1)
+    if (depth === 0 && text.startsWith(separator, i)) {
+      parts.push(text.slice(from, i))
+      from = i + separator.length
+      i = from - 1
+    }
+  }
+
+  return [...parts, text.slice(from)].map(part => part.trim()).filter(Boolean)
+}
+
 export const parseDreams = (text: string | null): Dreams | undefined => {
   if (!text) return undefined
   try {
     const raw = JSON.parse(text) as { date?: string; summary?: string; report?: string }
-    const parts = (raw.summary ?? '').replace(/^\[SCV 드림\]\s*/, '').split(' · ').map(part => part.trim()).filter(Boolean)
+    const parts = splitTopLevel((raw.summary ?? '').replace(/^\[SCV 드림\]\s*/, ''), ' · ')
     const date = raw.date?.match(/^(\d{4})(\d{2})(\d{2})$/)
 
     return {

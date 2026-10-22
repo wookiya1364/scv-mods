@@ -394,4 +394,15 @@ test('dreams T5 parseDreams 는 앞머리를 떼고 · 로 나눈다', () => {
     reportPath: 'scv/dreams/x.html',
   })
   expect(parseDreams(null)).toBeUndefined()
+
+  // The real summary carries ' · ' inside parentheses too.
+  const real = JSON.stringify({
+    date: '20261022',
+    summary: '[SCV 드림] 아직 셀 것이 없음(보관된 계획 0개 · 사람 질의 9번) · 개선점: 요청에 완료 기준(무엇이 되면 끝인지)을 직접 말한 비율 0/7(0%) · 보고서 scv/dreams/r.html',
+    report: 'scv/dreams/r.html',
+  })
+  expect(parseDreams(real)?.items).toEqual([
+    '아직 셀 것이 없음(보관된 계획 0개 · 사람 질의 9번)',
+    '개선점: 요청에 완료 기준(무엇이 되면 끝인지)을 직접 말한 비율 0/7(0%)',
+  ])
 })
