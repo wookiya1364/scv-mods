@@ -14,7 +14,7 @@ import {
   parsePlan,
   parseTestOutput,
   applyBlocks,
-  stageGraphSvg,
+  describeRole,
   stageRole,
 } from './model'
 
@@ -33,7 +33,7 @@ const PANE = {
 } as const
 
 const plan = (opts: { title: string; status: string; steps: string[]; tests?: string[]; pipeline?: string[] }) => ({
-  planText: `---\ntitle: ${opts.title}\nstatus: ${opts.status}\n---\n\n## 순수함수 · 파이프라인 (Pure functions & pipeline)\n\n| # | 단계 | 받는 값 → 돌려주는 값 | 순수/부수효과 |\n|---|---|---|---|\n${(opts.pipeline ?? []).map((row, i) => `| ${i + 1} | ${row} |`).join('\n')}\n\n## Suggested path\n\n${opts.steps.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n\n## Related Documents\n`,
+  planText: `---\ntitle: ${opts.title}\nstatus: ${opts.status}\n---\n\n## 순수함수 · 파이프라인 (Pure functions & pipeline)\n\n| # | 단계 | 하는 일 | 받는 값 → 돌려주는 값 | 순수/부수효과 |\n|---|---|---|---|---|\n${(opts.pipeline ?? []).map((row, i) => `| ${i + 1} | ${row} |`).join('\n')}\n\n## Suggested path\n\n${opts.steps.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n\n## Related Documents\n`,
   testsText: `# Tests\n\n## Test scenarios\n\n${(opts.tests ?? []).map((name, i) => `### T${i + 1}. ${name}\n`).join('\n')}\n## How to run\n\n\`\`\`bash\nnpm run verify-dashboard\n\`\`\`\n`,
 })
 
@@ -121,32 +121,26 @@ test('progress T2 단계 흐름이 완료·진행·막힘·대기를 구분', as
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await text(ui, /완료 2 · 진행 1 · 막힘 0 · 대기 2/)).toBe('완료 2 · 진행 1 · 막힘 0 · 대기 2')
-  const graph = await ui.find({ type: 'Svg' })
-  expect(graph?.props.alt).toBe('1. a: 완료 → 2. b: 완료 → 3. c: 진행 중 → 4. d: 대기 → 5. e: 대기')
+  expect(await text(ui, /완료 2 · 진행 1 · 막힘 0 · 대기 2/)).toBe('완료 2 · 진행 1 · 막힘 0 · 대기 2 — 단계를 누르면 자세히')
+  expect((await ui.find({ type: 'Button', key: 'step-3' }))?.text).toContain('3. c 진행 중')
+  expect((await ui.find({ type: 'Button', key: 'step-3' }))?.text).toContain('지금 여기')
+  expect((await ui.find({ type: 'Button', key: 'step-4' }))?.text).toContain('4. d 대기')
   await ui.unmount()
 })
 
-test('progress T2b 단계 흐름 그래프 — 노드가 선으로 이어지고 지금 멈춘 곳에 표시', () => {
-  const svg = stageGraphSvg([
-    st('준비', 'done'),
-    st('화면 만들기', 'doing'),
-    st('올리기', 'waiting'),
-  ])
-  expect((svg.match(/<circle [^>]*r="12"/g) ?? []).length).toBe(3)
-  expect((svg.match(/<line /g) ?? []).length).toBe(2)
-  expect(svg).toContain('#3fb950')
-  expect(svg).toContain('#e3b341')
-  expect(svg).toContain('stroke-dasharray')
-  expect((svg.match(/지금 여기/g) ?? []).length).toBe(1)
-  expect(svg.indexOf('지금 여기')).toBeGreaterThan(svg.indexOf('2. 화면 만들기'))
-  expect(svg.indexOf('지금 여기')).toBeLessThan(svg.indexOf('3. 올리기'))
+test('progress T2b 단계 흐름 — 누를 수 있는 노드가 선으로 이어지고 지금 멈춘 곳에 표시', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] 준비', '화면 만들기', '올리기'] }) })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  const blocked = stageGraphSvg([st('a', 'done'), st('b <x>', 'blocked')])
-  expect(blocked).toContain('#f85149')
-  expect(blocked).toContain('b &lt;x&gt;')
-  expect(blocked).toContain('지금 여기')
-  expect(stageGraphSvg([st('a', 'done')])).not.toContain('지금 여기')
+  const rows = await ui.findAll({ type: 'Button' })
+  expect(rows.filter(row => row.key?.startsWith('step-')).map(row => row.key)).toEqual(['step-1', 'step-2', 'step-3'])
+  expect((await ui.find({ type: 'Button', key: 'step-1' }))?.text).toContain('● 1. 준비 완료')
+  expect((await ui.find({ type: 'Button', key: 'step-2' }))?.text).toContain('◉ 2. 화면 만들기 진행 중')
+  expect((await ui.findAll({ type: 'Text', text: /지금 여기/ })).length).toBe(1)
+  expect(await text(ui, /^│$/)).toBe('│')
+  expect(await text(ui, /^┆$/)).toBe('┆')
+  await ui.unmount()
 })
 
 test('progress T2c 막힘은 지금 단계에만 — 시작 안 한 단계는 대기, 답 대기·시험 실패면 지금 단계가 막힘', async ($, on) => {
@@ -168,7 +162,8 @@ test('progress T2c 막힘은 지금 단계에만 — 시작 안 한 단계는 �
     tool: 'AskUserQuestion',
     questions: [{ question: 'Q?', header: 'h', multiSelect: false, options: [{ label: 'a', description: '' }, { label: 'b', description: '' }] }],
   })
-  expect(seen[0]).toContain('1. a: 완료 → 2. b: 막힘 → 3. c: 대기')
+  expect(seen[0]).toContain(' 2. b ')
+  expect(seen[0]).toMatch(/2\. b [^]*막힘/)
 })
 
 test('progress T3 표시가 없으면 계획 상태로 짐작하고 추정을 붙인다', async ($, on) => {
@@ -236,13 +231,14 @@ test('progress T6 시험 결과 목록은 시나리오마다 통과·실패·결
 })
 
 test('progress T7 단계를 누르면 그 단계가 만드는 역할(파이프라인)과 한 일이 보인다', async ($, on) => {
-  const pipeline = ['`parsePlans` | 글 → Plan[] | 순수', '`render` | View → 화면 | 부수효과 (출구)']
+  const pipeline = ['`parsePlans` | 계획서 글을 읽어 제목·상태·단계 목록으로 정리한다 | 글 → Plan[] | 순수', '`render` | 정리된 값을 오른쪽 칸 화면으로 그린다 | View → 화면 | 부수효과 (출구)']
   const steps = ['[x] 파싱 만들기 — `parsePlans`', '화면 그리기 — `render`']
   const parsed = parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps, pipeline }) })
   expect(parsed.steps.map(step => step.name)).toEqual(['파싱 만들기', '화면 그리기'])
   expect(stageRole({ ...st('파싱 만들기', 'done'), refs: ['parsePlans'] }, parsed.pipeline)).toEqual([
-    { name: 'parsePlans', io: '글 → Plan[]', kind: '순수' },
+    { name: 'parsePlans', role: '계획서 글을 읽어 제목·상태·단계 목록으로 정리한다', io: '글 → Plan[]', kind: '순수' },
   ])
+  expect(describeRole({ name: 'x', role: '', io: '글 → Plan[]', kind: '순수' })).toBe('받음: 글 · 내놓음: Plan[]')
 
   engine(on, { a: plan({ title: 'p', status: 'in_progress', steps, pipeline }) })
   on('tool.call', () => ({ result: {} }))
@@ -251,13 +247,13 @@ test('progress T7 단계를 누르면 그 단계가 만드는 역할(파이프�
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   expect(await text(ui, /^2\. 화면 그리기 — /)).toBe('2. 화면 그리기 — 진행 중')
-  expect(await text(ui, /^render — /)).toBe('render — 부수효과 (출구)')
-  expect(await text(ui, /View → 화면/)).toContain('View → 화면')
+  expect(await text(ui, /^• /)).toBe('• 정리된 값을 오른쪽 칸 화면으로 그린다')
+  expect(await text(ui, /render|부수효과|순수/)).toBeUndefined()
   expect(await text(ui, /^Edit: view\.tsx$/)).toBe('Edit: view.tsx')
 
   await ui.press({ key: 'step-1' })
   expect(await text(ui, /^1\. 파싱 만들기 — /)).toBe('1. 파싱 만들기 — 완료')
-  expect(await text(ui, /^parsePlans — /)).toBe('parsePlans — 순수')
+  expect(await text(ui, /^• /)).toBe('• 계획서 글을 읽어 제목·상태·단계 목록으로 정리한다')
   expect(await text(ui, /이 세션에서 기록된 일 없음/)).toBe('이 세션에서 기록된 일 없음')
 
   await ui.press({ key: 'step-1' })
