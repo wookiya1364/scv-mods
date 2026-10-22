@@ -564,3 +564,10 @@ protocol: 0c6e830b
 **User**: (선택 창 답) ①부터 시작 (권장)
 
 **Claude Code**: /scv:work step-signal — effort standard. 1~4단계 끝: 신호 순수 함수(checkSignal · applySignal · mergeMarks · stepTimesFromSignals · buildStepPrompt), 모드 도구 scv_step 등록(허락 창 없이 — 모드 자기 도구만 허용), 진행 중 계획이 있을 때만 Claude 지시 한 덩어리, 칸이 '계획서 표시 + 신호'를 따르고 예상 시간은 신호 시각으로. 시험 40/40(기존 30 + 새 10), 형식·타입 검사 통과, 비밀 값 검사 85개 파일 통과. 구현 중 발견: 신호를 연달아 받으면 세션 값이 이전 값일 수 있어 2번째 신호가 사라짐(T5가 잡음) → 모드 저장소를 먼저 읽어 쌓도록 고침. 실제 계획 4개에 돌려 본 결과(지시 글, 1단계 끝 → 1/5, 뒤 단계 막힘 거절, 지금 단계 막힘 → 막힌 작업 카드) 확인. 남은 것: 올리기(물어봄) · 맥 앱 확인. 선택 창: 올리고 맥에서 확인할지.
+
+## Turn 62 — 2026-10-22T22:21:58Z
+protocol: 0c6e830b
+
+**User**: (선택 창 답) 올리고 ②는 앱에서 (권장)
+
+**Claude Code**: 비밀 값 검사(85개 파일 통과) 뒤 커밋 a496297 을 main 에 올림. 맥: marketplace update + plugin update → 745b60431e29 → a496297f1a3c, 설치본에 scv_step 있음(확인). 새 세션부터 적용. 다음은 사용자: 앱 새 '이 컴퓨터' 세션(이 폴더)에서 `/scv:work 20261022-wookiya1364-scv-dashboard-alerts` → SCV 칸의 n/5가 단계마다 오르는지, 두 단계 뒤 예상 완료 시간이 시간으로 바뀌는지 화면 사진 1장. ① 보관은 그 확인 뒤.
