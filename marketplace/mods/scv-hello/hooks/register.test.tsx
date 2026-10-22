@@ -21,6 +21,12 @@ import {
   describeRole,
   nodeIconSvg,
   stageRole,
+  STEP_TOOL,
+  applySignal,
+  buildStepPrompt,
+  checkSignal,
+  mergeMarks,
+  stepTimesFromSignals,
 } from './model'
 
 const PANE = {
@@ -70,6 +76,7 @@ const engine = (
   const notify = { isSent: true }
   const processes: string[][] = []
   on('command.register', () => ({ value: { command: 'scv-hello' } }))
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__scv-hello__${e.name}` } }) as never)
   on('ui.open', (_, e) => {
     opened.push(e.id)
     return { value: { isPlaced: true } }
@@ -595,4 +602,163 @@ test('dreams T5 parseDreams 는 앞머리를 떼고 · 로 나눈다', () => {
     '아직 셀 것이 없음(보관된 계획 0개 · 사람 질의 9번)',
     '개선점: 요청에 완료 기준(무엇이 되면 끝인지)을 직접 말한 비율 0/7(0%)',
   ])
+})
+
+// ── step-signal plan ─────────────────────────────────────────────────────────
+
+const FIVE = ['a', 'b', 'c', 'd', 'e']
+
+const COMPOSE = { model: 'claude-test', promptModel: 'claude-test', surfaces: ['desktop'], tools: [], outputStyle: null, traits: [] } as const
+
+const signal = ($: Engine, step: number, state: string, note?: string, slug = 'a') =>
+  $.tool.call({ tool: STEP_TOOL, plan: slug, step, state, ...(note ? { note } : {}) } as never) as Promise<{ deny?: string; result?: unknown }>
+
+test('step-signal T1 단계 끝 신호를 받으면 진행률이 1 오른다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  const answered = await signal($, 1, 'done')
+  expect(answered.deny).toBeUndefined()
+  expect(String(answered.result)).toContain('1/5')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^1\/5$/)).toBe('1/5')
+  expect(await text(ui, /^완료 \d/)).toBe('완료 1 · 진행 1 · 막힘 0 · 대기 3 — 단계를 누르면 자세히')
+  expect(await text(ui, /지금 여기/)).toBe('진행 중  ◀ 지금 여기')
+  expect(await text(ui, /^단계: /)).toBe('단계: b')
+  await ui.unmount()
+})
+
+test('step-signal T2 계획서 표시와 신호를 합친다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c', 'd', 'e'] }) })
+  await start($)
+  await signal($, 2, 'done')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /^2\/5$/)).toBe('2/5')
+  expect(await text(ui, /^단계: /)).toBe('단계: c')
+  await ui.unmount()
+
+  const merged = mergeMarks(parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps: ['[x] a', '[!] b', 'c'] }) }), [
+    { plan: 'a', step: 1, state: 'doing', note: '', at: 0 },
+    { plan: 'a', step: 2, state: 'done', note: '', at: 0 },
+  ])
+  expect(merged.steps.map(step => step.mark)).toEqual(['done', 'done', undefined])
+})
+
+test('step-signal T3 틀린 신호는 거절하고 이유를 돌려준다', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  await signal($, 1, 'done')
+
+  expect((await signal($, 1, 'done', undefined, 'nope')).deny).toContain('그런 진행 중 계획이 없습니다: nope')
+  expect((await signal($, 9, 'done')).deny).toContain('단계는 1~5')
+  expect((await signal($, 4, 'blocked', '막힘')).deny).toContain('막힘은 지금 단계(2번)에만')
+  expect((await signal($, 4, 'doing')).deny).toContain('진행은 지금 단계(2번)에만')
+  expect((await signal($, 2, 'blocked')).deny).toContain('이유(note)')
+  expect((await signal($, 2, 'paused')).deny).toContain('doing · done · blocked')
+  expect(store.get('signals:/work')).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 1_000_000 }])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^1\/5$/)).toBe('1/5')
+  await ui.unmount()
+})
+
+test('step-signal T4 막힘 신호는 지금 단계를 빨강으로, 막힌 작업 카드에 이유', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  await signal($, 1, 'done')
+  await signal($, 2, 'blocked', '시험 실패 — T3')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /지금 여기/)).toBe('막힘  ◀ 지금 여기')
+  expect(await text(ui, /^막힌 작업/)).toBe('막힌 작업 1')
+  expect(await text(ui, /시험 실패 — T3/)).toBe('b — 시험 실패 — T3')
+  await ui.unmount()
+
+  // the step moves on once the block is lifted
+  await signal($, 2, 'doing')
+  const after = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(after, /지금 여기/)).toBe('진행 중  ◀ 지금 여기')
+  expect(await text(after, /^막힌 작업/)).toBeUndefined()
+  await after.unmount()
+})
+
+test('step-signal T5 예상 완료 시간을 신호 시각으로 계산한다', async ($, on) => {
+  const parsed = parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  const signals = [1, 2, 3].map((step, i) => ({ plan: 'a', step, state: 'done' as const, note: '', at: i * 10 * 60_000 }))
+  const times = stepTimesFromSignals(signals, parsed)
+  expect(times.map(time => time.done)).toEqual([1, 2, 3])
+  expect(estimateEta(times, 'a', 2)).toEqual({ kind: 'estimate', ms: 20 * 60_000, basis: 2 })
+
+  const { clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  for (const step of [1, 2, 3]) {
+    clock.at = 1_000_000 + (step - 1) * 10 * 60_000
+    await signal($, step, 'done')
+  }
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^예상 완료 시간/)).toBe('예상 완료 시간: 약 20분 0초 남음 (추정 · 단계 2개 평균)')
+  await ui.unmount()
+})
+
+test('step-signal T6 진행 중 계획이 있을 때만 Claude 지시가 붙는다', async ($, on) => {
+  const active = parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  const archived = { ...parsePlan({ slug: 'z', ...plan({ title: 'z', status: 'done', steps: FIVE }), isArchived: true }) }
+  expect(buildStepPrompt([archived])).toBeNull()
+  expect(buildStepPrompt([active])).toContain('a (5 steps)')
+  expect(buildStepPrompt([active])).toContain(STEP_TOOL)
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base', scope: 'shared' as const }] }))
+  await start($)
+  const composed = await $.prompt.compose(COMPOSE)
+  const added = composed.sections.find(section => section.id === 'scv-hello:step-signal')
+  expect(added?.scope).toBe('session')
+  expect(added?.text).toContain('a (5 steps)')
+  expect(composed.sections[0]?.id).toBe('intro')
+})
+
+test('step-signal T6b 보관된 계획만 있으면 Claude 지시를 붙이지 않는다', async ($, on) => {
+  engine(on, {}, DREAMS, { at: 1_000_000 }, { z: plan({ title: 'z', status: 'done', steps: FIVE }) })
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base', scope: 'shared' as const }] }))
+  await start($)
+  const composed = await $.prompt.compose(COMPOSE)
+
+  expect(composed.sections.map(section => section.id)).toEqual(['intro'])
+})
+
+test('step-signal T7 신호 도구는 허락 창을 띄우지 않는다, 다른 도구 판단은 그대로', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  await start($)
+
+  expect((await $.tool.check({ tool: STEP_TOOL, input: {} })).decision).toBe('allow')
+  expect((await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf x' } })).decision).toBe('ask')
+})
+
+test('step-signal T8 세션을 새로 열어도 신호가 이어진다', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  store.set('signals:/work', [
+    { plan: 'a', step: 1, state: 'done', note: '', at: 1 },
+    { plan: 'a', step: 2, state: 'done', note: '', at: 2 },
+  ])
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /^2\/5$/)).toBe('2/5')
+  await ui.unmount()
+})
+
+test('step-signal T9 신호도 표시도 없으면 지금처럼 (추정)', async ($, on) => {
+  expect(applySignal([], { plan: 'a', step: 1, state: 'doing' }, 5)).toEqual([{ plan: 'a', step: 1, state: 'doing', note: '', at: 5 }])
+  expect(checkSignal({ plan: 'a', step: 1, state: 'doing' }, [], [])).toEqual({ isOk: false, reason: '그런 진행 중 계획이 없습니다: a — 진행 중: 없음' })
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /^단계 흐름/)).toBe('단계 흐름 (추정)')
+  expect(await text(ui, /^0\/5$/)).toBe('0/5')
+  expect(await text(ui, /^예상 완료 시간/)).toBe('예상 완료 시간: 아직 추정 불가')
+  await ui.unmount()
 })

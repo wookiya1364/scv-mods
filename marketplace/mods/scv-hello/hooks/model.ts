@@ -1,7 +1,7 @@
 // Pure steps of the SCV dashboard: text in, values out, nothing read or written.
 // The hooks module reads the files and watches the session; these only shape what it saw.
 
-import type { Block, Dreams, PipelineStep, PlanFile, Plan, Stage, StageState, StepMark, Task, TestRow, TestRun, WorkEntry } from '../types'
+import type { Block, Dreams, PipelineStep, PlanFile, Plan, Stage, StageState, StepMark, StepSignal, Task, TestRow, TestRun, WorkEntry } from '../types'
 
 const STATUS_ORDER = ['in_progress', 'testing', 'planned', 'done', 'archived']
 
@@ -107,7 +107,7 @@ export const deriveStages = (plan: Plan): { stages: Stage[]; isEstimated: boolea
     const state: StageState =
       step.mark === 'done' ? 'done' : i !== current ? 'waiting' : step.mark === 'blocked' ? 'blocked' : step.mark === 'doing' || isStarted ? 'doing' : 'waiting'
 
-    return { name: step.name, refs: step.refs, state }
+    return step.note ? { name: step.name, refs: step.refs, state, note: step.note } : { name: step.name, refs: step.refs, state }
   })
 
   return { stages, isEstimated: !isMarked }
@@ -163,7 +163,9 @@ export const findBlocks = (stages: readonly Stage[], run: TestRun | undefined, w
           .join('\n') || run.command,
       }]
     : []),
-  ...stages.filter(stage => stage.state === 'blocked').map(stage => ({ kind: 'stage' as const, title: '막힌 단계', detail: stage.name })),
+  ...stages
+    .filter(stage => stage.state === 'blocked')
+    .map(stage => ({ kind: 'stage' as const, title: '막힌 단계', detail: stage.note ? `${stage.name} — ${stage.note}` : stage.name })),
 ]
 
 // A live block (an unanswered question, a failed test run) stops the step in progress.
@@ -262,6 +264,82 @@ export const estimateEta = (history: readonly StepTime[], slug: string, remainin
   const average = perStep.reduce((sum, gap) => sum + gap.ms / gap.steps, 0) / perStep.length
 
   return { kind: 'estimate' as const, ms: Math.round(average * remaining), basis: perStep.length }
+}
+
+// ── step signals: Claude reports a step of the Suggested path; the mod keeps it in its own store ──
+
+export const STEP_TOOL = 'mcp__scv-hello__scv_step'
+
+const SIGNAL_STATES = ['doing', 'done', 'blocked'] as const
+
+export type SignalInput = { plan: string; step: number; state: string; note?: string }
+
+export type SignalCheck = { isOk: true } | { isOk: false; reason: string }
+
+// Plan marks and signals as one: a step either side calls done is done; otherwise the latest signal speaks.
+export const mergeMarks = (plan: Plan, signals: readonly StepSignal[]): Plan => {
+  const own = signals.filter(signal => signal.plan === plan.slug)
+  if (own.length === 0) return plan
+
+  return {
+    ...plan,
+    steps: plan.steps.map((step, i) => {
+      const signal = own.find(one => one.step === i + 1)
+      if (!signal || step.mark === 'done') return step
+
+      return signal.note ? { ...step, mark: signal.state, note: signal.note } : { ...step, mark: signal.state }
+    }),
+  }
+}
+
+// A signal must name a plan in progress and a step it has; doing and blocked only at the step the work stands on.
+export const checkSignal = (input: SignalInput, plans: readonly Plan[], signals: readonly StepSignal[]): SignalCheck => {
+  const open = plans.filter(plan => !plan.isArchived && plan.status !== 'done')
+  const plan = open.find(one => one.slug === input.plan)
+  if (!plan) return { isOk: false, reason: `그런 진행 중 계획이 없습니다: ${input.plan || '(빈 이름)'} — 진행 중: ${open.map(one => one.slug).join(', ') || '없음'}` }
+  if (!Number.isInteger(input.step) || input.step < 1 || input.step > plan.steps.length) {
+    return { isOk: false, reason: `단계는 1~${plan.steps.length} 입니다 (받은 값: ${String(input.step)})` }
+  }
+  if (!(SIGNAL_STATES as readonly string[]).includes(input.state)) return { isOk: false, reason: 'state 는 doing · done · blocked 중 하나입니다' }
+  if (input.state === 'blocked' && !input.note?.trim()) return { isOk: false, reason: '막힘에는 이유(note)가 필요합니다' }
+  if (input.state !== 'done') {
+    const current = mergeMarks(plan, signals).steps.findIndex(step => step.mark !== 'done') + 1
+    if (current === 0) return { isOk: false, reason: '모든 단계가 이미 끝났습니다' }
+    if (input.step !== current) {
+      return { isOk: false, reason: `${input.state === 'blocked' ? '막힘' : '진행'}은 지금 단계(${current}번)에만 보낼 수 있습니다` }
+    }
+  }
+
+  return { isOk: true }
+}
+
+// The newest signal for a step replaces the one before it.
+export const applySignal = (signals: readonly StepSignal[], input: SignalInput, at: number): StepSignal[] => [
+  ...signals.filter(signal => !(signal.plan === input.plan && signal.step === input.step)),
+  { plan: input.plan, step: input.step, state: input.state as StepSignal['state'], note: input.note?.trim() ?? '', at },
+].slice(-300)
+
+// When each step finished, as the times the ETA averages over: steps done by plan marks alone count first.
+export const stepTimesFromSignals = (signals: readonly StepSignal[], plan: Plan): StepTime[] => {
+  const done = signals.filter(signal => signal.plan === plan.slug && signal.state === 'done').sort((a, b) => a.at - b.at)
+  const signalled = new Set(done.map(signal => signal.step))
+  const base = plan.steps.filter((step, i) => step.mark === 'done' && !signalled.has(i + 1)).length
+
+  return done.map((signal, i) => ({ slug: plan.slug, done: base + i + 1, at: signal.at }))
+}
+
+// The few lines added to Claude's instructions, only while a plan is in progress.
+export const buildStepPrompt = (plans: readonly Plan[], tool = STEP_TOOL): string | null => {
+  const open = plans.filter(plan => !plan.isArchived && plan.status !== 'done')
+  if (open.length === 0) return null
+
+  return [
+    `SCV step signal (scv-hello mod): while you implement one of this project's SCV plans, report each step of its Suggested path with the ${tool} tool`,
+    '— state "doing" when you start a step, "done" when you finish it, "blocked" with a one-line reason in note when you cannot go on.',
+    "Steps are numbered as in the plan's Suggested path, starting at 1. It only updates the SCV pane and changes no file.",
+    'If the tool is listed as deferred, load it with ToolSearch first.',
+    `Open plans (scv/promote): ${open.map(plan => `${plan.slug} (${plan.steps.length} steps)`).join(', ')}.`,
+  ].join(' ')
 }
 
 export const formatDuration = (ms: number) => {
