@@ -1,10 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Expanded, Live, PlanFile, Snapshot, StageState, WorkEntry } from '../types'
+import type { Expanded, Live, PlanFile, Snapshot, StageState, TestRun, WorkEntry } from '../types'
 import {
   applyBlocks,
   applyTaskEvent,
+  barColor,
   countStages,
   describeRole,
   nodeIconSvg,
@@ -13,9 +14,11 @@ import {
   estimateEta,
   findBlocks,
   formatDuration,
+  headline,
   isTestCommand,
   logWork,
   mergeTests,
+  nextAction,
   parseDreams,
   parsePlans,
   parseTestOutput,
@@ -23,6 +26,7 @@ import {
   recordStepTimes,
   runFor,
   stageRole,
+  statusWords,
 } from './model'
 
 const PANE = 'scv-hello'
@@ -84,12 +88,36 @@ const refresh = async ($: Api) => {
   }
 }
 
+// Test runs are kept in the mod's own store, per project folder, so a new session still shows the last result.
+const runsKey = (cwd: string) => `runs:${cwd}`
+
+// One alert per event: the host's notification, else the system's own (the desktop app has no terminal to ring), and a toast.
+const alert = async ($: Api, text: string) => {
+  const sent = await $.ui.notify(text, { title: 'SCV' }).catch(() => undefined)
+  if (!sent?.isSent) {
+    for (const argv of [
+      ['osascript', '-e', `display notification ${JSON.stringify(text)} with title "SCV"`],
+      ['notify-send', 'SCV', text],
+    ]) {
+      const ran = await $.process.run(argv).catch(() => undefined)
+      if (ran?.exitCode === 0) break
+    }
+  }
+  try {
+    await $.ui.toast(`SCV: ${text}`)
+  } catch {
+    // a toast is a courtesy; the alert has been raised
+  }
+}
+
 const openPane = ($: Api) => $.ui.open({ id: PANE, title: TITLE })
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await update($, snapshot, value => ({ ...value, cwd: e.cwd }))
+    const kept = await $.store.get(runsKey(e.cwd)).catch(() => undefined)
+    if (Array.isArray(kept)) await update($, runs, () => kept as TestRun[])
     await $.command.register({ name: 'scv-hello', description: 'Open the SCV dashboard pane' })
     await refresh($)
     $.clock.every(REFRESH_MS, () => void refresh($).catch(() => undefined))
@@ -136,7 +164,11 @@ export const register: Register = on => {
       const entry = { tool: e.tool, target: describeTool(e.tool, input), at }
       await update($, stepLog, log => logWork(log, `${plan.slug}#${current}`, entry))
     }
-    if (e.tool === 'AskUserQuestion') await update($, waiting, () => describeTool(e.tool, input) || '질문')
+    if (e.tool === 'AskUserQuestion') {
+      const question = describeTool(e.tool, input) || '질문'
+      await update($, waiting, () => question)
+      await alert($, `답을 기다리는 중 — ${question}`)
+    }
 
     try {
       const ran = await next(e)
@@ -148,6 +180,12 @@ export const register: Register = on => {
           const output = [result?.stdout, result?.stderr, ran.text].filter(Boolean).join('\n')
           const run = parseTestOutput(input.command, output, !ran.isError && !ran.deny, await $.clock.now())
           await update($, runs, list => [...list, run].slice(-20))
+          const cwd = (await read($, snapshot)).cwd
+          await $.store.set(runsKey(cwd), await read($, runs)).catch(() => undefined)
+          if (!run.isOk) {
+            const failed = Object.entries(run.byId).filter(([, result]) => result === 'fail').map(([id]) => id)
+            await alert($, `시험 실패${failed.length ? ` — ${failed.join(', ')}` : ''}`)
+          }
         }
       }
 
@@ -216,6 +254,7 @@ export const register: Register = on => {
     const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
     const count = countStages(stages)
     const eta = estimateEta(await read($, history), plan.slug, count.total - count.done)
+    const action = nextAction(plan.slug, plan.status, stages, blocks)
     const percent = count.total ? Math.round((count.done / count.total) * 100) : 0
     const current = stages.find(stage => stage.state === 'doing' || stage.state === 'blocked')
     const doneTasks = todo.filter(task => task.status === 'completed').length
@@ -234,7 +273,7 @@ export const register: Register = on => {
                 <Button key="dreams-toggle" label={open.dreams ? '개선점 접기' : '개선점 펼치기'} onPress={toggle('dreams')} />
                 {dreams.reportPath && <Button key="dreams-report" label="보고서 열기" onPress={() => void openReport()} />}
               </Box>
-              {message && <Text color="#f85149">{message}</Text>}
+              {message && !message.startsWith('복사') && <Text color="#f85149">{message}</Text>}
             </>
           ) : (
             <Text dimColor>아직 드림 없음 — /scv:dreams 로 만들 수 있습니다.</Text>
@@ -254,8 +293,29 @@ export const register: Register = on => {
             onSelect={(value: string) => void update($, chosen, () => value)}
           />
         ) : null}
-        <Text bold>{plan.title}</Text>
-        <Text dimColor>상태: {plan.status}</Text>
+        {plans.length > 1 && Select ? null : <Text bold>{plan.title}</Text>}
+        <Text dimColor>{`상태: ${statusWords(plan.status, stages)}`}</Text>
+        {card(
+          <>
+            <Text bold>{headline(stages, blocks, eta, formatDuration)}</Text>
+            <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+              <Text color={action.command ? STATE_COLOR.doing : '#8b949e'}>{`다음: ${action.text}`}</Text>
+              {action.command ? (
+                <Button
+                  key="next-copy"
+                  label="명령 복사"
+                  onPress={() =>
+                    void $.ui.copy({ text: action.command ?? '', surface: e.surface }).then(copied =>
+                      update($, note, () => (copied.isCopied ? `복사함: ${action.command}` : `복사 못 함 — ${action.command}`)),
+                    )
+                  }
+                />
+              ) : null}
+            </Box>
+            {message && message.startsWith('복사') ? <Text dimColor>{message}</Text> : null}
+          </>,
+          barColor(stages, blocks),
+        )}
 
         {card(
           <>
@@ -264,7 +324,7 @@ export const register: Register = on => {
               <Text bold>{`${count.done}/${count.total}`}</Text>
             </Box>
             <Box width="100%" height={1} backgroundColor="#21262d">
-              <Box width={`${percent}%`} height={1} backgroundColor="#4f8cff" />
+              <Box width={`${percent}%`} height={1} backgroundColor={barColor(stages, blocks)} />
             </Box>
             <Text dimColor>
               {eta.kind === 'done'
