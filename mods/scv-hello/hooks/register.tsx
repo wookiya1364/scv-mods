@@ -7,6 +7,7 @@ import {
   applyTaskEvent,
   countStages,
   describeRole,
+  nodeIconSvg,
   deriveStages,
   describeTool,
   estimateEta,
@@ -161,6 +162,7 @@ export const register: Register = on => {
     const elements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
     const Select = 'Select' in elements ? elements.Select : undefined
+    const Svg = 'Svg' in elements ? elements.Svg : undefined
     const shot = await read($, snapshot)
     const plans = parsePlans(shot.plans)
     const plan = pickPlan(plans, await read($, chosen))
@@ -320,18 +322,25 @@ export const register: Register = on => {
             </Box>
             <Box flexDirection="column">
               {stages.map((stage, i) => (
-                <Box flexDirection="column">
-                  <Box backgroundColor={i === focused ? '#1f242c' : undefined}>
+                <Box flexDirection="row" gap={1} backgroundColor={i === focused ? '#1f242c' : undefined}>
+                  {Svg ? (
+                    <Svg
+                      source={nodeIconSvg(stage.state, stages[i + 1]?.state ?? null)}
+                      alt={`${i + 1}단계 ${STATE_LABEL[stage.state]}`}
+                      width={22}
+                      height={44}
+                    />
+                  ) : (
+                    <Text color={STATE_COLOR[stage.state]}>{STATE_MARK[stage.state]}</Text>
+                  )}
+                  <Box flexDirection="column" flexShrink={1}>
                     <Button key={`step-${i + 1}`} plain onPress={() => void update($, focusStep, value => (value === i ? null : i))}>
-                      <Text color={STATE_COLOR[stage.state]}>{STATE_MARK[stage.state]}</Text>
-                      <Text color={stage.state === 'waiting' ? '#8b949e' : undefined}>{` ${i + 1}. ${stage.name} `}</Text>
-                      <Text color={STATE_COLOR[stage.state]}>{STATE_LABEL[stage.state]}</Text>
-                      {i === here ? <Text bold color={STATE_COLOR[stage.state]}>{'  ◀ 지금 여기'}</Text> : null}
+                      {`${i + 1}. ${stage.name}`}
                     </Button>
+                    <Text color={STATE_COLOR[stage.state]}>
+                      {i === here ? `${STATE_LABEL[stage.state]}  ◀ 지금 여기` : STATE_LABEL[stage.state]}
+                    </Text>
                   </Box>
-                  {i < stages.length - 1 ? (
-                    <Text color={stage.state === 'done' ? STATE_COLOR.done : '#6e7681'}>{stage.state === 'done' ? '│' : '┆'}</Text>
-                  ) : null}
                 </Box>
               ))}
             </Box>

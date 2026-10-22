@@ -15,6 +15,7 @@ import {
   parseTestOutput,
   applyBlocks,
   describeRole,
+  nodeIconSvg,
   stageRole,
 } from './model'
 
@@ -122,24 +123,33 @@ test('progress T2 단계 흐름이 완료·진행·막힘·대기를 구분', as
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   expect(await text(ui, /완료 2 · 진행 1 · 막힘 0 · 대기 2/)).toBe('완료 2 · 진행 1 · 막힘 0 · 대기 2 — 단계를 누르면 자세히')
-  expect((await ui.find({ type: 'Button', key: 'step-3' }))?.text).toContain('3. c 진행 중')
-  expect((await ui.find({ type: 'Button', key: 'step-3' }))?.text).toContain('지금 여기')
-  expect((await ui.find({ type: 'Button', key: 'step-4' }))?.text).toContain('4. d 대기')
+  expect((await ui.find({ type: 'Button', key: 'step-3' }))?.text).toBe('3. c')
+  expect(await text(ui, /지금 여기/)).toBe('진행 중  ◀ 지금 여기')
   await ui.unmount()
 })
 
-test('progress T2b 단계 흐름 — 누를 수 있는 노드가 선으로 이어지고 지금 멈춘 곳에 표시', async ($, on) => {
+test('progress T2b 단계 흐름 — 신호등 색 노드가 선으로 이어지고, 이름을 누르면 상세, 지금 멈춘 곳 표시', async ($, on) => {
+  const done = nodeIconSvg('done', 'doing')
+  expect(done).toContain('fill="#3fb950"')
+  expect(done).toContain('<line ')
+  expect(done).not.toContain('stroke-dasharray')
+  const doing = nodeIconSvg('doing', 'waiting')
+  expect(doing).toContain('fill="#e3b341"')
+  expect(doing).toContain('stroke-dasharray')
+  expect(nodeIconSvg('blocked', null)).toContain('fill="#f85149"')
+  expect(nodeIconSvg('blocked', null)).not.toContain('<line ')
+  expect(nodeIconSvg('waiting', null)).toContain('fill="none" stroke="#6e7681"')
+
   engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] 준비', '화면 만들기', '올리기'] }) })
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   const rows = await ui.findAll({ type: 'Button' })
-  expect(rows.filter(row => row.key?.startsWith('step-')).map(row => row.key)).toEqual(['step-1', 'step-2', 'step-3'])
-  expect((await ui.find({ type: 'Button', key: 'step-1' }))?.text).toContain('● 1. 준비 완료')
-  expect((await ui.find({ type: 'Button', key: 'step-2' }))?.text).toContain('◉ 2. 화면 만들기 진행 중')
+  expect(rows.filter(row => row.key?.startsWith('step-')).map(row => row.text)).toEqual(['1. 준비', '2. 화면 만들기', '3. 올리기'])
+  const icons = await ui.findAll({ type: 'Svg' })
+  expect(icons.map(icon => icon.props.alt)).toEqual(['1단계 완료', '2단계 진행 중', '3단계 대기'])
+  expect(String(icons[1]?.props.source)).toContain('#e3b341')
   expect((await ui.findAll({ type: 'Text', text: /지금 여기/ })).length).toBe(1)
-  expect(await text(ui, /^│$/)).toBe('│')
-  expect(await text(ui, /^┆$/)).toBe('┆')
   await ui.unmount()
 })
 
@@ -162,8 +172,9 @@ test('progress T2c 막힘은 지금 단계에만 — 시작 안 한 단계는 �
     tool: 'AskUserQuestion',
     questions: [{ question: 'Q?', header: 'h', multiSelect: false, options: [{ label: 'a', description: '' }, { label: 'b', description: '' }] }],
   })
-  expect(seen[0]).toContain(' 2. b ')
-  expect(seen[0]).toMatch(/2\. b [^]*막힘/)
+  expect(seen[0]).toContain('2단계 막힘')
+  expect(seen[0]).toContain('막힘  ◀ 지금 여기')
+  expect(seen[0]).toContain('3단계 대기')
 })
 
 test('progress T3 표시가 없으면 계획 상태로 짐작하고 추정을 붙인다', async ($, on) => {
