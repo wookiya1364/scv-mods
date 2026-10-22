@@ -87,3 +87,35 @@ merge_policy: preserve
 - path delta: as planned (progress 와 한 모드로 합쳐 구현)
 - refs: scv/archive/20261022-wookiya1364-scv-dashboard-pane-dreams/PLAN.md
 - conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-23 00:09] wookiya1364 — SCV 칸 — 진행률이 실제 작업 중에 움직이기
+
+- verdict: adopted
+- why: Claude가 단계를 시작·끝낼 때 모드 도구로 신호를 보내고 모드는 그 신호를 자기 저장소에만 둔다 — 계획서 표시와 합쳐 진행률·단계 흐름·예상 시간이 작업 중에 움직인다. 프로젝트 파일을 바꾸지 않는 길이라 골랐다.
+- discarded alternatives: Claude가 계획서에 ✓를 적기 — 계획서 파일이 바뀜 / SCV가 단계 완료를 직접 기록 — 이 모드만으로 못 함 / Claude 할 일 목록으로 세기 — 이 세션에 할 일 도구가 없음 / 파일 변화로 단계 맞히기 — 추측
+- refs: scv/promote/20261022-wookiya1364-scv-dashboard-step-signal/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-23 00:09] wookiya1364 — SCV 칸 — 끝·오류·허락 기다림 알림과 휴대폰 알림
+
+- verdict: adopted
+- why: 2분 넘게 걸린 메인 차례의 끝, 오류·거절 멈춤, 허락 창을 알리고 Claude 자체 알림 도구로 휴대폰(원격 연결 시)까지 보낸다. 에이전트 차례를 메인 차례로 착각하지 않게 한다.
+- discarded alternatives: 매번 알림 — 짧은 답마다 울림 / 5분 기준 — 2~5분짜리 일의 끝을 놓침 / 외부 알림 서비스 — 내용이 밖으로 나감
+- refs: scv/promote/20261022-wookiya1364-scv-dashboard-alerts/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-23 00:09] wookiya1364 — SCV 칸 — 자리 비운 사이 요약과 에이전트별 줄
+
+- verdict: adopted
+- why: 마지막 메시지 뒤에 생긴 일(끝난 단계·시험·기다림·멈춤)을 세 줄로 묶고, 동시에 일하는 에이전트마다 한 줄씩(5줄까지) 보인다. 다음 메시지를 보내면 요약이 새로 시작해 쌓이지 않는다.
+- discarded alternatives: 지난 1시간 기준 — 오래 비우면 앞부분이 빠짐 / 에이전트별 줄은 나중으로 — 사용자가 1~7 모두 구현을 고름
+- refs: scv/promote/20261022-wookiya1364-scv-dashboard-work-view/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-23 00:09] wookiya1364 — SCV 칸 — 다음 할 일 입력창 넣기와 사용 한도
+
+- verdict: adopted
+- why: 다음 명령을 입력창에 넣되 사용자 글은 지우지 않고(못 넣으면 복사), 차례 끝에 Tab 제안을 띄운다. 5시간·7일 한도 %와 초기화 시각을 보이고 90%에서 기간마다 한 번 알린다.
+- discarded alternatives: 80% 기준 — 이른 알림 / 표시만 — 한도 직전을 놓칠 수 있음 / 복사 버튼만 유지 — 붙여 넣기 단계가 남음
+- refs: scv/promote/20261022-wookiya1364-scv-dashboard-prompt-usage/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md

@@ -4,3 +4,7 @@ decision	앱-오른쪽-scv-대시보드-칸-scv-dreams	scv/DECISIONS.md	3259	697
 decision	앱-오른쪽-scv-대시보드-칸-진행률-단계-흐름-막힘-시험-결과-archived	scv/DECISIONS.md	3956	1121	2026-10-22 16:09	[archived] 앱 오른쪽 SCV 대시보드 칸 — 진행률·단계 흐름·막힘·시험 결과 archived
 decision	앱-오른쪽-scv-대시보드-칸-지금-작업-상세-예상-완료-시간-archived	scv/DECISIONS.md	5077	638	2026-10-22 16:09	[archived] 앱 오른쪽 SCV 대시보드 칸 — 지금 작업 상세·예상 완료 시간 archived
 decision	앱-오른쪽-scv-대시보드-칸-scv-dreams-archived	scv/DECISIONS.md	5715	523	2026-10-22 16:09	[archived] 앱 오른쪽 SCV 대시보드 칸 — scv:dreams archived
+decision	scv-칸-진행률이-실제-작업-중에-움직이기	scv/DECISIONS.md	6238	863	2026-10-23 00:09	[adopted] SCV 칸 — 진행률이 실제 작업 중에 움직이기
+decision	scv-칸-끝-오류-허락-기다림-알림과-휴대폰-알림	scv/DECISIONS.md	7101	692	2026-10-23 00:09	[adopted] SCV 칸 — 끝·오류·허락 기다림 알림과 휴대폰 알림
+decision	scv-칸-자리-비운-사이-요약과-에이전트별-줄	scv/DECISIONS.md	7793	704	2026-10-23 00:09	[adopted] SCV 칸 — 자리 비운 사이 요약과 에이전트별 줄
+decision	scv-칸-다음-할-일-입력창-넣기와-사용-한도	scv/DECISIONS.md	8497	678	2026-10-23 00:09	[adopted] SCV 칸 — 다음 할 일 입력창 넣기와 사용 한도

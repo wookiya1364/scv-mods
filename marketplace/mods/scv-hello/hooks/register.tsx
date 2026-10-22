@@ -1,11 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Expanded, Live, PlanFile, Snapshot, StageState, TestRun, WorkEntry } from '../types'
+import type { Expanded, Live, Plan, PlanFile, Snapshot, StageState, StepSignal, TestRun, WorkEntry } from '../types'
 import {
+  STEP_TOOL,
   applyBlocks,
+  applySignal,
   applyTaskEvent,
   barColor,
+  buildStepPrompt,
+  checkSignal,
   countStages,
   describeRole,
   nodeIconSvg,
@@ -17,6 +21,7 @@ import {
   headline,
   isTestCommand,
   logWork,
+  mergeMarks,
   mergeTests,
   nextAction,
   parseDreams,
@@ -27,6 +32,7 @@ import {
   runFor,
   stageRole,
   statusWords,
+  stepTimesFromSignals,
 } from './model'
 
 const PANE = 'scv-hello'
@@ -45,6 +51,7 @@ const now = atom({ plugin: 'scv-hello', key: 'now' } as const, 0)
 const note = atom({ plugin: 'scv-hello', key: 'note' } as const, null as string | null)
 const focusStep = atom({ plugin: 'scv-hello', key: 'focusStep' } as const, null as number | null)
 const stepLog = atom({ plugin: 'scv-hello', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
+const signals = atom({ plugin: 'scv-hello', key: 'signals' } as const, [] as StepSignal[])
 
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
 const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○' }
@@ -83,21 +90,58 @@ const readSources = async ($: Api, cwd: string): Promise<Snapshot> => {
   return { plans, dreamsText: await readText($, `${scv}/dreams/latest.json`), cwd }
 }
 
+// Test runs and step signals are kept in the mod's own store, per project folder, so a new session
+// (or another session on this computer) still shows them.
+const runsKey = (cwd: string) => `runs:${cwd}`
+const signalsKey = (cwd: string) => `signals:${cwd}`
+
+const loadSignals = async ($: Api, cwd: string) => {
+  const kept = await $.store.get(signalsKey(cwd)).catch(() => undefined)
+  if (Array.isArray(kept)) await update($, signals, () => kept as StepSignal[])
+}
+
+// The plan on screen with Claude's step signals merged into its marks.
+const planInView = async ($: Api): Promise<Plan | undefined> => {
+  const plan = pickPlan(parsePlans((await read($, snapshot)).plans), await read($, chosen))
+
+  return plan && mergeMarks(plan, await read($, signals))
+}
+
 const refresh = async ($: Api) => {
   const at = await $.clock.now()
   const current = await read($, snapshot)
   const next = await readSources($, current.cwd)
   await update($, snapshot, () => next)
   await update($, now, () => at)
-  const plan = pickPlan(parsePlans(next.plans), await read($, chosen))
+  await loadSignals($, next.cwd)
+  const plan = await planInView($)
   if (plan) {
     const done = countStages(deriveStages(plan).stages).done
     await update($, history, list => recordStepTimes(list, plan.slug, done, at))
   }
 }
 
-// Test runs are kept in the mod's own store, per project folder, so a new session still shows the last result.
-const runsKey = (cwd: string) => `runs:${cwd}`
+const STATE_WORD = { doing: '시작', done: '끝', blocked: '막힘' } as const
+
+// The mod's own tool is not among the tool names the types know, so its hooks match it by pattern.
+const STEP_TOOL_NAME = new RegExp(`^${STEP_TOOL}$`)
+
+const STEP_TOOL_SPEC = {
+  name: 'scv_step',
+  description:
+    "Report a step of an SCV plan's Suggested path so the SCV pane shows real progress: state doing (started), done (finished) or blocked (cannot go on — give the reason in note). Changes no file.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      plan: { type: 'string', description: 'The plan folder name under scv/promote' },
+      step: { type: 'integer', minimum: 1, description: "The step's number in the plan's Suggested path, starting at 1" },
+      state: { type: 'string', enum: ['doing', 'done', 'blocked'] },
+      note: { type: 'string', description: 'One line; the reason when state is blocked' },
+    },
+    required: ['plan', 'step', 'state'],
+    additionalProperties: false,
+  },
+}
 
 // One alert per event: the host's notification, else the system's own (the desktop app has no terminal to ring), and a toast.
 const alert = async ($: Api, text: string) => {
@@ -126,7 +170,9 @@ export const register: Register = on => {
     await update($, snapshot, value => ({ ...value, cwd: e.cwd }))
     const kept = await $.store.get(runsKey(e.cwd)).catch(() => undefined)
     if (Array.isArray(kept)) await update($, runs, () => kept as TestRun[])
+    await loadSignals($, e.cwd)
     await $.command.register({ name: 'scv-hello', description: 'Open the SCV dashboard pane' })
+    await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     await refresh($)
     $.clock.every(REFRESH_MS, () => void refresh($).catch(() => undefined))
     void openPane($).catch(() => undefined)
@@ -161,12 +207,52 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Claude's instructions carry the step signal only while a plan is in progress.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    const text = buildStepPrompt(parsePlans((await read($, snapshot)).plans))
+
+    return text ? { sections: [...composed.sections, { id: 'scv-hello:step-signal', text, scope: 'session' as const }] } : composed
+  })
+
+  // The mod's own tool asks no permission; every other tool's verdict is left as it is.
+  on('tool.check', { tool: STEP_TOOL_NAME }, () => ({ decision: 'allow' as const }))
+
+  on('tool.call', { tool: STEP_TOOL_NAME }, async ($, e) => {
+    const input = e as unknown as Record<string, unknown>
+    const asked = {
+      plan: typeof input.plan === 'string' ? input.plan : '',
+      step: Number(input.step),
+      state: typeof input.state === 'string' ? input.state : '',
+      ...(typeof input.note === 'string' ? { note: input.note } : {}),
+    }
+    const shot = await read($, snapshot)
+    const plans = parsePlans(shot.plans)
+    // The store is the record: a signal sent right after another (or from another session) builds on it,
+    // where the session value read here could still be the one from before the last write.
+    const stored = await $.store.get(signalsKey(shot.cwd)).catch(() => undefined)
+    const before = Array.isArray(stored) ? (stored as StepSignal[]) : await read($, signals)
+    const checked = checkSignal(asked, plans, before)
+    if (!checked.isOk) return { deny: checked.reason }
+
+    const kept = applySignal(before, asked, await $.clock.now())
+    await $.store.set(signalsKey(shot.cwd), kept).catch(() => undefined)
+    await update($, signals, () => kept)
+    const plan = plans.find(one => one.slug === asked.plan)
+    const count = plan ? countStages(deriveStages(mergeMarks(plan, kept)).stages) : undefined
+
+    return {
+      result: `기록함: ${asked.plan} ${asked.step}단계 ${STATE_WORD[asked.state as keyof typeof STATE_WORD]}${count ? ` — 진행 ${count.done}/${count.total}` : ''}`,
+    }
+  })
+
   on('tool.call', async ($, e, next) => {
+    if ((e.tool as string) === STEP_TOOL) return next(e)
     const input = e as unknown as Record<string, unknown>
     const at = await $.clock.now()
     await update($, live, value => ({ ...value, tool: { name: e.tool, target: describeTool(e.tool, input), startedAt: at } }))
     await update($, tasks, list => applyTaskEvent(list, e.tool, input))
-    const plan = pickPlan(parsePlans((await read($, snapshot)).plans), await read($, chosen))
+    const plan = await planInView($)
     const current = plan ? deriveStages(plan).stages.findIndex(stage => stage.state === 'doing') : -1
     if (plan && current >= 0) {
       const entry = { tool: e.tool, target: describeTool(e.tool, input), at }
@@ -211,7 +297,9 @@ export const register: Register = on => {
     const Svg = 'Svg' in elements ? elements.Svg : undefined
     const shot = await read($, snapshot)
     const plans = parsePlans(shot.plans)
-    const plan = pickPlan(plans, await read($, chosen))
+    const picked = pickPlan(plans, await read($, chosen))
+    const reported = await read($, signals)
+    const plan = picked && mergeMarks(picked, reported)
     const open = await read($, expanded)
     const at = await read($, now)
     const state = await read($, live)
@@ -261,7 +349,9 @@ export const register: Register = on => {
     const focusedStage = focused === null ? undefined : stages[focused]
     const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
     const count = countStages(stages)
-    const eta = estimateEta(await read($, history), plan.slug, count.total - count.done)
+    // Step times from Claude's signals survive a new session; the times seen here are the fallback.
+    const signalTimes = picked ? stepTimesFromSignals(reported, picked) : []
+    const eta = estimateEta(signalTimes.length >= 2 ? signalTimes : await read($, history), plan.slug, count.total - count.done)
     const action = nextAction(plan.slug, plan.status, stages, blocks)
     const percent = count.total ? Math.round((count.done / count.total) * 100) : 0
     const current = stages.find(stage => stage.state === 'doing' || stage.state === 'blocked')
