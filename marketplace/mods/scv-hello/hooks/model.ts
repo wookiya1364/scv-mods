@@ -68,7 +68,7 @@ const parsePipeline = (planText: string): PipelineStep[] => {
 export const parsePlan = (file: PlanFile): Plan => ({
   slug: file.slug,
   title: frontmatter(file.planText, 'title') ?? file.slug,
-  status: frontmatter(file.planText, 'status') ?? 'planned',
+  status: file.isArchived ? 'archived' : (frontmatter(file.planText, 'status') ?? 'planned'),
   steps: section(file.planText, ['Suggested path', 'Steps'])
     .map(line => line.match(/^\s*\d+\.\s+(.+)$/)?.[1])
     .filter((step): step is string => Boolean(step))
@@ -76,6 +76,7 @@ export const parsePlan = (file: PlanFile): Plan => ({
   scenarios: [...file.testsText.matchAll(/^###\s+(T\d+)\.\s*(.+)$/gm)].map(([, id = '', name = '']) => ({ id, name: name.trim() })),
   howToRun: howToRun(file.testsText),
   pipeline: parsePipeline(file.planText),
+  isArchived: file.isArchived === true,
 })
 
 export const parsePlans = (files: readonly PlanFile[]): Plan[] =>

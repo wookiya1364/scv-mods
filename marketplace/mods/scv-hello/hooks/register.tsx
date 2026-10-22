@@ -62,15 +62,23 @@ const readText = async ($: Api, path: string) => {
   }
 }
 
-// The entry of the pipeline: the session's SCV files, read and never written.
-const readSources = async ($: Api, cwd: string): Promise<Snapshot> => {
-  const scv = cwd ? `${cwd}/scv` : 'scv'
-  const entries = await $.fs.list(`${scv}/promote`).catch(() => [])
+const readPlans = async ($: Api, dir: string, isArchived: boolean): Promise<PlanFile[]> => {
+  const entries = await $.fs.list(dir).catch(() => [])
   const plans: PlanFile[] = []
   for (const entry of entries.filter(one => one.kind === 'dir')) {
-    const planText = await readText($, `${scv}/promote/${entry.name}/PLAN.md`)
-    if (planText) plans.push({ slug: entry.name, planText, testsText: (await readText($, `${scv}/promote/${entry.name}/TESTS.md`)) ?? '' })
+    const planText = await readText($, `${dir}/${entry.name}/PLAN.md`)
+    if (planText) plans.push({ slug: entry.name, planText, testsText: (await readText($, `${dir}/${entry.name}/TESTS.md`)) ?? '', isArchived })
   }
+
+  return plans
+}
+
+// The entry of the pipeline: the session's SCV files, read and never written.
+// With no plan in progress, the plans already archived stand in, newest first.
+const readSources = async ($: Api, cwd: string): Promise<Snapshot> => {
+  const scv = cwd ? `${cwd}/scv` : 'scv'
+  const active = await readPlans($, `${scv}/promote`, false)
+  const plans = active.length > 0 ? active : (await readPlans($, `${scv}/archive`, true)).sort((a, b) => b.slug.localeCompare(a.slug))
 
   return { plans, dreamsText: await readText($, `${scv}/dreams/latest.json`), cwd }
 }
@@ -293,6 +301,7 @@ export const register: Register = on => {
             onSelect={(value: string) => void update($, chosen, () => value)}
           />
         ) : null}
+        {plan.isArchived ? <Text dimColor>진행 중인 계획이 없어 최근 끝난 계획을 보여 줍니다.</Text> : null}
         {plans.length > 1 && Select ? null : <Text bold>{plan.title}</Text>}
         <Text dimColor>{`상태: ${statusWords(plan.status, stages)}`}</Text>
         {card(
