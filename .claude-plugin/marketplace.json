@@ -1,0 +1,5 @@
+{
+  "name": "scv-mods",
+  "owner": { "name": "wookiya1364" },
+  "plugins": [{ "name": "scv-hello", "source": "./mods/scv-hello" }]
+}
