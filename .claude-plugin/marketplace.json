@@ -1,5 +1,12 @@
 {
   "name": "scv-mods",
-  "owner": { "name": "wookiya1364" },
-  "plugins": [{ "name": "scv-hello", "source": "./mods/scv-hello" }]
+  "owner": {
+    "name": "wookiya1364"
+  },
+  "plugins": [
+    {
+      "name": "scv-hello",
+      "source": "./marketplace/mods/scv-hello"
+    }
+  ]
 }
