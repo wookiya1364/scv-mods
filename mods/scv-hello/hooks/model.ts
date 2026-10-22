@@ -306,3 +306,19 @@ export const parseDreams = (text: string | null): Dreams | undefined => {
     return undefined
   }
 }
+
+export const NODE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#6e7681' }
+
+// One step's node as a small picture: a traffic-light circle, and below it the line to the next step
+// (solid after a finished step, dashed after any other; none after the last).
+export const nodeIconSvg = (state: StageState, next: StageState | null, height = 44) => {
+  const color = NODE_COLOR[state]
+  const fill = state === 'waiting' ? 'none' : color
+  const ring = state === 'doing' || state === 'blocked' ? `<circle cx="11" cy="11" r="10" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.5"/>` : ''
+  const line =
+    next === null
+      ? ''
+      : `<line x1="11" y1="20" x2="11" y2="${height}" stroke="${state === 'done' ? NODE_COLOR.done : NODE_COLOR.waiting}" stroke-width="2.5"${state === 'done' ? '' : ' stroke-dasharray="3 3"'}/>`
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="${height}" viewBox="0 0 22 ${height}">${line}${ring}<circle cx="11" cy="11" r="7" fill="${fill}" stroke="${color}" stroke-width="2"/></svg>`
+}
