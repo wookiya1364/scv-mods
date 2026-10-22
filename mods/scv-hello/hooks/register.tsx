@@ -18,6 +18,8 @@ import {
   pickPlan,
   recordStepTimes,
   runFor,
+  stageGraphAlt,
+  stageGraphSvg,
 } from './model'
 
 const PANE = 'scv-hello'
@@ -149,6 +151,7 @@ export const register: Register = on => {
     const elements = $.ui.resolve(e)
     const { Box, Text, Button } = elements
     const Select = 'Select' in elements ? elements.Select : undefined
+    const Svg = 'Svg' in elements ? elements.Svg : undefined
     const shot = await read($, snapshot)
     const plans = parsePlans(shot.plans)
     const plan = pickPlan(plans, await read($, chosen))
@@ -301,9 +304,13 @@ export const register: Register = on => {
               <Text bold>단계 흐름{isEstimated ? ' (추정)' : ''}</Text>
               <Button key="steps-toggle" label={open.steps ? '단계 접기' : '단계 펼치기'} onPress={toggle('steps')} />
             </Box>
-            <Box flexDirection="row" flexWrap="wrap" gap={1}>
-              {stages.map(stage => <Text color={STATE_COLOR[stage.state]}>{STATE_MARK[stage.state]}</Text>)}
-            </Box>
+            {Svg ? (
+              <Svg source={stageGraphSvg(stages)} alt={stageGraphAlt(stages)} isInteractive />
+            ) : (
+              <Box flexDirection="row" flexWrap="wrap" gap={1}>
+                {stages.map(stage => <Text color={STATE_COLOR[stage.state]}>{STATE_MARK[stage.state]}</Text>)}
+              </Box>
+            )}
             <Text dimColor>{`완료 ${count.done} · 진행 ${count.doing} · 막힘 ${count.blocked} · 대기 ${count.waiting}`}</Text>
             {open.steps &&
               stages.map((stage, i) => (

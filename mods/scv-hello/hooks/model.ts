@@ -243,3 +243,75 @@ export const parseDreams = (text: string | null): Dreams | undefined => {
     return undefined
   }
 }
+
+const GRAPH_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#4f8cff', blocked: '#f85149', waiting: '#6e7681' }
+const GRAPH_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
+
+const escapeXml = (text: string) =>
+  text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+// The stage flow as nodes joined top to bottom: green done, blue doing (ringed), red blocked, grey waiting.
+// The node where the work stands now (doing, else blocked) carries a "지금 여기" tag.
+export const stageGraphSvg = (stages: readonly Stage[], width = 320) => {
+  const row = 52
+  const top = 22
+  const x = 22
+  const height = Math.max(row, top + (stages.length - 1) * row + 30)
+  const here = stages.findIndex(stage => stage.state === 'doing')
+  const at = here >= 0 ? here : stages.findIndex(stage => stage.state === 'blocked')
+  const y = (i: number) => top + i * row
+
+  const edges = stages.slice(1).map((stage, i) => {
+    const from = stages[i]
+    const isDone = from?.state === 'done' && stage.state !== 'waiting'
+    const color = isDone ? GRAPH_COLOR.done : from?.state === 'done' ? GRAPH_COLOR[stage.state] : GRAPH_COLOR.waiting
+    const dash = from?.state === 'done' ? '' : ' stroke-dasharray="4 4"'
+
+    return `<line x1="${x}" y1="${y(i) + 12}" x2="${x}" y2="${y(i + 1) - 12}" stroke="${color}" stroke-width="3"${dash}/>`
+  })
+
+  const nodes = stages.map((stage, i) => {
+    const color = GRAPH_COLOR[stage.state]
+    const cy = y(i)
+    const room = i === at ? 15 : 24
+    const name = stage.name.length > room ? `${stage.name.slice(0, room - 1)}…` : stage.name
+    const mark =
+      stage.state === 'done'
+        ? `<path d="M${x - 5} ${cy} l3.5 3.5 l6.5 -7" fill="none" stroke="#0d1117" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`
+        : stage.state === 'blocked'
+          ? `<text x="${x}" y="${cy + 4.5}" text-anchor="middle" font-size="13" font-weight="700" fill="#0d1117">!</text>`
+          : stage.state === 'doing'
+            ? `<circle cx="${x}" cy="${cy}" r="4" fill="#0d1117"/>`
+            : ''
+    const ring =
+      i === at
+        ? `<circle cx="${x}" cy="${cy}" r="17" fill="none" stroke="${color}" stroke-width="2" opacity="0.5"><animate attributeName="r" values="14;18;14" dur="1.6s" repeatCount="indefinite"/></circle>`
+        : ''
+    const fill = stage.state === 'waiting' ? '#0d1117' : color
+    const tag =
+      i === at
+        ? `<rect x="${width - 70}" y="${cy - 10}" width="64" height="20" rx="10" fill="${color}"/><text x="${width - 38}" y="${cy + 4}" text-anchor="middle" font-size="11" font-weight="600" fill="#0d1117">지금 여기</text>`
+        : ''
+
+    return [
+      `<g><title>${escapeXml(`${i + 1}. ${stage.name} — ${GRAPH_LABEL[stage.state]}`)}</title>`,
+      ring,
+      `<circle cx="${x}" cy="${cy}" r="12" fill="${fill}" stroke="${color}" stroke-width="2"/>`,
+      mark,
+      `<text x="${x + 24}" y="${cy - 2}" font-size="13" fill="${stage.state === 'waiting' ? '#8b949e' : '#e6edf3'}">${escapeXml(`${i + 1}. ${name}`)}</text>`,
+      `<text x="${x + 24}" y="${cy + 14}" font-size="11" fill="${color}">${GRAPH_LABEL[stage.state]}</text>`,
+      tag,
+      '</g>',
+    ].join('')
+  })
+
+  return [
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" font-family="-apple-system, system-ui, 'Noto Sans KR', sans-serif">`,
+    ...edges,
+    ...nodes,
+    '</svg>',
+  ].join('')
+}
+
+export const stageGraphAlt = (stages: readonly Stage[]) =>
+  stages.map((stage, i) => `${i + 1}. ${stage.name}: ${GRAPH_LABEL[stage.state]}`).join(' → ')
