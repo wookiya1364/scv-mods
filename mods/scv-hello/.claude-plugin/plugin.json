@@ -1,1 +1,6 @@
-{ "name": "scv-hello", "version": "0.4.0", "description": "Shows a one-line status when a session starts" }
+{
+  "name": "scv-hello",
+  "version": "0.5.0",
+  "description": "SCV dashboard pane: plan progress, stage flow, blocks, tests, live work, ETA and dreams",
+  "types": "./types/index.d.ts"
+}
