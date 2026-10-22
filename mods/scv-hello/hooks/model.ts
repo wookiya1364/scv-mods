@@ -322,3 +322,52 @@ export const nodeIconSvg = (state: StageState, next: StageState | null, height =
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="${height}" viewBox="0 0 22 ${height}">${line}${ring}<circle cx="11" cy="11" r="7" fill="${fill}" stroke="${color}" stroke-width="2"/></svg>`
 }
+
+// The plan's status in plain words, read together with its steps so the two never disagree.
+export const statusWords = (status: string, stages: readonly Stage[]) => {
+  const isAllDone = stages.length > 0 && stages.every(stage => stage.state === 'done')
+  if (status === 'archived') return '보관됨'
+  if (status === 'done') return '끝남'
+  if (status === 'planned') return '시작 전'
+  if (status === 'testing') return isAllDone ? '단계 끝 · 시험 확인 중' : '시험 중'
+  if (status === 'in_progress') return isAllDone ? '단계 끝 · 마무리 중' : '만드는 중'
+
+  return status
+}
+
+export type NextAction = { text: string; command: string | null }
+
+// What the person can do next, and the command for it when there is one.
+export const nextAction = (slug: string, status: string, stages: readonly Stage[], blocks: readonly Block[]): NextAction => {
+  const isAllDone = stages.length > 0 && stages.every(stage => stage.state === 'done')
+  if (blocks.some(block => block.kind === 'waiting')) return { text: 'Claude가 묻고 있어요 — 대화창에서 답하기', command: null }
+  if (blocks.some(block => block.kind === 'test')) return { text: '시험 실패 — 고쳐서 다시 시험하기', command: `/scv:work ${slug}` }
+  if (status === 'archived' || status === 'done') return { text: '끝난 계획 — 할 일 없음', command: null }
+  if (status === 'planned') return { text: '시작하기', command: `/scv:work ${slug}` }
+  if (isAllDone) return { text: '모든 단계 끝 — 보관하기', command: `/scv:work ${slug} --archive` }
+
+  return { text: '진행 중 — 기다리면 됩니다', command: null }
+}
+
+// The one line at the top: where the work stands, whether anything is stuck, and the time left.
+export const headline = (stages: readonly Stage[], blocks: readonly Block[], eta: ReturnType<typeof estimateEta>, format: (ms: number) => string) => {
+  const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked')
+  const done = stages.filter(stage => stage.state === 'done').length
+  const where =
+    here >= 0
+      ? `${here + 1}단계 ${stages[here]?.state === 'blocked' ? '막힘' : '진행 중'}`
+      : stages.length > 0 && done === stages.length
+        ? '모든 단계 끝'
+        : '시작 전'
+  const stuck = blocks.length > 0 ? `막힘 ${blocks.length}` : '막힘 없음'
+  const left = eta.kind === 'estimate' ? `약 ${format(eta.ms)} 남음(추정)` : eta.kind === 'done' ? '남은 단계 없음' : '남은 시간 추정 불가'
+
+  return `${where} · ${stuck} · ${left}`
+}
+
+export const barColor = (stages: readonly Stage[], blocks: readonly Block[]) =>
+  blocks.length > 0 || stages.some(stage => stage.state === 'blocked')
+    ? NODE_COLOR.blocked
+    : stages.length > 0 && stages.every(stage => stage.state === 'done')
+      ? NODE_COLOR.done
+      : NODE_COLOR.doing

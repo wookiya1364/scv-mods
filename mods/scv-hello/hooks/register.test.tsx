@@ -14,6 +14,10 @@ import {
   parsePlan,
   parseTestOutput,
   applyBlocks,
+  barColor,
+  headline,
+  nextAction,
+  statusWords,
   describeRole,
   nodeIconSvg,
   stageRole,
@@ -58,6 +62,11 @@ const engine = (
 ) => {
   const opened: string[] = []
   const panes: { id: string }[] = []
+  const store = new Map<string, unknown>()
+  const notices: string[] = []
+  const copies: string[] = []
+  const toasts: string[] = []
+  const notify = { isSent: true }
   const processes: string[][] = []
   on('command.register', () => ({ value: { command: 'scv-hello' } }))
   on('ui.open', (_, e) => {
@@ -78,12 +87,29 @@ const engine = (
     if (e.path.endsWith('scv/dreams/latest.json') && dreams) return { value: dreams }
     return { deny: `ENOENT ${e.path}` }
   })
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  on('store.set', (_, e) => {
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('ui.notify', (_, e) => {
+    notices.push(e.text)
+    return { value: notify.isSent ? { isSent: true, channel: 'iterm2' } : { isSent: false, reason: 'no-surface' } } as never
+  })
+  on('ui.copy', (_, e) => {
+    copies.push(e.text)
+    return { value: { isCopied: true } } as never
+  })
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   on('process.run', (_, e) => {
     processes.push([...e.argv])
     return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
 
-  return { opened, processes, clock, panes }
+  return { opened, processes, clock, panes, store, notices, copies, toasts, notify }
 }
 
 const start = ($: Engine) =>
@@ -280,9 +306,11 @@ test('progress T8 계획이 여러 개면 선택 항목으로 고른다', async 
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await text(ui, /^진행 중 계획$/)).toBe('진행 중 계획')
+  expect((await ui.find({ type: 'Select', key: 'plan' }))?.props.value).toBe('20261022-a')
+  expect(await text(ui, /^상태: /)).toBe('상태: 만드는 중')
   await ui.select({ key: 'plan', value: '20261022-b' })
-  expect(await text(ui, /^대기 계획$/)).toBe('대기 계획')
+  expect((await ui.find({ type: 'Select', key: 'plan' }))?.props.value).toBe('20261022-b')
+  expect(await text(ui, /^상태: /)).toBe('상태: 시작 전')
   await ui.unmount()
 })
 
@@ -325,6 +353,65 @@ test('progress T11 계획이 없으면 확인한 폴더 경로를 보여 준다'
   expect(await text(ui, /진행 중인 SCV 계획이 없습니다/)).toContain('계획이 없습니다')
   expect(await text(ui, /^확인한 곳/)).toBe('확인한 곳: /work/scv/promote')
   await ui.unmount()
+})
+
+test('progress T12 맨 위 한 줄 요약 · 상태 쉬운 말 · 다음 할 일과 명령 복사', async ($, on) => {
+  const stages = [st('a', 'done'), st('b', 'doing')]
+  expect(headline([...stages], [], { kind: 'unknown' }, String)).toBe('2단계 진행 중 · 막힘 없음 · 남은 시간 추정 불가')
+  expect(statusWords('testing', [{ name: 'a', state: 'done', refs: [] }])).toBe('단계 끝 · 시험 확인 중')
+  expect(statusWords('in_progress', [...stages])).toBe('만드는 중')
+  expect(nextAction('s', 'in_progress', [...stages], [{ kind: 'waiting', title: '', detail: '' }]).text).toBe('Claude가 묻고 있어요 — 대화창에서 답하기')
+  expect(nextAction('s', 'planned', [], [])).toEqual({ text: '시작하기', command: '/scv:work s' })
+
+  const { copies } = engine(on, { a: plan({ title: 'p', status: 'testing', steps: ['[x] a', '[x] b'] }) })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^모든 단계 끝 · /)).toBe('모든 단계 끝 · 막힘 없음 · 남은 단계 없음')
+  expect(await text(ui, /^상태: /)).toBe('상태: 단계 끝 · 시험 확인 중')
+  expect(await text(ui, /^다음: /)).toBe('다음: 모든 단계 끝 — 보관하기')
+  await ui.press({ key: 'next-copy' })
+  expect(copies).toEqual(['/scv:work a --archive'])
+  expect(await text(ui, /^복사함/)).toBe('복사함: /scv:work a --archive')
+  await ui.unmount()
+})
+
+test('progress T13 시험 결과는 세션을 넘어 기억된다 (모드 전용 저장소)', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'testing', steps: ['a'], tests: ['one'] }) })
+  store.set('runs:/work', [{ command: 'npm run verify-dashboard', isOk: true, at: 1_000_000 - 7_200_000, byId: { T1: 'pass' }, failLines: [] }])
+  on('tool.call', () => ({ result: { stdout: '(pass) T1 one', stderr: '' } }))
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^마지막 실행/)).toBe('마지막 실행: 통과 · 2시간 0분 전')
+  await ui.unmount()
+
+  await $.tool.call({ tool: 'Bash', command: 'npm run verify-dashboard' })
+  expect((store.get('runs:/work') as unknown[]).length).toBe(2)
+})
+
+test('progress T14 답 대기·시험 실패 때 알림 한 번, 앱에 알림 통로가 없으면 시스템 알림', async ($, on) => {
+  const { notices, processes, notify } = engine(on, { a: plan({ title: 'p', status: 'testing', steps: ['a'], tests: ['one', 'two'] }) })
+  on('tool.call', (_, e) =>
+    e.tool === 'Bash' ? { isError: true, result: {}, text: '(fail) T2 two' } : { result: { answers: {} } },
+  )
+  await start($)
+  await $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{ question: 'Q?', header: 'h', multiSelect: false, options: [{ label: 'a', description: '' }, { label: 'b', description: '' }] }],
+  })
+  await $.tool.call({ tool: 'Bash', command: 'npm run verify-dashboard' })
+  expect(notices).toEqual(['답을 기다리는 중 — Q?', '시험 실패 — T2'])
+  expect(processes).toEqual([])
+
+  notify.isSent = false
+  await $.tool.call({ tool: 'Bash', command: 'npm run verify-dashboard' })
+  expect(processes[0]?.[0]).toBe('osascript')
+})
+
+test('progress T15 진행률 막대도 신호등 색', () => {
+  const st2 = (state: 'done' | 'doing' | 'blocked' | 'waiting') => ({ name: 'x', state, refs: [] })
+  expect(barColor([st2('done'), st2('done')], [])).toBe('#3fb950')
+  expect(barColor([st2('done'), st2('doing')], [])).toBe('#e3b341')
+  expect(barColor([st2('doing')], [{ kind: 'test', title: '', detail: '' }])).toBe('#f85149')
 })
 
 // ── live plan ────────────────────────────────────────────────────────────────
