@@ -13,6 +13,7 @@ import {
   parseDreams,
   parsePlan,
   parseTestOutput,
+  stageGraphSvg,
 } from './model'
 
 const PANE = {
@@ -117,7 +118,31 @@ test('progress T2 단계 흐름이 완료·진행·막힘·대기를 구분', as
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   expect(await text(ui, /완료 2 · 진행 1 · 막힘 1 · 대기 1/)).toBe('완료 2 · 진행 1 · 막힘 1 · 대기 1')
+  const graph = await ui.find({ type: 'Svg' })
+  expect(graph?.props.alt).toBe('1. a: 완료 → 2. b: 완료 → 3. c: 진행 중 → 4. d: 막힘 → 5. e: 대기')
   await ui.unmount()
+})
+
+test('progress T2b 단계 흐름 그래프 — 노드가 선으로 이어지고 지금 멈춘 곳에 표시', () => {
+  const svg = stageGraphSvg([
+    { name: '준비', state: 'done' },
+    { name: '화면 만들기', state: 'doing' },
+    { name: '올리기', state: 'waiting' },
+  ])
+  expect((svg.match(/<circle [^>]*r="12"/g) ?? []).length).toBe(3)
+  expect((svg.match(/<line /g) ?? []).length).toBe(2)
+  expect(svg).toContain('#3fb950')
+  expect(svg).toContain('#4f8cff')
+  expect(svg).toContain('stroke-dasharray')
+  expect((svg.match(/지금 여기/g) ?? []).length).toBe(1)
+  expect(svg.indexOf('지금 여기')).toBeGreaterThan(svg.indexOf('2. 화면 만들기'))
+  expect(svg.indexOf('지금 여기')).toBeLessThan(svg.indexOf('3. 올리기'))
+
+  const blocked = stageGraphSvg([{ name: 'a', state: 'done' }, { name: 'b <x>', state: 'blocked' }])
+  expect(blocked).toContain('#f85149')
+  expect(blocked).toContain('b &lt;x&gt;')
+  expect(blocked).toContain('지금 여기')
+  expect(stageGraphSvg([{ name: 'a', state: 'done' }])).not.toContain('지금 여기')
 })
 
 test('progress T3 표시가 없으면 계획 상태로 짐작하고 추정을 붙인다', async ($, on) => {
