@@ -11,6 +11,7 @@ Claude Code mods for the SCV workflow.
   - blocked cards: waiting for your answer, a failed test run
   - test results per TESTS.md scenario, from test commands run in this session
   - the latest `/scv:dreams` summary, its improvement items, and a button that opens the report
+  - press a step number to see what that step builds, in the plan's pipeline terms (name · input → output · pure or side effect), and what was done during it in this session; a step line names its pipeline steps after a dash: `3. Draw the pane — \`render\``
   - a plan picker when there are several plans; buttons to expand each section
 
   It opens when a session starts; if you close it, it reopens on your next message, or type `/scv-hello`. The terminal is not a target.

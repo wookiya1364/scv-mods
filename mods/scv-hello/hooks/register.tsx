@@ -1,8 +1,9 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { Expanded, Live, PlanFile, Snapshot, StageState } from '../types'
+import type { Expanded, Live, PlanFile, Snapshot, StageState, WorkEntry } from '../types'
 import {
+  applyBlocks,
   applyTaskEvent,
   countStages,
   deriveStages,
@@ -11,6 +12,7 @@ import {
   findBlocks,
   formatDuration,
   isTestCommand,
+  logWork,
   mergeTests,
   parseDreams,
   parsePlans,
@@ -20,6 +22,7 @@ import {
   runFor,
   stageGraphAlt,
   stageGraphSvg,
+  stageRole,
 } from './model'
 
 const PANE = 'scv-hello'
@@ -36,8 +39,10 @@ const tasks = atom({ plugin: 'scv-hello', key: 'tasks' } as const, [])
 const history = atom({ plugin: 'scv-hello', key: 'history' } as const, [])
 const now = atom({ plugin: 'scv-hello', key: 'now' } as const, 0)
 const note = atom({ plugin: 'scv-hello', key: 'note' } as const, null as string | null)
+const focusStep = atom({ plugin: 'scv-hello', key: 'focusStep' } as const, null as number | null)
+const stepLog = atom({ plugin: 'scv-hello', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
 
-const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행', blocked: '막힘', waiting: '대기' }
+const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
 const STATE_MARK: Record<StageState, string> = { done: '✓', doing: '▶', blocked: '⛔', waiting: '○' }
 const STATE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#8b949e' }
 const RESULT_LABEL = { pass: '통과', fail: '실패', none: '결과 없음' } as const
@@ -125,6 +130,12 @@ export const register: Register = on => {
     const at = await $.clock.now()
     await update($, live, value => ({ ...value, tool: { name: e.tool, target: describeTool(e.tool, input), startedAt: at } }))
     await update($, tasks, list => applyTaskEvent(list, e.tool, input))
+    const plan = pickPlan(parsePlans((await read($, snapshot)).plans), await read($, chosen))
+    const current = plan ? deriveStages(plan).stages.findIndex(stage => stage.state === 'doing') : -1
+    if (plan && current >= 0) {
+      const entry = { tool: e.tool, target: describeTool(e.tool, input), at }
+      await update($, stepLog, log => logWork(log, `${plan.slug}#${current}`, entry))
+    }
     if (e.tool === 'AskUserQuestion') await update($, waiting, () => describeTool(e.tool, input) || '질문')
 
     try {
@@ -193,14 +204,20 @@ export const register: Register = on => {
       )
     }
 
-    const { stages, isEstimated } = deriveStages(plan)
-    const count = countStages(stages)
+    const derived = deriveStages(plan)
+    const isEstimated = derived.isEstimated
     const run = runFor(plan, await read($, runs))
     const rows = mergeTests(plan, run)
-    const blocks = findBlocks(stages, run, asked)
+    const blocks = findBlocks(derived.stages, run, asked)
+    const stages = applyBlocks(derived.stages, blocks)
+    const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked')
+    const focused = (await read($, focusStep)) ?? (here >= 0 ? here : null)
+    const focusedStage = focused === null ? undefined : stages[focused]
+    const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
+    const count = countStages(stages)
     const eta = estimateEta(await read($, history), plan.slug, count.total - count.done)
     const percent = count.total ? Math.round((count.done / count.total) * 100) : 0
-    const current = stages.find(stage => stage.state === 'doing')
+    const current = stages.find(stage => stage.state === 'doing' || stage.state === 'blocked')
     const doneTasks = todo.filter(task => task.status === 'completed').length
     const doingTask = todo.find(task => task.status === 'in_progress')
 
@@ -302,7 +319,6 @@ export const register: Register = on => {
           <>
             <Box flexDirection="row" justifyContent="space-between">
               <Text bold>단계 흐름{isEstimated ? ' (추정)' : ''}</Text>
-              <Button key="steps-toggle" label={open.steps ? '단계 접기' : '단계 펼치기'} onPress={toggle('steps')} />
             </Box>
             {Svg ? (
               <Svg source={stageGraphSvg(stages)} alt={stageGraphAlt(stages)} isInteractive />
@@ -312,10 +328,38 @@ export const register: Register = on => {
               </Box>
             )}
             <Text dimColor>{`완료 ${count.done} · 진행 ${count.doing} · 막힘 ${count.blocked} · 대기 ${count.waiting}`}</Text>
-            {open.steps &&
-              stages.map((stage, i) => (
-                <Text color={STATE_COLOR[stage.state]}>{`${i + 1}. ${STATE_MARK[stage.state]} ${stage.name} — ${STATE_LABEL[stage.state]}`}</Text>
+            <Box flexDirection="row" flexWrap="wrap" gap={1}>
+              {stages.map((stage, i) => (
+                <Button
+                  key={`step-${i + 1}`}
+                  label={`${i + 1}`}
+                  variant={i === focused ? 'primary' : 'secondary'}
+                  onPress={() => void update($, focusStep, value => (value === i ? null : i))}
+                />
               ))}
+            </Box>
+            {focusedStage && focused !== null ? (
+              <Box flexDirection="column" borderStyle="round" borderColor={STATE_COLOR[focusedStage.state]} paddingX={1} marginTop={1}>
+                <Text bold color={STATE_COLOR[focusedStage.state]}>{`${focused + 1}. ${focusedStage.name} — ${STATE_LABEL[focusedStage.state]}`}</Text>
+                <Text bold>만드는 역할</Text>
+                {stageRole(focusedStage, plan.pipeline).length > 0 ? (
+                  stageRole(focusedStage, plan.pipeline).map(role => (
+                    <>
+                      <Text>{`${role.name} — ${role.kind}`}</Text>
+                      <Text dimColor>{`  ${role.io}`}</Text>
+                    </>
+                  ))
+                ) : (
+                  <Text dimColor>계획서 파이프라인 표에서 이 단계와 이어진 역할을 찾지 못했습니다.</Text>
+                )}
+                <Text bold>이 단계에서 한 일</Text>
+                {work.length > 0 ? (
+                  work.map(entry => <Text dimColor>{`${entry.tool}${entry.target ? `: ${entry.target}` : ''}`}</Text>)
+                ) : (
+                  <Text dimColor>이 세션에서 기록된 일 없음</Text>
+                )}
+              </Box>
+            ) : null}
           </>,
         )}
 
