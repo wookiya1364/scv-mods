@@ -57,8 +57,8 @@ flow(
   applySignal,          // (기록, 신호) → 기록
   mergeMarks,           // (계획, 기록) → 표시가 합쳐진 계획
   deriveStages,         // (계획) → Stage[]             (재사용)
-  stepTimesFromSignals, // (기록, 계획) → 단계 시각
-  estimateEta,          // (단계 시각, 남은 단계) → 추정  (재사용)
+  stepDurationsFromSignals, // (기록, 계획 이름) → 단계마다 걸린 시간
+  estimateFromDurations,    // (걸린 시간들, 남은 단계) → 추정
 )
 buildStepPrompt         // (계획 목록) → 지시 글 | 없음
 ```
@@ -69,7 +69,7 @@ buildStepPrompt         // (계획 목록) → 지시 글 | 없음
 | 2 | checkSignal | 있는 계획·있는 단계를 가리키는지, 막힘·진행이 지금 단계에만 오는지 확인한다 | 신호, 계획 목록 → 맞음 / 틀림 이유 | 순수 |
 | 3 | applySignal | 맞는 신호를 기록에 더한다. 같은 단계면 새 신호가 이긴다 | 기록, 신호 → 새 기록 | 순수 |
 | 4 | mergeMarks | 계획서 표시와 기록을 합쳐 단계마다 상태를 정한다 | 계획, 기록 → 표시가 합쳐진 계획 | 순수 |
-| 5 | stepTimesFromSignals | 단계가 끝난 시각들로 '몇 단계가 언제 끝났나' 목록을 만든다 | 기록, 계획 → 단계 시각 | 순수 |
+| 5 | stepDurationsFromSignals | 단계마다 걸린 시간을 잰다 — 시작 신호부터, 없으면 앞 단계 끝부터(한꺼번에 보고한 끝은 빼고) | 기록, 계획 이름 → 걸린 시간들 | 순수 |
 | 6 | buildStepPrompt | 진행 중 계획이 있을 때만 Claude에게 붙일 짧은 지시를 만든다 | 계획 목록 → 지시 글 / 없음 | 순수 |
 | 7 | 저장 · 그리기 | 기록을 모드 저장소에 두고, 지시를 붙이고, 칸을 다시 그린다 | 기록 · 지시 → 저장소 · 프롬프트 · 화면 | 부수효과 (출구) |
 
@@ -92,10 +92,10 @@ buildStepPrompt         // (계획 목록) → 지시 글 | 없음
 
 ## Suggested path
 
-1. [x] 신호 순수 함수 + 단위 시험 — `checkSignal` `applySignal` `mergeMarks` `stepTimesFromSignals` `buildStepPrompt`
+1. [x] 신호 순수 함수 + 단위 시험 — `checkSignal` `applySignal` `mergeMarks` `stepDurationsFromSignals` `buildStepPrompt`
 2. [x] 신호 도구 등록 · 허락 창 없이 통과 · 프로젝트 폴더별 저장 — `신호 받기` `저장 · 그리기`
 3. [x] 진행 중 계획이 있을 때만 Claude 지시에 붙이기 — `buildStepPrompt`
-4. [x] 단계 흐름 · 진행률 · 예상 시간이 합친 표시를 따르게 — `mergeMarks` `stepTimesFromSignals`
+4. [x] 단계 흐름 · 진행률 · 예상 시간이 합친 표시를 따르게 — `mergeMarks` `stepDurationsFromSignals`
 5. [~] 자동 시험 · 형식 검사 · 비밀 값 검사 · (물어본 뒤) 올리기 · 맥 앱에서 확인
 
 ## Related Documents

@@ -20,7 +20,7 @@ export type Plan = {
 export type Stage = { name: string; state: StageState; refs: string[]; note?: string }
 
 // What Claude reported about one step of a plan's Suggested path, kept in the mod's own store.
-export type StepSignal = { plan: string; step: number; state: 'doing' | 'done' | 'blocked'; note: string; at: number }
+export type StepSignal = { plan: string; step: number; state: 'doing' | 'done' | 'blocked'; note: string; at: number; startedAt?: number }
 
 export type WorkEntry = { tool: string; target: string; at: number }
 
@@ -34,13 +34,29 @@ export type TestRun = {
 
 export type TestRow = { id: string; name: string; result: 'pass' | 'fail' | 'none' }
 
-export type Block = { kind: 'waiting' | 'test' | 'stage'; title: string; detail: string }
+export type Block = { kind: 'waiting' | 'permit' | 'stopped' | 'test' | 'stage'; title: string; detail: string }
+
+// A permission prompt on screen: which tool asks, and since when.
+export type Permit = { tool: string; target: string; at: number }
+
+// The main turn ended without finishing its answer: an error, or a refusal.
+export type Stopped = { why: 'error' | 'refusal'; at: number }
+
+// A subagent at work: its name and the last tool it used, since when.
+export type AgentState = { id: string; name: string; tool: string; target: string; at: number }
+
+// The moment the person last sent a message, and which steps of the plan on screen were done then.
+export type Since = { at: number; slug: string; doneSteps: number[] }
+
+// One usage window as the session reports it: five_hour, seven_day or a gateway's spend_limit.
+export type UsageLimit = { kind: string; percentUsed: number; resetsAt?: string }
 
 export type Task = { id: string; subject: string; status: 'pending' | 'in_progress' | 'completed' }
 
 export type Dreams = { date: string; items: string[]; reportPath: string | null }
 
-export type Snapshot = { plans: PlanFile[]; dreamsText: string | null; cwd: string }
+// cwd: the project folder the pane reads (the nearest holding scv/); root: the session root it was found from.
+export type Snapshot = { plans: PlanFile[]; dreamsText: string | null; cwd: string; root: string }
 
 export type Live = {
   isWorking: boolean
@@ -66,6 +82,11 @@ declare module 'claude-code' {
       focusStep: number | null
       stepLog: Record<string, WorkEntry[]>
       signals: StepSignal[]
+      permit: Permit | null
+      stopped: Stopped | null
+      agents: AgentState[]
+      since: Since | null
+      limits: UsageLimit[]
     }
   }
 }
