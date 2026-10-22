@@ -4,7 +4,7 @@ Claude Code mods for the SCV workflow.
 
 ## Mods
 
-- **scv-hello** — shows a one-line status (`scv-hello: on (<surfaces>)`) and a short toast when a session starts. A smoke test that the mod loads on this machine.
+- **scv-hello** — opens an "SCV" pane when a session starts, showing which surface draws it and where it is placed (dock or inline), with a button that raises a toast. A placement test for the SCV dashboard pane.
 
 ## Install
 
