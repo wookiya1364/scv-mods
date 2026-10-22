@@ -4,7 +4,7 @@ Claude Code mods for the SCV workflow.
 
 ## Mods
 
-- **scv-hello** — opens an "SCV" pane when a session starts, showing which surface draws it and where it is placed (dock or inline), with a button that raises a toast. A placement test for the SCV dashboard pane.
+- **scv-hello** — opens an "SCV" pane when a session starts, showing which surface draws it and where it is placed (dock or inline), with a button that raises a toast. A placement test for the SCV dashboard pane. If you close it, it reopens on your next message, or type `/scv-hello`.
 
 ## Install
 
