@@ -1,6 +1,8 @@
 export type StageState = 'done' | 'doing' | 'blocked' | 'waiting'
 
-export type StepMark = { name: string; mark: StageState | undefined }
+export type StepMark = { name: string; mark: StageState | undefined; refs: string[] }
+
+export type PipelineStep = { name: string; io: string; kind: string }
 
 export type PlanFile = { slug: string; planText: string; testsText: string }
 
@@ -11,9 +13,12 @@ export type Plan = {
   steps: StepMark[]
   scenarios: { id: string; name: string }[]
   howToRun: string[]
+  pipeline: PipelineStep[]
 }
 
-export type Stage = { name: string; state: StageState }
+export type Stage = { name: string; state: StageState; refs: string[] }
+
+export type WorkEntry = { tool: string; target: string; at: number }
 
 export type TestRun = {
   command: string
@@ -54,6 +59,8 @@ declare module 'claude-code' {
       history: { slug: string; done: number; at: number }[]
       now: number
       note: string | null
+      focusStep: number | null
+      stepLog: Record<string, WorkEntry[]>
     }
   }
 }

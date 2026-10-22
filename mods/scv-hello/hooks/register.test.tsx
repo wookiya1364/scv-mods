@@ -13,7 +13,9 @@ import {
   parseDreams,
   parsePlan,
   parseTestOutput,
+  applyBlocks,
   stageGraphSvg,
+  stageRole,
 } from './model'
 
 const PANE = {
@@ -30,10 +32,12 @@ const PANE = {
   },
 } as const
 
-const plan = (opts: { title: string; status: string; steps: string[]; tests?: string[] }) => ({
-  planText: `---\ntitle: ${opts.title}\nstatus: ${opts.status}\n---\n\n## Suggested path\n\n${opts.steps.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n\n## Related Documents\n`,
+const plan = (opts: { title: string; status: string; steps: string[]; tests?: string[]; pipeline?: string[] }) => ({
+  planText: `---\ntitle: ${opts.title}\nstatus: ${opts.status}\n---\n\n## 순수함수 · 파이프라인 (Pure functions & pipeline)\n\n| # | 단계 | 받는 값 → 돌려주는 값 | 순수/부수효과 |\n|---|---|---|---|\n${(opts.pipeline ?? []).map((row, i) => `| ${i + 1} | ${row} |`).join('\n')}\n\n## Suggested path\n\n${opts.steps.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n\n## Related Documents\n`,
   testsText: `# Tests\n\n## Test scenarios\n\n${(opts.tests ?? []).map((name, i) => `### T${i + 1}. ${name}\n`).join('\n')}\n## How to run\n\n\`\`\`bash\nnpm run verify-dashboard\n\`\`\`\n`,
 })
+
+const st = (name: string, state: 'done' | 'doing' | 'blocked' | 'waiting') => ({ name, state, refs: [] as string[] })
 
 const ELEVEN = ['[x] a', '[x] b', '[x] c', '[x] d', '[x] e', '[~] f', 'g', 'h', 'i', 'j', 'k']
 
@@ -111,23 +115,23 @@ test('progress T2 단계 흐름이 완료·진행·막힘·대기를 구분', as
     'done',
     'done',
     'doing',
-    'blocked',
+    'waiting',
     'waiting',
   ])
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await text(ui, /완료 2 · 진행 1 · 막힘 1 · 대기 1/)).toBe('완료 2 · 진행 1 · 막힘 1 · 대기 1')
+  expect(await text(ui, /완료 2 · 진행 1 · 막힘 0 · 대기 2/)).toBe('완료 2 · 진행 1 · 막힘 0 · 대기 2')
   const graph = await ui.find({ type: 'Svg' })
-  expect(graph?.props.alt).toBe('1. a: 완료 → 2. b: 완료 → 3. c: 진행 중 → 4. d: 막힘 → 5. e: 대기')
+  expect(graph?.props.alt).toBe('1. a: 완료 → 2. b: 완료 → 3. c: 진행 중 → 4. d: 대기 → 5. e: 대기')
   await ui.unmount()
 })
 
 test('progress T2b 단계 흐름 그래프 — 노드가 선으로 이어지고 지금 멈춘 곳에 표시', () => {
   const svg = stageGraphSvg([
-    { name: '준비', state: 'done' },
-    { name: '화면 만들기', state: 'doing' },
-    { name: '올리기', state: 'waiting' },
+    st('준비', 'done'),
+    st('화면 만들기', 'doing'),
+    st('올리기', 'waiting'),
   ])
   expect((svg.match(/<circle [^>]*r="12"/g) ?? []).length).toBe(3)
   expect((svg.match(/<line /g) ?? []).length).toBe(2)
@@ -138,11 +142,33 @@ test('progress T2b 단계 흐름 그래프 — 노드가 선으로 이어지고 
   expect(svg.indexOf('지금 여기')).toBeGreaterThan(svg.indexOf('2. 화면 만들기'))
   expect(svg.indexOf('지금 여기')).toBeLessThan(svg.indexOf('3. 올리기'))
 
-  const blocked = stageGraphSvg([{ name: 'a', state: 'done' }, { name: 'b <x>', state: 'blocked' }])
+  const blocked = stageGraphSvg([st('a', 'done'), st('b <x>', 'blocked')])
   expect(blocked).toContain('#f85149')
   expect(blocked).toContain('b &lt;x&gt;')
   expect(blocked).toContain('지금 여기')
-  expect(stageGraphSvg([{ name: 'a', state: 'done' }])).not.toContain('지금 여기')
+  expect(stageGraphSvg([st('a', 'done')])).not.toContain('지금 여기')
+})
+
+test('progress T2c 막힘은 지금 단계에만 — 시작 안 한 단계는 대기, 답 대기·시험 실패면 지금 단계가 막힘', async ($, on) => {
+  const states = (steps: string[]) =>
+    deriveStages(parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps }) })).stages.map(s => s.state)
+  expect(states(['[x] a', '[!] b', 'c'])).toEqual(['done', 'blocked', 'waiting'])
+  expect(states(['[x] a', 'b', '[!] c'])).toEqual(['done', 'doing', 'waiting'])
+  expect(applyBlocks([st('a', 'done'), st('b', 'doing')], [{ kind: 'waiting', title: '', detail: '' }]).map(s => s.state)).toEqual(['done', 'blocked'])
+  expect(applyBlocks([st('a', 'done'), st('b', 'doing')], []).map(s => s.state)).toEqual(['done', 'doing'])
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  const seen: string[] = []
+  on('tool.call', async () => {
+    seen.push(await drawnText($))
+    return { result: { answers: {} } }
+  })
+  await start($)
+  await $.tool.call({
+    tool: 'AskUserQuestion',
+    questions: [{ question: 'Q?', header: 'h', multiSelect: false, options: [{ label: 'a', description: '' }, { label: 'b', description: '' }] }],
+  })
+  expect(seen[0]).toContain('1. a: 완료 → 2. b: 막힘 → 3. c: 대기')
 })
 
 test('progress T3 표시가 없으면 계획 상태로 짐작하고 추정을 붙인다', async ($, on) => {
@@ -209,16 +235,33 @@ test('progress T6 시험 결과 목록은 시나리오마다 통과·실패·결
   await ui.unmount()
 })
 
-test('progress T7 펼쳐 보기 버튼이 상세를 열고 닫는다', async ($, on) => {
-  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] 첫 단계', '둘째 단계'] }) })
+test('progress T7 단계를 누르면 그 단계가 만드는 역할(파이프라인)과 한 일이 보인다', async ($, on) => {
+  const pipeline = ['`parsePlans` | 글 → Plan[] | 순수', '`render` | View → 화면 | 부수효과 (출구)']
+  const steps = ['[x] 파싱 만들기 — `parsePlans`', '화면 그리기 — `render`']
+  const parsed = parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps, pipeline }) })
+  expect(parsed.steps.map(step => step.name)).toEqual(['파싱 만들기', '화면 그리기'])
+  expect(stageRole({ ...st('파싱 만들기', 'done'), refs: ['parsePlans'] }, parsed.pipeline)).toEqual([
+    { name: 'parsePlans', io: '글 → Plan[]', kind: '순수' },
+  ])
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps, pipeline }) })
+  on('tool.call', () => ({ result: {} }))
   await start($)
+  await $.tool.call({ tool: 'Edit', file_path: '/work/hooks/view.tsx', old_string: 'a', new_string: 'b' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await text(ui, /첫 단계/)).toBeUndefined()
-  await ui.press({ key: 'steps-toggle' })
-  expect(await text(ui, /첫 단계/)).toBe('1. ✓ 첫 단계 — 완료')
-  await ui.press({ key: 'steps-toggle' })
-  expect(await text(ui, /첫 단계/)).toBeUndefined()
+  expect(await text(ui, /^2\. 화면 그리기 — /)).toBe('2. 화면 그리기 — 진행 중')
+  expect(await text(ui, /^render — /)).toBe('render — 부수효과 (출구)')
+  expect(await text(ui, /View → 화면/)).toContain('View → 화면')
+  expect(await text(ui, /^Edit: view\.tsx$/)).toBe('Edit: view.tsx')
+
+  await ui.press({ key: 'step-1' })
+  expect(await text(ui, /^1\. 파싱 만들기 — /)).toBe('1. 파싱 만들기 — 완료')
+  expect(await text(ui, /^parsePlans — /)).toBe('parsePlans — 순수')
+  expect(await text(ui, /이 세션에서 기록된 일 없음/)).toBe('이 세션에서 기록된 일 없음')
+
+  await ui.press({ key: 'step-1' })
+  expect(await text(ui, /^1\. 파싱 만들기 — /)).toBeUndefined()
   await ui.unmount()
 })
 
@@ -260,7 +303,7 @@ test('progress T10 프로젝트 파일을 쓰지 않는다', async ($, on) => {
   await start($)
   await $.tool.call({ tool: 'Bash', command: 'npm test' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'steps-toggle' })
+  await ui.press({ key: 'step-1' })
   await ui.press({ key: 'dreams-report' })
   await ui.unmount()
 

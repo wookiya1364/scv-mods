@@ -1,7 +1,7 @@
 // Pure steps of the SCV dashboard: text in, values out, nothing read or written.
 // The hooks module reads the files and watches the session; these only shape what it saw.
 
-import type { Block, Dreams, PlanFile, Plan, Stage, StageState, StepMark, Task, TestRow, TestRun } from '../types'
+import type { Block, Dreams, PipelineStep, PlanFile, Plan, Stage, StageState, StepMark, Task, TestRow, TestRun, WorkEntry } from '../types'
 
 const STATUS_ORDER = ['in_progress', 'testing', 'planned', 'done', 'archived']
 
@@ -23,13 +23,28 @@ const section = (text: string, names: readonly string[]) => {
   return lines.slice(start + 1, end < 0 ? undefined : end)
 }
 
+// A step line may name the pipeline steps it builds after a dash: "화면 그리기 — `render`".
+const splitRefs = (text: string) => {
+  const [head = '', tail] = text.split(/\s+—\s+(?=`)/)
+
+  return { name: head.trim(), refs: [...(tail ?? '').matchAll(/`([^`]+)`/g)].map(([, ref = '']) => ref.trim()) }
+}
+
 const parseStep = (raw: string): StepMark => {
   for (const [pattern, state] of MARKS) {
-    if (pattern.test(raw)) return { name: raw.replace(pattern, '').trim(), mark: state }
+    if (pattern.test(raw)) return { ...splitRefs(raw.replace(pattern, '')), mark: state }
   }
 
-  return { name: raw.trim(), mark: undefined }
+  return { ...splitRefs(raw), mark: undefined }
 }
+
+const cell = (text: string) => text.trim().replace(/^`|`$/g, '')
+
+const parsePipeline = (planText: string): PipelineStep[] =>
+  section(planText, ['순수함수 · 파이프라인 (Pure functions & pipeline)', '순수함수 · 파이프라인', 'Pure functions & pipeline'])
+    .map(line => line.split('|').slice(1, -1))
+    .filter(cells => cells.length >= 4 && /^\s*\d+\s*$/.test(cells[0] ?? ''))
+    .map(([, name = '', io = '', kind = '']) => ({ name: cell(name), io: cell(io), kind: cell(kind) }))
 
 const howToRun = (testsText: string) =>
   section(testsText, ['How to run', '실행 방법'])
@@ -46,6 +61,7 @@ export const parsePlan = (file: PlanFile): Plan => ({
     .map(parseStep),
   scenarios: [...file.testsText.matchAll(/^###\s+(T\d+)\.\s*(.+)$/gm)].map(([, id = '', name = '']) => ({ id, name: name.trim() })),
   howToRun: howToRun(file.testsText),
+  pipeline: parsePipeline(file.planText),
 })
 
 export const parsePlans = (files: readonly PlanFile[]): Plan[] =>
@@ -67,14 +83,19 @@ export const deriveStages = (plan: Plan): { stages: Stage[]; isEstimated: boolea
   const isFinished = plan.status === 'done' || plan.status === 'archived'
   const isStarted = plan.status === 'in_progress' || plan.status === 'testing'
 
-  if (isFinished) return { stages: plan.steps.map(step => ({ name: step.name, state: 'done' })), isEstimated: !isMarked }
+  if (isFinished) return { stages: plan.steps.map(step => ({ name: step.name, refs: step.refs, state: 'done' })), isEstimated: !isMarked }
 
-  const stages: Stage[] = plan.steps.map(step => ({ name: step.name, state: step.mark ?? 'waiting' }))
-  const hasDoing = stages.some(stage => stage.state === 'doing')
-  const next = stages.findIndex(stage => stage.state === 'waiting')
-  const isNext = (i: number) => isStarted && !hasDoing && i === next
+  // Work stands at one place: the first step not done. Only that step may be doing or blocked;
+  // a later step has not started, so whatever its mark says it is still waiting.
+  const current = plan.steps.findIndex(step => step.mark !== 'done')
+  const stages: Stage[] = plan.steps.map((step, i) => {
+    const state: StageState =
+      step.mark === 'done' ? 'done' : i !== current ? 'waiting' : step.mark === 'blocked' ? 'blocked' : step.mark === 'doing' || isStarted ? 'doing' : 'waiting'
 
-  return { stages: stages.map((stage, i) => (isNext(i) ? { ...stage, state: 'doing' } : stage)), isEstimated: !isMarked }
+    return { name: step.name, refs: step.refs, state }
+  })
+
+  return { stages, isEstimated: !isMarked }
 }
 
 export const countStages = (stages: readonly Stage[]) => ({
@@ -129,6 +150,26 @@ export const findBlocks = (stages: readonly Stage[], run: TestRun | undefined, w
     : []),
   ...stages.filter(stage => stage.state === 'blocked').map(stage => ({ kind: 'stage' as const, title: '막힌 단계', detail: stage.name })),
 ]
+
+// A live block (an unanswered question, a failed test run) stops the step in progress.
+export const applyBlocks = (stages: readonly Stage[], blocks: readonly Block[]): Stage[] =>
+  blocks.some(block => block.kind !== 'stage')
+    ? stages.map(stage => (stage.state === 'doing' ? { ...stage, state: 'blocked' } : stage))
+    : [...stages]
+
+// What a step builds, said as the plan's pipeline: the rows it names, else the rows its words mention.
+export const stageRole = (stage: Stage, pipeline: readonly PipelineStep[]): PipelineStep[] => {
+  const named = pipeline.filter(step => stage.refs.includes(step.name))
+
+  return named.length > 0 ? named : pipeline.filter(step => step.name.length > 1 && stage.name.includes(step.name))
+}
+
+export const logWork = (log: Readonly<Record<string, WorkEntry[]>>, key: string, entry: WorkEntry): Record<string, WorkEntry[]> => {
+  const last = log[key]?.[log[key].length - 1]
+  if (last?.tool === entry.tool && last.target === entry.target) return { ...log }
+
+  return { ...log, [key]: [...(log[key] ?? []), entry].slice(-8) }
+}
 
 const shorten = (text: string, room: number) => (text.length > room ? `${text.slice(0, room - 1)}…` : text)
 
