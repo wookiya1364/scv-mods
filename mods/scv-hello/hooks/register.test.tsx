@@ -46,3 +46,23 @@ test('the pane draws and its button raises a toast, on every surface', async ($,
 
   expect(toasts).toEqual(Array(4).fill('scv-hello: button pressed'))
 })
+
+const typed = (text: string) => ({ text, wait: false, origin: { kind: 'composer' } }) as const
+
+test('a prompt reopens the pane after the person closed it', async ($, on) => {
+  const opened: string[] = []
+  let panes: { id: string }[] = []
+  on('ui.panes', () => ({ value: panes as never }))
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+
+  await $.prompt.submit(typed('hi'))
+  expect(opened).toEqual(['scv-hello'])
+
+  panes = [{ id: 'scv-hello' }]
+  await $.prompt.submit(typed('again'))
+  expect(opened).toEqual(['scv-hello'])
+})
