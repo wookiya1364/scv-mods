@@ -4,7 +4,7 @@ Claude Code mods for the SCV workflow.
 
 ## Mods
 
-- **scv-hello** — the SCV dashboard, in an "SCV" pane beside the chat in the Claude desktop app (local sessions). It reads the session folder's `scv/promote/*/PLAN.md` and `TESTS.md` (read only; with no plan in progress, the newest archived plans under `scv/archive/` stand in) and shows:
+- **scv-dashboard** — the SCV dashboard, in an "SCV" pane beside the chat in the Claude desktop app (local sessions). It reads the session folder's `scv/promote/*/PLAN.md` and `TESTS.md` (read only; with no plan in progress, the newest archived plans under `scv/archive/` stand in) and shows:
   - a one-line summary at the top (where the work stands · anything stuck · time left) and the next thing to do, with buttons that put its command in the prompt box (keeping what you typed; copied instead where the box will not take it) or copy it, and the same command offered as the prompt box's dim suggestion (Tab) when a turn ends; the plan status in plain words
   - plan progress (Suggested path steps done / total) with a traffic-light bar, and the stage flow as connected step nodes (done · doing · blocked · waiting, with a "지금 여기" tag where the work stands); steps are read from `[x]` / `[~]` / `[!]` marks merged with the step signals Claude sends while it works (the `scv_step` tool the mod registers, which asks no permission and changes no file; Claude is told about it only while a plan is open in `scv/promote`), else estimated from the plan status
   - what Claude is doing now: the step, the tool and its file or command, elapsed time, the todo list, and one line per subagent at work (five at most, the rest counted)
@@ -19,26 +19,26 @@ Claude Code mods for the SCV workflow.
   - press a step node to see what that step does, in plain words from the plan's pipeline table (its 하는 일 column), and what was done during it in this session; a step line names its pipeline steps after a dash: `3. Draw the pane — \`render\``
   - a plan picker when there are several plans; buttons to expand each section
 
-  It opens when a session starts; if you close it, it reopens on your next message, or type `/scv-hello`. The terminal is not a target.
+  It opens when a session starts; if you close it, it reopens on your next message, or type `/scv-dashboard`. The terminal is not a target.
 
 ## Versions
 
 Each mod has a version number, shown by `/scv:mods` and `claude plugin list`. What each version holds is in its release notes, one file per version, and on the repository's Releases page:
 
-- scv-hello — [docs/releases/scv-hello](docs/releases/scv-hello/)
+- scv-dashboard — [docs/releases/scv-dashboard](docs/releases/scv-dashboard/)
 
 ## Install
 
 At the prompt of a terminal session:
 
 ```
-/plugin install scv-hello --marketplace wookiya1364/scv-mods
+/plugin install scv-dashboard --marketplace wookiya1364/scv-mods
 ```
 
 From a shell:
 
 ```
-claude plugin install scv-hello --marketplace wookiya1364/scv-mods
+claude plugin install scv-dashboard --marketplace wookiya1364/scv-mods
 ```
 
 In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `wookiya1364/scv-mods`, then Add plugin.
@@ -51,10 +51,12 @@ This repository is private: the install works only for GitHub accounts that can 
 
 ```
 claude plugin marketplace update scv-mods
-claude plugin update scv-hello@scv-mods
+claude plugin update scv-dashboard@scv-mods
 ```
 
 Then run `/reload-plugins` in an open session. A mod updates only when its version changes, that is, with a release; commits between releases do not reach installed copies.
+
+scv-dashboard was called scv-hello before its first release. A machine that still has scv-hello removes it and installs scv-dashboard once: `/scv:mods-remove` then `/scv:mods-install`, or from a shell `claude plugin uninstall scv-hello@scv-mods` then `claude plugin install scv-dashboard@scv-mods`. The marketplace keeps a `renames` entry from the old name to the new one.
 
 ## Releasing
 

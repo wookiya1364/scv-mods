@@ -5,8 +5,11 @@
   },
   "plugins": [
     {
-      "name": "scv-hello",
-      "source": "./marketplace/mods/scv-hello"
+      "name": "scv-dashboard",
+      "source": "./marketplace/mods/scv-dashboard"
     }
-  ]
+  ],
+  "renames": {
+    "scv-hello": "scv-dashboard"
+  }
 }

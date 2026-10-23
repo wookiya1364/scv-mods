@@ -306,7 +306,7 @@ export const ancestorsOf = (dir: string): string[] => {
 
 // ── step signals: Claude reports a step of the Suggested path; the mod keeps it in its own store ──
 
-export const STEP_TOOL = 'mcp__scv-hello__scv_step'
+export const STEP_TOOL = 'mcp__scv-dashboard__scv_step'
 
 const SIGNAL_STATES = ['doing', 'done', 'blocked'] as const
 
@@ -399,7 +399,7 @@ export const buildStepPrompt = (plans: readonly Plan[], tool = STEP_TOOL): strin
   if (open.length === 0) return null
 
   return [
-    `SCV step signal (scv-hello mod): while you implement one of this project's SCV plans, report each step of its Suggested path with the ${tool} tool`,
+    `SCV step signal (scv-dashboard mod): while you implement one of this project's SCV plans, report each step of its Suggested path with the ${tool} tool`,
     '— state "doing" when you start a step, "done" when you finish it, "blocked" with a one-line reason in note when you cannot go on.',
     "Steps are numbered as in the plan's Suggested path, starting at 1. It only updates the SCV pane and changes no file.",
     'If the tool is listed as deferred, load it with ToolSearch first.',

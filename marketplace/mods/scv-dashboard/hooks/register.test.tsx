@@ -42,9 +42,9 @@ import {
 } from './model'
 
 const PANE = {
-  plugin: 'scv-hello',
+  plugin: 'scv-dashboard',
   component: 'Pane',
-  requestId: 'scv-hello',
+  requestId: 'scv-dashboard',
   props: {
     title: 'SCV',
     isFocused: false,
@@ -87,8 +87,8 @@ const engine = (
   const toasts: string[] = []
   const notify = { isSent: true }
   const processes: string[][] = []
-  on('command.register', () => ({ value: { command: 'scv-hello' } }))
-  on('tool.register', (_, e) => ({ value: { tool: `mcp__scv-hello__${e.name}` } }) as never)
+  on('command.register', () => ({ value: { command: 'scv-dashboard' } }))
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__scv-dashboard__${e.name}` } }) as never)
   on('ui.open', (_, e) => {
     opened.push(e.id)
     return { value: { isPlaced: true } }
@@ -345,12 +345,12 @@ test('progress T9 세션 시작 때 열리고, 닫혀 있으면 다음 메시지
   on('prompt.submit', (_, e) => ({ text: e.text }))
 
   await start($)
-  expect(opened).toEqual(['scv-hello'])
+  expect(opened).toEqual(['scv-dashboard'])
   await $.prompt.submit(typed('hi'))
-  expect(opened).toEqual(['scv-hello', 'scv-hello'])
-  panes.push({ id: 'scv-hello' })
+  expect(opened).toEqual(['scv-dashboard', 'scv-dashboard'])
+  panes.push({ id: 'scv-dashboard' })
   await $.prompt.submit(typed('again'))
-  expect(opened).toEqual(['scv-hello', 'scv-hello'])
+  expect(opened).toEqual(['scv-dashboard', 'scv-dashboard'])
 })
 
 test('progress T10 프로젝트 파일을 쓰지 않는다', async ($, on) => {
@@ -759,7 +759,7 @@ test('step-signal T6 진행 중 계획이 있을 때만 Claude 지시가 붙는�
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base', scope: 'shared' as const }] }))
   await start($)
   const composed = await $.prompt.compose(COMPOSE)
-  const added = composed.sections.find(section => section.id === 'scv-hello:step-signal')
+  const added = composed.sections.find(section => section.id === 'scv-dashboard:step-signal')
   expect(added?.scope).toBe('session')
   expect(added?.text).toContain('a (5 steps)')
   expect(composed.sections[0]?.id).toBe('intro')
@@ -799,8 +799,8 @@ test('step-signal T8 세션을 새로 열어도 신호가 이어진다', async (
 test('step-signal T8b 세션이 하위 폴더에서 열려도 가장 가까운 scv 폴더의 계획을 따른다', async ($, on) => {
   expect(ancestorsOf('/work/marketplace/mods')).toEqual(['/work/marketplace/mods', '/work/marketplace', '/work', '/'])
   const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
-  on('session.root', () => ({ value: '/work/marketplace/mods/scv-hello' }))
-  await $.session.start({ cwd: '/work/marketplace/mods/scv-hello', surface: 'desktop', isInteractive: true })
+  on('session.root', () => ({ value: '/work/marketplace/mods/scv-dashboard' }))
+  await $.session.start({ cwd: '/work/marketplace/mods/scv-dashboard', surface: 'desktop', isInteractive: true })
   expect((await signal($, 1, 'done')).deny).toBeUndefined()
   expect(store.get('signals:/work')).toHaveLength(1)
 

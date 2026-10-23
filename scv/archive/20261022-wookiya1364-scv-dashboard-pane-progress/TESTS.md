@@ -128,7 +128,7 @@
 ## How to run
 
 ```bash
-cd marketplace/mods/scv-hello && claude plugin test .
+cd marketplace/mods/scv-dashboard && claude plugin test .
 ```
 
 ## Pass criteria
