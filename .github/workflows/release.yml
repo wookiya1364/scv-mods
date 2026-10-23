@@ -3,9 +3,16 @@ name: release
 # A pushed release tag (<mod>--v<version>, made by scripts/release.sh) gets its GitHub release
 # page, built from the notes the release committed: docs/releases/<mod>/<version>.md.
 # A version with a "-" (such as 1.0.0-rc.1) is published as a prerelease.
+# Run it by hand from the Actions tab with a tag when a push did not start it, or to refresh a
+# page from its notes: an existing page is updated, not duplicated.
 on:
   push:
     tags: ['*--v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag, such as scv-dashboard--v0.1.0'
+        required: true
 
 permissions:
   contents: write
@@ -15,14 +22,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: Publish the release page from the notes
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           info="$(bash scripts/release.sh tag-info "$TAG")"
           notes="$(sed -n 's/^NOTES: //p' <<<"$info")"
           title="$(sed -n 's/^TITLE: //p' <<<"$info")"
           prerelease=()
           if [ "$(sed -n 's/^PRERELEASE: //p' <<<"$info")" = yes ]; then prerelease=(--prerelease); fi
-          gh release create "$TAG" --verify-tag --title "$title" --notes-file "$notes" "${prerelease[@]}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$title" --notes-file "$notes" "${prerelease[@]}"
+          else
+            gh release create "$TAG" --verify-tag --title "$title" --notes-file "$notes" "${prerelease[@]}"
+          fi

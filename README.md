@@ -43,7 +43,7 @@ claude plugin install scv-dashboard --marketplace wookiya1364/scv-mods
 
 In the desktop app: click + next to the prompt box, then Plugins, Add marketplace with `wookiya1364/scv-mods`, then Add plugin.
 
-This repository is private: the install works only for GitHub accounts that can read it, on a machine that already holds a git credential for github.com (an SSH key, or `gh auth login` then `gh auth setup-git`).
+This repository is public, so anyone can install the mods with the lines above; no GitHub sign-in is needed.
 
 ## Update
 
@@ -56,7 +56,7 @@ claude plugin update scv-dashboard@scv-mods
 
 Then run `/reload-plugins` in an open session. A mod updates only when its version changes, that is, with a release; commits between releases do not reach installed copies.
 
-scv-dashboard was called scv-hello before its first release. A machine that still has scv-hello removes it and installs scv-dashboard once: `/scv:mods-remove` then `/scv:mods-install`, or from a shell `claude plugin uninstall scv-hello@scv-mods` then `claude plugin install scv-dashboard@scv-mods`. The marketplace keeps a `renames` entry from the old name to the new one.
+scv-dashboard was called scv-hello before its first release. On a machine that had scv-hello, install scv-dashboard once: `/scv:mods-install`, or from a shell `claude plugin install scv-dashboard@scv-mods`. The marketplace keeps a `renames` entry from the old name to the new one, so updating the marketplace switches the setting to scv-dashboard and Claude Code drops the old install; if scv-hello still shows in the list, remove it with `/scv:mods-remove` (or `claude plugin uninstall scv-hello@scv-mods`).
 
 ## Releasing
 

@@ -27,7 +27,9 @@ A step that fails before the push undoes what this run changed and stops. If onl
 
 ## The release page
 
-Pushing a `<mod>--v<version>` tag runs `.github/workflows/release.yml`, which publishes a GitHub release from the notes, and a version with a `-` (such as `1.0.0-rc.1`) as a prerelease. It runs on GitHub's runner, so `gh` is not needed on your machine. If it fails, the tag and the notes are still there; re-run the workflow from the Actions tab.
+Pushing a `<mod>--v<version>` tag runs `.github/workflows/release.yml`, which publishes a GitHub release from the notes, and a version with a `-` (such as `1.0.0-rc.1`) as a prerelease. It runs on GitHub's runner, so `gh` is not needed on your machine.
+
+If it fails, or a push did not start it, the tag and the notes are still there: run it by hand from the Actions tab (release, then Run workflow) with the tag. A page that already exists is updated from the notes rather than made twice. The first release, scv-dashboard 0.1.0, is such a case: its tag went up in the same push that added the workflow, GitHub did not start a run, and its page was published with the same command from a machine where `gh` was signed in.
 
 ## Getting a release
 

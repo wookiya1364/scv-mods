@@ -135,3 +135,11 @@ merge_policy: preserve
 - discarded alternatives: main 하나 그대로 — 새로 설치하는 컴퓨터가 같은 번호로 다른 파일을 받을 수 있음; SCV와 똑같은 세 갈래 · 자동 승격 — gh 가 있어야 하고 혼자 쓰는 비공개 저장소에 무거움; 마켓 목록에도 버전 — 공식 문서가 두 곳에 적지 말라고 함; SCV식 v0.1.0 태그 — 모드가 여럿이면 이름이 겹침; 릴리스 페이지 없이 — 사용자가 자동 생성을 고름
 - refs: scv/promote/20261023-wookiya1364-scv-mods-release/PLAN.md
 - conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-23 11:07] wookiya1364 — scv-hello → scv-dashboard 이름 변경 · 저장소 공개 유지 · 첫 릴리스 페이지
+
+- verdict: adopted
+- why: 사용자가 'scv-hello' 이름을 싫어해 첫 릴리스 전에 scv-dashboard 로 바꿨다(마켓에 renames 표). 보관된 계획 3개의 시험 명령은 사용자가 고른 예외로 경로 한 줄만 고쳤다(내용 · 다른 기록 그대로). 저장소가 공개로 확인됐고, 사용자는 다른 사람도 쓰게 공개를 유지하기로 했다. 첫 태그는 자동 작업이 놓쳐(실행 0건) 같은 명령을 로그인된 gh 로 돌려 페이지를 만들고, 손으로 돌리는 버튼(workflow_dispatch)을 더했다.
+- discarded alternatives: 옛 이름 연결(링크) 하나 남기기 — 싫어하는 이름이 저장소에 남음(사용자가 경로 고침을 고름); 폴더 이름은 그대로 — 폴더와 모드 이름이 달라 헷갈림; 보이는 이름(displayName)만 — /scv:mods · 도구 · 명령에 옛 이름이 남음; 비공개로 되돌리기 — 다른 사람이 설치 못 함; 0.1.0 페이지를 다음 릴리스까지 미룸 — 사용자가 지금 만들기를 고름
+- refs: scv/promote/20261023-wookiya1364-scv-mods-release/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
