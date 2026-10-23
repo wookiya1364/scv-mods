@@ -179,6 +179,6 @@ workspace:
 ## SCV template metadata
 
 - Template version: <!-- STANDARD:VERSION -->2.3.0<!-- /STANDARD:VERSION -->
-- Last sync: <!-- STANDARD:SYNCED_AT -->2026-10-22<!-- /STANDARD:SYNCED_AT -->
-- Template digest: <!-- STANDARD:DIGEST -->654cacd34661fc2c79ccca4448d9b82686ee64fe78a623eee29ff91f1d1f621c<!-- /STANDARD:DIGEST -->
+- Last sync: <!-- STANDARD:SYNCED_AT -->2026-10-23<!-- /STANDARD:SYNCED_AT -->
+- Template digest: <!-- STANDARD:DIGEST -->9c3344020f0cf1e7cbebb6b6e52abf8bc5d7e26ae65de4bc4ef93de88fb9812f<!-- /STANDARD:DIGEST -->
 - Collab tool: `scv/scv_settings.json`'s `NOTIFIER_PROVIDER` (slack | discord)
