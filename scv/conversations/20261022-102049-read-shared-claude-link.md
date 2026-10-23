@@ -10,6 +10,7 @@ promoted_to:
   - scv/promote/20261022-wookiya1364-scv-dashboard-alerts/
   - scv/promote/20261022-wookiya1364-scv-dashboard-work-view/
   - scv/promote/20261022-wookiya1364-scv-dashboard-prompt-usage/
+  - scv/promote/20261023-wookiya1364-scv-mods-release/
 ---
 
 ## Turn 1 — 2026-10-22T01:20:49Z

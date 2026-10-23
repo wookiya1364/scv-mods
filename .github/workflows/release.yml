@@ -1,0 +1,28 @@
+name: release
+
+# A pushed release tag (<mod>--v<version>, made by scripts/release.sh) gets its GitHub release
+# page, built from the notes the release committed: docs/releases/<mod>/<version>.md.
+# A version with a "-" (such as 1.0.0-rc.1) is published as a prerelease.
+on:
+  push:
+    tags: ['*--v*']
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Publish the release page from the notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          info="$(bash scripts/release.sh tag-info "$TAG")"
+          notes="$(sed -n 's/^NOTES: //p' <<<"$info")"
+          title="$(sed -n 's/^TITLE: //p' <<<"$info")"
+          prerelease=()
+          if [ "$(sed -n 's/^PRERELEASE: //p' <<<"$info")" = yes ]; then prerelease=(--prerelease); fi
+          gh release create "$TAG" --verify-tag --title "$title" --notes-file "$notes" "${prerelease[@]}"

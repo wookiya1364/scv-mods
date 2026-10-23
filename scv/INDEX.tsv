@@ -9,3 +9,4 @@ decision	scv-칸-끝-오류-허락-기다림-알림과-휴대폰-알림	scv/DECI
 decision	scv-칸-자리-비운-사이-요약과-에이전트별-줄	scv/DECISIONS.md	7793	704	2026-10-23 00:09	[adopted] SCV 칸 — 자리 비운 사이 요약과 에이전트별 줄
 decision	scv-칸-다음-할-일-입력창-넣기와-사용-한도	scv/DECISIONS.md	8497	678	2026-10-23 00:09	[adopted] SCV 칸 — 다음 할 일 입력창 넣기와 사용 한도
 decision	scv-칸-다음-기능-구현하며-배운-것	scv/DECISIONS.md	9175	1701	2026-10-23 08:05	[lesson] SCV 칸 다음 기능 — 구현하며 배운 것
+decision	scv-mods-릴리스-관리-버전-노트-태그-두-갈래	scv/DECISIONS.md	10876	1085	2026-10-23 10:29	[adopted] scv-mods 릴리스 관리 — 버전 · 노트 · 태그 · 두 갈래
