@@ -3,7 +3,7 @@ title: scv-mods 릴리스 관리 — 버전 · 노트 · 태그 · 두 갈래
 slug: 20261023-wookiya1364-scv-mods-release
 author: wookiya1364
 created_at: 2026-10-23
-status: testing
+status: done
 kind: feature
 lang: korean
 tags: [release, mods]

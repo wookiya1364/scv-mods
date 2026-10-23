@@ -10,7 +10,7 @@ promoted_to:
   - scv/promote/20261022-wookiya1364-scv-dashboard-alerts/
   - scv/promote/20261022-wookiya1364-scv-dashboard-work-view/
   - scv/promote/20261022-wookiya1364-scv-dashboard-prompt-usage/
-  - scv/promote/20261023-wookiya1364-scv-mods-release/
+  - scv/archive/20261023-wookiya1364-scv-mods-release/
 ---
 
 ## Turn 1 — 2026-10-22T01:20:49Z
@@ -607,3 +607,4 @@ protocol: e3eeb388
 발견: 저장소가 공개였음(gh 확인, 공개로 바꾼 기록 없음 — 처음부터였을 수 있음, 추정) → 사용자 결정으로 공개 유지, README '비공개' 문구 고침, 메모리 갱신. 자동 작업은 첫 태그를 놓침(실행 0건, 등록이 태그 push 보다 1초 늦음 — 추정) → 로그인된 gh 로 같은 명령을 돌려 0.1.0 페이지 만듦(확인), workflow_dispatch(태그 입력, 페이지가 있으면 고치기)를 develop 에 더함(main 은 다음 릴리스).
 다른 세션(scv-core 쪽)과 이름 · 도구 · 옮기는 법을 맞춤 — 그쪽 PR scv-claude-code #365 · scv-codex #299.
 남은 것: 이 세션 /reload-plugins, 리눅스에서 SCV 0.70.0 → /scv:mods-install → 앱 확인, 계획 보관(선택 창으로 물음).
+보관(선택 창 답 '지금 보관'): 회귀 8/8 통과 뒤 20261023-wookiya1364-scv-mods-release 를 보관함(ARCHIVED_AT.md · 결정 기록에 경로 차이). 대화 파일은 진행 중인 기능 계획 4개가 같이 써서 그대로 두고, PR 은 만들지 않음(develop/main 릴리스 흐름). 기능 계획 4개는 리눅스 확인 뒤 '보관해'로.
