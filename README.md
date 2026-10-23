@@ -21,6 +21,12 @@ Claude Code mods for the SCV workflow.
 
   It opens when a session starts; if you close it, it reopens on your next message, or type `/scv-hello`. The terminal is not a target.
 
+## Versions
+
+Each mod has a version number, shown by `/scv:mods` and `claude plugin list`. What each version holds is in its release notes, one file per version, and on the repository's Releases page:
+
+- scv-hello — [docs/releases/scv-hello](docs/releases/scv-hello/)
+
 ## Install
 
 At the prompt of a terminal session:
@@ -41,9 +47,15 @@ This repository is private: the install works only for GitHub accounts that can 
 
 ## Update
 
+`/scv:mods` (SCV 0.70.0 or later) updates every installed mod and lists them with their versions. From a shell instead:
+
 ```
 claude plugin marketplace update scv-mods
 claude plugin update scv-hello@scv-mods
 ```
 
-Then run `/reload-plugins` in an open session.
+Then run `/reload-plugins` in an open session. A mod updates only when its version changes, that is, with a release; commits between releases do not reach installed copies.
+
+## Releasing
+
+Work goes on `develop`; `main`, which the marketplace serves, moves only with a release. A release is one command, `scripts/release.sh <mod> <version> --push`, and [docs/RELEASING.md](docs/RELEASING.md) has the steps.

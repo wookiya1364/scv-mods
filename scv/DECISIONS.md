@@ -127,3 +127,11 @@ merge_policy: preserve
 - path delta: ① 저장소 우선 기록 · 한 번에 하나씩 · 단계 시간 계산(stepTimesFromSignals → stepDurationsFromSignals) · 세션 뿌리에서 scv 폴더 찾기를 더함. ② 계획대로(허락 기다림은 허락 요청 신호로, 알림은 휴대폰 길 추가). ③ 계획대로(그 사이 기준 시각에 그때 끝나 있던 단계도 함께 저장). ④ 계획대로(7일 한도는 90% 넘을 때만 초기화 날짜 표시).
 - refs: scv/promote/20261022-wookiya1364-scv-dashboard-step-signal/PLAN.md, scv/promote/20261022-wookiya1364-scv-dashboard-alerts/PLAN.md, scv/promote/20261022-wookiya1364-scv-dashboard-work-view/PLAN.md, scv/promote/20261022-wookiya1364-scv-dashboard-prompt-usage/PLAN.md
 - conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-23 10:29] wookiya1364 — scv-mods 릴리스 관리 — 버전 · 노트 · 태그 · 두 갈래
+
+- verdict: adopted
+- why: 모드 버전이 커밋 번호로만 보여 헷갈린다. SCV처럼 버전 번호(모드 설정 파일 한 곳) · 버전별 노트 · 공식 태그(claude plugin tag) · 릴리스 스크립트 하나로 한 번에 한다. develop 에서 일하고 main 은 릴리스 때만 앞당겨, 같은 번호면 늘 같은 파일이 된다.
+- discarded alternatives: main 하나 그대로 — 새로 설치하는 컴퓨터가 같은 번호로 다른 파일을 받을 수 있음; SCV와 똑같은 세 갈래 · 자동 승격 — gh 가 있어야 하고 혼자 쓰는 비공개 저장소에 무거움; 마켓 목록에도 버전 — 공식 문서가 두 곳에 적지 말라고 함; SCV식 v0.1.0 태그 — 모드가 여럿이면 이름이 겹침; 릴리스 페이지 없이 — 사용자가 자동 생성을 고름
+- refs: scv/promote/20261023-wookiya1364-scv-mods-release/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
