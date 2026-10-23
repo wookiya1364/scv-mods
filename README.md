@@ -56,7 +56,13 @@ claude plugin update scv-dashboard@scv-mods
 
 Then run `/reload-plugins` in an open session. A mod updates only when its version changes, that is, with a release; commits between releases do not reach installed copies.
 
-scv-dashboard was called scv-hello before its first release. On a machine that had scv-hello, install scv-dashboard once: `/scv:mods-install`, or from a shell `claude plugin install scv-dashboard@scv-mods`. The marketplace keeps a `renames` entry from the old name to the new one, so updating the marketplace switches the setting to scv-dashboard and Claude Code drops the old install; if scv-hello still shows in the list, remove it with `/scv:mods-remove` (or `claude plugin uninstall scv-hello@scv-mods`).
+scv-dashboard was called scv-hello before its first release. On a machine that had scv-hello, install scv-dashboard once from a shell, then run `/reload-plugins`:
+
+```
+claude plugin install scv-dashboard@scv-mods
+```
+
+That command refreshes the marketplace before it looks the mod up, so it works on a machine whose copy of the marketplace still lists scv-hello. The marketplace keeps a `renames` entry from the old name to the new one: once the marketplace is refreshed, Claude Code switches the setting to scv-dashboard and drops the scv-hello install by itself, so there is nothing to uninstall. With SCV 0.70.0, `/scv:mods-install` lists only what the machine's copy of the marketplace already holds and does not refresh it first, so on such a machine it shows no mod to install, and `/scv:mods` stops on scv-hello with "not found".
 
 ## Releasing
 
