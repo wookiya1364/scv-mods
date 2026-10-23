@@ -206,6 +206,9 @@ if [[ -f "$WF" ]]; then
   grep -qE '^\s*contents: write' "$WF" && ok "contents: write" || fail "권한"
   grep -qF 'bash scripts/release.sh tag-info "$TAG"' "$WF" && ok "노트를 release.sh tag-info 로 얻는다" || fail "tag-info 호출"
   grep -qF 'gh release create "$TAG" --verify-tag' "$WF" && grep -qF -- '--notes-file "$notes"' "$WF" && ok "gh release create --verify-tag --notes-file" || fail "release create"
+  grep -qE '^\s*workflow_dispatch:' "$WF" && grep -qF 'TAG: ${{ inputs.tag || github.ref_name }}' "$WF" && grep -qF 'ref: ${{ inputs.tag || github.ref }}' "$WF" \
+    && ok "손으로 돌리기(workflow_dispatch): 넣은 태그를 꺼내 그 노트로" || fail "workflow_dispatch"
+  grep -qF 'gh release edit "$TAG"' "$WF" && ok "페이지가 이미 있으면 고침 (둘로 만들지 않음)" || fail "release edit"
 else fail "없음: .github/workflows/release.yml"; fi
 
 echo "── [T10] 이 저장소의 버전 기록 ──"

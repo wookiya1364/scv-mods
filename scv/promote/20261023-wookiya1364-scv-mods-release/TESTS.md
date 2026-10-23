@@ -74,8 +74,8 @@
 
 - **Setup**: `.github/workflows/release.yml`
 - **Run**: 파일 내용 확인
-- **Expected**: `*--v*` 태그 push 에만 돌고, contents: write 권한을 가지며, `scripts/release.sh tag-info` 로 노트를 얻고, `gh release create … --verify-tag --notes-file` 로 페이지를 만든다
-- **Pass criterion**: 네 가지가 파일에 있다. 실제 페이지는 첫 올리기 뒤 사용자가 웹에서 확인한다
+- **Expected**: `*--v*` 태그 push 와 손으로 돌리기(workflow_dispatch, 태그 입력)에 돌고, contents: write 권한을 가지며, `scripts/release.sh tag-info` 로 노트를 얻고, 넣은 태그를 꺼내 그 노트로 `gh release create … --verify-tag --notes-file` 하거나, 페이지가 이미 있으면 `gh release edit` 로 고친다
+- **Pass criterion**: 여섯 가지가 파일에 있다. 실제 페이지는 `gh release view` 로 확인한다
 
 ### T10. 저장소의 버전 기록이 한 곳이고, 그 번호의 노트가 있다
 
@@ -94,7 +94,7 @@
 ### T12. 이 맥에서 옛 scv-hello 를 지우고 scv-dashboard 0.1.0 을 받는다 (끝 기준 — 실제 확인)
 
 - **Setup**: 0.1.0 을 올린 뒤
-- **Run**: `/scv:mods-remove` 로 scv-hello, `/scv:mods-install` 로 scv-dashboard (엔진 mods.sh), `/scv:mods` 목록, `git ls-remote --tags origin`
+- **Run**: `/scv:mods-install` 로 scv-dashboard (엔진 mods.sh) — scv-hello 가 목록에 남아 있으면 `/scv:mods-remove` 로 먼저 지운다, `/scv:mods` 목록, `git ls-remote --tags origin`
 - **Expected**: `MOD: scv-dashboard installed 0.1.0`, 목록에 scv-hello 없음, 원격에 `scv-dashboard--v0.1.0`
 - **Pass criterion**: 목록 줄과 태그가 있고 옛 이름이 없다
 
