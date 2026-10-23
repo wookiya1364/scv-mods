@@ -49,28 +49,28 @@ import {
   stepDurationsFromSignals,
 } from './model'
 
-const PANE = 'scv-hello'
+const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
 const REFRESH_MS = 3000
 
-const snapshot = atom({ plugin: 'scv-hello', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '', root: '' } as Snapshot)
-const chosen = atom({ plugin: 'scv-hello', key: 'chosen' } as const, null as string | null)
-const expanded = atom({ plugin: 'scv-hello', key: 'expanded' } as const, { steps: false, tests: false, blocks: true, dreams: false } as Expanded)
-const runs = atom({ plugin: 'scv-hello', key: 'runs' } as const, [])
-const waiting = atom({ plugin: 'scv-hello', key: 'waiting' } as const, null as string | null)
-const live = atom({ plugin: 'scv-hello', key: 'live' } as const, { isWorking: false, turnStartedAt: 0, tool: null } as Live)
-const tasks = atom({ plugin: 'scv-hello', key: 'tasks' } as const, [])
-const history = atom({ plugin: 'scv-hello', key: 'history' } as const, [])
-const now = atom({ plugin: 'scv-hello', key: 'now' } as const, 0)
-const note = atom({ plugin: 'scv-hello', key: 'note' } as const, null as string | null)
-const focusStep = atom({ plugin: 'scv-hello', key: 'focusStep' } as const, null as number | null)
-const stepLog = atom({ plugin: 'scv-hello', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
-const signals = atom({ plugin: 'scv-hello', key: 'signals' } as const, [] as StepSignal[])
-const permit = atom({ plugin: 'scv-hello', key: 'permit' } as const, null as Permit | null)
-const stopped = atom({ plugin: 'scv-hello', key: 'stopped' } as const, null as Stopped | null)
-const agents = atom({ plugin: 'scv-hello', key: 'agents' } as const, [] as AgentState[])
-const since = atom({ plugin: 'scv-hello', key: 'since' } as const, null as Since | null)
-const limits = atom({ plugin: 'scv-hello', key: 'limits' } as const, [] as UsageLimit[])
+const snapshot = atom({ plugin: 'scv-dashboard', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '', root: '' } as Snapshot)
+const chosen = atom({ plugin: 'scv-dashboard', key: 'chosen' } as const, null as string | null)
+const expanded = atom({ plugin: 'scv-dashboard', key: 'expanded' } as const, { steps: false, tests: false, blocks: true, dreams: false } as Expanded)
+const runs = atom({ plugin: 'scv-dashboard', key: 'runs' } as const, [])
+const waiting = atom({ plugin: 'scv-dashboard', key: 'waiting' } as const, null as string | null)
+const live = atom({ plugin: 'scv-dashboard', key: 'live' } as const, { isWorking: false, turnStartedAt: 0, tool: null } as Live)
+const tasks = atom({ plugin: 'scv-dashboard', key: 'tasks' } as const, [])
+const history = atom({ plugin: 'scv-dashboard', key: 'history' } as const, [])
+const now = atom({ plugin: 'scv-dashboard', key: 'now' } as const, 0)
+const note = atom({ plugin: 'scv-dashboard', key: 'note' } as const, null as string | null)
+const focusStep = atom({ plugin: 'scv-dashboard', key: 'focusStep' } as const, null as number | null)
+const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
+const signals = atom({ plugin: 'scv-dashboard', key: 'signals' } as const, [] as StepSignal[])
+const permit = atom({ plugin: 'scv-dashboard', key: 'permit' } as const, null as Permit | null)
+const stopped = atom({ plugin: 'scv-dashboard', key: 'stopped' } as const, null as Stopped | null)
+const agents = atom({ plugin: 'scv-dashboard', key: 'agents' } as const, [] as AgentState[])
+const since = atom({ plugin: 'scv-dashboard', key: 'since' } as const, null as Since | null)
+const limits = atom({ plugin: 'scv-dashboard', key: 'limits' } as const, [] as UsageLimit[])
 
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
 const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○' }
@@ -246,7 +246,7 @@ const alert = async ($: Api, text: string) => {
 // Calls the mod makes itself (its phone notification) are not the work it watches.
 const OWN_TOOLS = new Set<string>([STEP_TOOL, 'PushNotification'])
 
-const isOwnCall = (origin: { plugin: string }) => origin.plugin === 'scv-hello' || origin.plugin.startsWith('scv-hello@')
+const isOwnCall = (origin: { plugin: string }) => origin.plugin === 'scv-dashboard' || origin.plugin.startsWith('scv-dashboard@')
 
 const openPane = ($: Api) => $.ui.open({ id: PANE, title: TITLE })
 
@@ -259,7 +259,7 @@ export const register: Register = on => {
     const kept = await $.store.get(runsKey(project)).catch(() => undefined)
     if (Array.isArray(kept)) await update($, runs, () => kept as TestRun[])
     await loadSignals($, project)
-    await $.command.register({ name: 'scv-hello', description: 'Open the SCV dashboard pane' })
+    await $.command.register({ name: 'scv-dashboard', description: 'Open the SCV dashboard pane' })
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     await refresh($)
     $.clock.every(REFRESH_MS, () => void refresh($).catch(() => undefined))
@@ -284,7 +284,7 @@ export const register: Register = on => {
     return submitted
   })
 
-  on('command.run', { command: 'scv-hello' }, async $ => {
+  on('command.run', { command: 'scv-dashboard' }, async $ => {
     const { isPlaced } = await openPane($)
 
     return { text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}.` }
@@ -368,7 +368,7 @@ export const register: Register = on => {
     const composed = await next(e)
     const text = buildStepPrompt(parsePlans((await read($, snapshot)).plans))
 
-    return text ? { sections: [...composed.sections, { id: 'scv-hello:step-signal', text, scope: 'session' as const }] } : composed
+    return text ? { sections: [...composed.sections, { id: 'scv-dashboard:step-signal', text, scope: 'session' as const }] } : composed
   })
 
   // The mod's own tool asks no permission; every other tool's verdict is left as it is.

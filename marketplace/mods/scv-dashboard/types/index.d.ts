@@ -68,7 +68,7 @@ export type Expanded = { steps: boolean; tests: boolean; blocks: boolean; dreams
 
 declare module 'claude-code' {
   interface PluginState {
-    'scv-hello': {
+    'scv-dashboard': {
       snapshot: Snapshot
       chosen: string | null
       expanded: Expanded

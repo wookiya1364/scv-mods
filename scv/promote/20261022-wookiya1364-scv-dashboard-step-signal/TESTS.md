@@ -91,7 +91,7 @@ Claude가 보내는 '단계 신호'로 진행률·단계 흐름·예상 완료 �
 ## How to run
 
 ```bash
-cd marketplace/mods/scv-hello && claude plugin test .
+cd marketplace/mods/scv-dashboard && claude plugin test .
 ```
 
 ## Pass criteria

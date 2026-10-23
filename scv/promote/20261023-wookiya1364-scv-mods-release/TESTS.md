@@ -9,7 +9,8 @@
 - 올리기는 `--push` 일 때만, develop · main · 태그를 한 번에 올린다.
 - 태그를 올리면 GitHub 릴리스 페이지를 만드는 자동 작업이 있다.
 - 모드 기능과 지금 시험 72개는 그대로다.
-- 이 맥에서 `/scv:mods` 가 0.1.0 을 받는다(끝 기준).
+- 모드 이름이 scv-dashboard 로 바뀌고, 옛 이름 scv-hello 는 옮기는 법을 적은 곳에만 남는다.
+- 이 맥에서 옛 scv-hello 를 지우고 scv-dashboard 0.1.0 을 받는다(끝 기준).
 
 ## Test scenarios
 
@@ -64,9 +65,9 @@
 
 ### T8. 태그에서 모드 · 번호 · 노트를 뽑는다 (자동 작업이 쓰는 것)
 
-- **Setup**: 태그 `scv-hello--v0.1.0`, `scv-hello--v1.0.0-rc.1`, `v0.1.0`, `scv-hello--v0.1`, 노트가 없는 `demo--v9.9.9`
+- **Setup**: 태그 `scv-dashboard--v0.1.0`, `scv-dashboard--v1.0.0-rc.1`, `v0.1.0`, `scv-dashboard--v0.1`, `scv-dashboard-0.1.0`, 노트가 없는 `demo--v9.9.9`
 - **Run**: `release.sh tag-info <태그>`
-- **Expected**: 첫째는 MOD scv-hello · VERSION 0.1.0 · NOTES docs/releases/scv-hello/0.1.0.md · TITLE 'scv-hello 0.1.0' · PRERELEASE no, 둘째는 PRERELEASE yes, 셋째 · 넷째 · 다섯째는 거절(exit 1)
+- **Expected**: 첫째는 MOD scv-dashboard · VERSION 0.1.0 · NOTES docs/releases/scv-dashboard/0.1.0.md · TITLE 'scv-dashboard 0.1.0' · PRERELEASE no, 둘째는 PRERELEASE yes, 나머지는 거절(exit 1)
 - **Pass criterion**: 줄 값과 exit 코드가 같다
 
 ### T9. 릴리스 페이지 자동 작업이 태그로 돈다
@@ -80,32 +81,39 @@
 
 - **Setup**: 이 저장소
 - **Run**: 설정 파일 · 마켓 목록 · 노트 · validate
-- **Expected**: 설정 파일에 version 이 있으면 그 번호의 노트가 있고 비어 있지 않다. 마켓 목록 항목에는 version 이 없다. 모드와 마켓 validate 가 통과한다
-- **Pass criterion**: 셋 모두 맞다
+- **Expected**: 모드마다 설정 파일 이름이 마켓 목록 이름과 같다. 설정 파일에 version 이 있으면 그 번호의 노트가 있고 비어 있지 않다. 마켓 목록 항목에는 version 이 없다. 바꾼 이름 표(renames)는 마켓 목록에 있는 모드를 가리킨다. 모드마다 · 마켓 validate 가 통과한다
+- **Pass criterion**: 다섯 모두 맞다
 
 ### T11. 모드 시험은 그대로 통과한다
 
 - **Setup**: 이 저장소
-- **Run**: `claude plugin test marketplace/mods/scv-hello`
+- **Run**: `claude plugin test marketplace/mods/scv-dashboard`
 - **Expected**: 72 pass, 0 fail
 - **Pass criterion**: 실패 0
 
-### T12. 이 맥에서 /scv:mods 로 0.1.0 을 받는다 (끝 기준 — 실제 확인)
+### T12. 이 맥에서 옛 scv-hello 를 지우고 scv-dashboard 0.1.0 을 받는다 (끝 기준 — 실제 확인)
 
 - **Setup**: 0.1.0 을 올린 뒤
-- **Run**: `/scv:mods` (엔진 mods.sh), `git ls-remote --tags origin`
-- **Expected**: `RESULT: scv-hello updated 84ae8d4b5ca9 -> 0.1.0`, `MOD: scv-hello installed 0.1.0`, 원격에 `scv-hello--v0.1.0`
-- **Pass criterion**: 두 줄과 태그가 있다
+- **Run**: `/scv:mods-remove` 로 scv-hello, `/scv:mods-install` 로 scv-dashboard (엔진 mods.sh), `/scv:mods` 목록, `git ls-remote --tags origin`
+- **Expected**: `MOD: scv-dashboard installed 0.1.0`, 목록에 scv-hello 없음, 원격에 `scv-dashboard--v0.1.0`
+- **Pass criterion**: 목록 줄과 태그가 있고 옛 이름이 없다
+
+### T13. 옛 이름은 모드 · 문서 · 스크립트에 남지 않는다
+
+- **Setup**: 이 저장소
+- **Run**: 모드 폴더 · README · docs · scripts · 마켓 목록에서 `scv-hello` 찾기
+- **Expected**: 모드 폴더와 scripts 에는 없다. 남는 곳은 마켓 목록의 바꾼 이름 표, README 와 0.1.0 노트의 '옛 이름에서 옮기는 법' 뿐이다. 지나간 계획서 · 대화 · 결정 기록은 기록이라 그대로 둔다
+- **Pass criterion**: 정해진 세 곳 밖에서 찾은 것이 0
 
 ## How to run
 
 ```bash
-bash scripts/tests/release.test.sh && claude plugin test marketplace/mods/scv-hello
+bash scripts/tests/release.test.sh && claude plugin test marketplace/mods/scv-dashboard
 ```
 
 ## Pass criteria
 
-- T1–T11 이 자동 시험으로 통과한다(How to run 이 0 으로 끝난다).
+- T1–T11 과 T13 이 자동 시험으로 통과한다(How to run 이 0 으로 끝난다).
 - T12 는 0.1.0 을 올린 뒤 이 맥에서 실제로 돌려 확인한다.
 - 릴리스 페이지(T9 의 실제 결과)는 사용자가 웹에서 확인한다.
 

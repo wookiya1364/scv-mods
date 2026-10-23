@@ -1,5 +1,5 @@
 {
-  "name": "scv-hello",
+  "name": "scv-dashboard",
   "description": "SCV dashboard pane: plan progress, stage flow, blocks, tests, live work, ETA and dreams",
   "types": "./types/index.d.ts"
 }

@@ -109,8 +109,8 @@ for line in "CHECK: branch fail develop 갈래에서만 릴리스합니다 (지�
   has "$o" "$line" && ok "${line#CHECK: }" || fail "없음: $line"
 done
 [[ "$(grep -c ' fail ' <<<"$o")" == 5 ]] && ok "fail 줄 5개 — 첫 실패에서 멈추지 않음" || fail "fail 줄 수: $(grep -c ' fail ' <<<"$o")"
-o="$(release_checks nope 0.1.0 "" "demo, scv-hello" develop 0 "" empty ok 0 new missing)"
-has "$o" "CHECK: mod fail 그런 모드가 없습니다: nope — 있는 모드: demo, scv-hello" && ok "없는 모드는 있는 모드를 알려 줌" || fail "모드 줄: $o"
+o="$(release_checks nope 0.1.0 "" "demo, scv-dashboard" develop 0 "" empty ok 0 new missing)"
+has "$o" "CHECK: mod fail 그런 모드가 없습니다: nope — 있는 모드: demo, scv-dashboard" && ok "없는 모드는 있는 모드를 알려 줌" || fail "모드 줄: $o"
 has "$o" "CHECK: notes fail 노트가 비어 있습니다: docs/releases/nope/0.1.0.md" && ok "빈 노트 거절" || fail "빈 노트 줄: $o"
 has "$o" "CHECK: remote fail 원격이 없습니다: origin" && ok "올릴 원격이 없으면 거절" || fail "원격 줄: $o"
 o="$(release_checks demo 0.1.0 marketplace/mods/demo demo develop 0 "" ok ok 0 new ok)"
@@ -189,10 +189,10 @@ untouched "$d" "$h" && [[ "$(git -C "$d" rev-parse main)" == "$m" ]] && ok "태�
 git -C "$d" worktree remove --force "$W/t7d/main-wt" >/dev/null 2>&1
 
 echo "── [T8] 태그에서 모드 · 번호 · 노트를 뽑는다 ──"
-o="$(tag_info scv-hello--v0.1.0)"
-[[ "$o" == $'MOD: scv-hello\nVERSION: 0.1.0\nNOTES: docs/releases/scv-hello/0.1.0.md\nTITLE: scv-hello 0.1.0\nPRERELEASE: no' ]] && ok "scv-hello--v0.1.0" || fail "tag_info: $o"
-has "$(tag_info scv-hello--v1.0.0-rc.1)" "PRERELEASE: yes" && ok "rc 는 미리 보기 릴리스" || fail "rc"
-for t in v0.1.0 scv-hello--v0.1 scv-hello-0.1.0; do
+o="$(tag_info scv-dashboard--v0.1.0)"
+[[ "$o" == $'MOD: scv-dashboard\nVERSION: 0.1.0\nNOTES: docs/releases/scv-dashboard/0.1.0.md\nTITLE: scv-dashboard 0.1.0\nPRERELEASE: no' ]] && ok "scv-dashboard--v0.1.0" || fail "tag_info: $o"
+has "$(tag_info scv-dashboard--v1.0.0-rc.1)" "PRERELEASE: yes" && ok "rc 는 미리 보기 릴리스" || fail "rc"
+for t in v0.1.0 scv-dashboard--v0.1 scv-dashboard-0.1.0; do
   tag_info "$t" >/dev/null && fail "거절해야 함: $t" || ok "거절: $t"
 done
 o="$(run "$d5" tag-info demo--v0.1.0)"; rc=$?
@@ -209,16 +209,27 @@ if [[ -f "$WF" ]]; then
 else fail "없음: .github/workflows/release.yml"; fi
 
 echo "── [T10] 이 저장소의 버전 기록 ──"
+MK="$ROOT/.claude-plugin/marketplace.json"
 while IFS=$'\t' read -r name src; do
   pjf="$ROOT/${src#./}/.claude-plugin/plugin.json"
+  [[ "$(jq -r '.name' "$pjf")" == "$name" ]] && ok "$name: 설정 파일 이름이 마켓 목록과 같음" || fail "$name: 설정 파일 이름이 다름 ($(jq -r '.name' "$pjf"))"
   v="$(jq -r '.version // empty' "$pjf")"
   if [[ -z "$v" ]]; then ok "$name: 아직 릴리스 전 (version 없음)"
   elif [[ -s "$ROOT/docs/releases/$name/$v.md" ]]; then ok "$name $v: 노트 있음"
   else fail "$name $v: 노트가 없음 — docs/releases/$name/$v.md"; fi
-done < <(jq -r '.plugins[] | [.name, .source] | @tsv' "$ROOT/.claude-plugin/marketplace.json")
-[[ "$(jq '[.plugins[] | has("version")] | any' "$ROOT/.claude-plugin/marketplace.json")" == false ]] && ok "마켓 목록 항목에 version 없음 (한 곳만)" || fail "마켓 목록에 version 이 있음"
-(cd "$ROOT" && "$REAL_CLAUDE" plugin validate marketplace/mods/scv-hello >/dev/null 2>&1) && ok "validate: scv-hello" || fail "validate: scv-hello"
+  (cd "$ROOT" && "$REAL_CLAUDE" plugin validate "${src#./}" >/dev/null 2>&1) && ok "validate: $name" || fail "validate: $name"
+done < <(jq -r '.plugins[] | [.name, .source] | @tsv' "$MK")
+[[ "$(jq '[.plugins[] | has("version")] | any' "$MK")" == false ]] && ok "마켓 목록 항목에 version 없음 (한 곳만)" || fail "마켓 목록에 version 이 있음"
+[[ "$(jq -r '(.renames // {}) | to_entries | map(select(.value != null)) | map(.value) | .[]' "$MK" | sort -u \
+  | comm -23 - <(jq -r '.plugins[].name' "$MK" | sort -u))" == "" ]] && ok "바꾼 이름 표(renames)는 있는 모드를 가리킴" || fail "renames 가 없는 모드를 가리킴"
 (cd "$ROOT" && "$REAL_CLAUDE" plugin validate . >/dev/null 2>&1) && ok "validate: 마켓" || fail "validate: 마켓"
+
+echo "── [T13] 옛 이름은 정해진 곳에만 남는다 ──"
+old="scv-""hello"   # 이 파일이 스스로 걸리지 않게 나눠 쓴다
+hits="$(cd "$ROOT" && git ls-files -z --cached --others --exclude-standard -- marketplace scripts docs .github .claude-plugin README.md \
+  | xargs -0 grep -l -- "$old" 2>/dev/null | sort)"
+want="$(printf '%s\n' .claude-plugin/marketplace.json README.md docs/releases/scv-dashboard/0.1.0.md | sort)"
+[[ "$hits" == "$want" ]] && ok "바꾼 이름 표 · README · 0.1.0 노트의 옮기는 법에만" || fail "옛 이름이 남은 곳: $(tr '\n' ' ' <<<"$hits")"
 
 echo
 echo "PASS $PASS · FAIL $FAIL"

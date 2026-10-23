@@ -35,7 +35,7 @@ On each machine, run `/scv:mods` (SCV 0.70.0 or later), or from a shell:
 
 ```
 claude plugin marketplace update scv-mods
-claude plugin update scv-hello@scv-mods
+claude plugin update scv-dashboard@scv-mods
 ```
 
 Then run `/reload-plugins` in an open session.
