@@ -608,3 +608,14 @@ protocol: e3eeb388
 다른 세션(scv-core 쪽)과 이름 · 도구 · 옮기는 법을 맞춤 — 그쪽 PR scv-claude-code #365 · scv-codex #299.
 남은 것: 이 세션 /reload-plugins, 리눅스에서 SCV 0.70.0 → /scv:mods-install → 앱 확인, 계획 보관(선택 창으로 물음).
 보관(선택 창 답 '지금 보관'): 회귀 8/8 통과 뒤 20261023-wookiya1364-scv-mods-release 를 보관함(ARCHIVED_AT.md · 결정 기록에 경로 차이). 대화 파일은 진행 중인 기능 계획 4개가 같이 써서 그대로 두고, PR 은 만들지 않음(develop/main 릴리스 흐름). 기능 계획 4개는 리눅스 확인 뒤 '보관해'로.
+
+## Turn 66 — 2026-10-23T02:26:12Z
+protocol: e3eeb388
+
+**User**: https://claude.ai/code/cshk_01HHouafihCfYBA1PqovcH34StiYKaZaB1dnKiYDzpNBPx 이거처럼 안되는데?
+(선택 창 '기타'에 다른 컴퓨터 세션의 출력을 붙여 넣음: /scv:mods-install '설치할 모드 없음' → /scv:mods 에서 scv-hello 업데이트 '찾을 수 없음' 실패와 맞지 않는 로그인 안내 → /scv:mods-remove '지울 것 없음' → claude plugin uninstall scv-hello@scv-mods 'not found in installed plugins', 끝 상태는 둘 다 설치 안 됨)
+
+**다시 쓴 요청**: 붙여 넣은 다른 컴퓨터의 세션에서 /scv:mods-install 은 설치할 모드가 없다고 하고, /scv:mods 는 scv-hello 업데이트에서 실패하고, 지우기는 지울 것이 없다며 끝났다. 왜 그런지 확인한 사실로 밝히고, 그 컴퓨터에서 scv-dashboard 를 확실히 받는 한 줄을 알려 줘. 같은 일이 또 나지 않게 README 의 옮기는 법을 고쳐 이 컴퓨터의 develop 에 커밋하고, 고친 문구를 보여 준 뒤 확인받고 올려 줘. SCV 플러그인 코드는 다른 세션이 맡으니 근거만 넘기고, 이미 낸 0.1.0 노트와 main 은 건드리지 마. [SCV 원칙 적용 — 단위 표]
+
+**Claude Code**: 링크는 못 읽음(웹 가져오기 403, 브라우저 도구는 Cloudflare 사람 확인에서 멈춤 — 대신 누르지 않음). 붙여 넣은 출력과 코드로 원인 확인: SCV 0.70.0 의 설치 후보 목록은 마켓이 이미 있으면 새로 받지 않아(코드 확인) 옛 목록(scv-hello 뿐)에서 고름 → 후보 0. /scv:mods 는 마켓을 새로 받은 뒤 옛 이름을 업데이트하려다 '찾을 수 없음'으로 멈춤. 새로 받을 때 Claude Code 가 scv-hello 를 스스로 지워 지울 것이 없었음 → 끝 상태 둘 다 없음. 이 맥은 scv-dashboard 0.1.0 그대로(확인) — 붙여 넣은 화면은 다른 컴퓨터. 제 리눅스 안내(/scv:mods-install 로 고르기)가 이 점을 놓쳤음: 이 맥에서는 마켓을 먼저 손으로 받아서 됐던 것. 그 컴퓨터에서: claude plugin install scv-dashboard@scv-mods(마켓을 먼저 새로 받음 — 공식 문서) → /reload-plugins. README 옮기는 법을 이 한 줄로 고쳐 이 컴퓨터에 커밋(1d6bb5d, 릴리스 시험 82 통과), 올리기는 선택 창으로 물음. SCV 쪽 고칠 점(후보 목록 전에 마켓 받기, 새로 받은 뒤 목록 다시 읽고 바뀐 이름 알려 주기, 두 가지 not found 문구)은 근거와 함께 다른 세션에 넘김.
+올리기(선택 창 답 '올린다'): README 고침(1d6bb5d)과 이 기록을 develop 에 올림. main 과 마켓은 그대로. 다른 세션은 SCV 쪽 고침 세 가지를 scv-claude-code #365(572b929)에 넣었다고 알려 옴 — 다음 SCV 릴리스는 사용자 승인 뒤.
