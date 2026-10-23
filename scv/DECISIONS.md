@@ -143,3 +143,11 @@ merge_policy: preserve
 - discarded alternatives: 옛 이름 연결(링크) 하나 남기기 — 싫어하는 이름이 저장소에 남음(사용자가 경로 고침을 고름); 폴더 이름은 그대로 — 폴더와 모드 이름이 달라 헷갈림; 보이는 이름(displayName)만 — /scv:mods · 도구 · 명령에 옛 이름이 남음; 비공개로 되돌리기 — 다른 사람이 설치 못 함; 0.1.0 페이지를 다음 릴리스까지 미룸 — 사용자가 지금 만들기를 고름
 - refs: scv/promote/20261023-wookiya1364-scv-mods-release/PLAN.md
 - conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-23 11:13] wookiya1364 — scv-mods 릴리스 관리 — 버전 · 노트 · 태그 · 두 갈래 archived
+
+- verdict: archived
+- why: 모드 버전은 plugin.json 한 곳에만 적고 scripts/release.sh 로만 바꾼다. 확인을 모두 먼저 하고, 시험 · 버전 적기 · 검사 · 커밋 · 공식 태그(<mod>--v<version>) · main 앞당기기를 한 번에 하며, 올리기 전 단계가 틀리면 되돌린다. 일은 develop, main 은 릴리스 때만. 첫 릴리스 scv-dashboard 0.1.0 — 버전을 고정하면 번호가 바뀔 때만 업데이트되니, 다른 컴퓨터에서 새 작업을 확인하려면 릴리스가 필요하다. 앞으로 깨면 안 되는 것: 보통 커밋에서 버전을 바꾸지 않기, main 은 앞당기기로만.
+- path delta: 올리기 직전 사용자가 이름을 문제 삼아, 첫 릴리스 전에 scv-hello → scv-dashboard 로 바꿨다(마켓 renames, 다른 계획 7개 시험 명령 경로 — 보관된 3개는 사용자 예외). 끝 기준 '84ae8d4b5ca9 → 0.1.0 업데이트'는 '새 이름으로 설치'로 바뀌었고, 실제로는 마켓 갱신 때 Claude Code 가 옛 설치를 스스로 지워 지우기 단계가 필요 없었다. 자동 작업은 같은 push 에서 1초 늦게 등록돼 첫 태그를 놓쳤고(실행 0건), 0.1.0 페이지는 사용자 승인 뒤 로그인된 gh 로 같은 명령을 돌려 만들었다. 손으로 돌리기(workflow_dispatch)는 develop 에만 있고 main 에는 다음 릴리스 때. 저장소는 비공개가 아니라 공개였고 사용자가 공개를 유지하기로 했다.
+- refs: scv/archive/20261023-wookiya1364-scv-mods-release/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
