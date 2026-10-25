@@ -1,9 +1,12 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, Expanded, Live, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepSignal, Stopped, TestRun, UsageLimit, WorkEntry } from '../types'
+import type { AgentState, Expanded, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepSignal, Stopped, TestRun, UsageLimit, WorkEntry } from '../types'
 import {
   STEP_TOOL,
+  mirrorAddress,
+  mirrorText,
+  parseMirror,
   agentLines,
   ancestorsOf,
   applyAgentEvent,
@@ -52,6 +55,9 @@ import {
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
 const REFRESH_MS = 3000
+// A mirror sends again after this long even when nothing changed, and a viewer that heard nothing for twice that asks again.
+const MIRROR_BEAT_MS = 30_000
+const MIRROR_MISSES = 3
 
 const snapshot = atom({ plugin: 'scv-dashboard', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '', root: '' } as Snapshot)
 const chosen = atom({ plugin: 'scv-dashboard', key: 'chosen' } as const, null as string | null)
@@ -71,6 +77,7 @@ const stopped = atom({ plugin: 'scv-dashboard', key: 'stopped' } as const, null 
 const agents = atom({ plugin: 'scv-dashboard', key: 'agents' } as const, [] as AgentState[])
 const since = atom({ plugin: 'scv-dashboard', key: 'since' } as const, null as Since | null)
 const limits = atom({ plugin: 'scv-dashboard', key: 'limits' } as const, [] as UsageLimit[])
+const mirror = atom({ plugin: 'scv-dashboard', key: 'mirror' } as const, null as Mirror | null)
 
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
 const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○' }
@@ -148,6 +155,14 @@ const loadRuns = async ($: Api, project: string) => {
 
 const refresh = async ($: Api) => {
   const at = await $.clock.now()
+  // A viewer session draws the working session's state, so its own files are not read; only its clock moves.
+  const mirrored = await read($, mirror)
+  if (mirrored) {
+    await update($, now, () => at)
+    if (at - Math.max(mirrored.at, mirrored.askedAt) > 2 * MIRROR_BEAT_MS) await askMirror($, mirrored.host)
+
+    return
+  }
   const current = await read($, snapshot)
   const root = await sessionRoot($, current.root)
   const project = root === current.root && current.cwd ? current.cwd : await projectOf($, root)
@@ -250,6 +265,99 @@ const isOwnCall = (origin: { plugin: string }) => origin.plugin === 'scv-dashboa
 
 const openPane = ($: Api) => $.ui.open({ id: PANE, title: TITLE })
 
+// Where other sessions reach this one, read from the session files Claude Code keeps for each running session.
+const ownAddress = async ($: Api) => {
+  const id = await $.session.id()
+  const listed = await $.process
+    .run(['sh', '-c', 'for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/sessions/*.json; do cat "$f"; echo; done'])
+    .catch(() => undefined)
+
+  return mirrorAddress(listed?.stdout ?? '', id)
+}
+
+// The working session's state a viewer session draws from; the viewer's own choices and clock stay its own.
+const mirrorState = async ($: Api) => ({
+  snapshot: await read($, snapshot),
+  runs: await read($, runs),
+  waiting: await read($, waiting),
+  live: await read($, live),
+  tasks: await read($, tasks),
+  history: await read($, history),
+  stepLog: await read($, stepLog),
+  signals: await read($, signals),
+  permit: await read($, permit),
+  stopped: await read($, stopped),
+  agents: await read($, agents),
+  since: await read($, since),
+  limits: await read($, limits),
+})
+
+type MirrorState = Awaited<ReturnType<typeof mirrorState>>
+
+// Takes a state another session sent, while this session is mirroring; anything else is dropped.
+const takeMirror = async ($: Api, body: string) => {
+  const mirrored = await read($, mirror)
+  if (!mirrored) return
+  let state: MirrorState
+  try {
+    state = JSON.parse(body) as MirrorState
+  } catch {
+    return
+  }
+  if (!Array.isArray(state?.snapshot?.plans)) return
+  await update($, snapshot, () => state.snapshot)
+  await update($, runs, () => state.runs ?? [])
+  await update($, waiting, () => state.waiting ?? null)
+  await update($, live, () => state.live ?? { isWorking: false, turnStartedAt: 0, tool: null })
+  await update($, tasks, () => state.tasks ?? [])
+  await update($, history, () => state.history ?? [])
+  await update($, stepLog, () => state.stepLog ?? {})
+  await update($, signals, () => state.signals ?? [])
+  await update($, permit, () => state.permit ?? null)
+  await update($, stopped, () => state.stopped ?? null)
+  await update($, agents, () => state.agents ?? [])
+  await update($, since, () => state.since ?? null)
+  await update($, limits, () => state.limits ?? [])
+  const at = await $.clock.now()
+  if (mirrored.at === 0) $.ui.toast(`SCV: ${mirrored.host} 의 상태를 받았습니다`)
+  await update($, mirror, value => (value ? { ...value, at } : value))
+}
+
+// The viewer sessions this session sends its state to, by address: what was sent last, when, and failed sends in a row.
+const viewers = new Map<string, { sent: string; at: number; misses: number }>()
+let isPushing = false
+
+// Sends the state to each viewer when it changed, or when a beat passed; a viewer that keeps failing is let go.
+const pushMirror = async ($: Api) => {
+  if (viewers.size === 0 || isPushing) return
+  isPushing = true
+  try {
+    const body = JSON.stringify(await mirrorState($))
+    const at = await $.clock.now()
+    for (const [address, last] of viewers) {
+      if (body === last.sent && at - last.at < MIRROR_BEAT_MS) continue
+      const sent = await $.session
+        .send({ to: { sessionId: address }, text: mirrorText({ kind: 'state', body }) })
+        .catch((error: unknown) => ({ isDelivered: false as const, reason: String(error) }))
+      if (sent.isDelivered) viewers.set(address, { sent: body, at, misses: 0 })
+      else if (last.misses + 1 >= MIRROR_MISSES) viewers.delete(address)
+      else viewers.set(address, { ...last, misses: last.misses + 1 })
+    }
+  } finally {
+    isPushing = false
+  }
+}
+
+// Asks the working session to send its state here.
+const askMirror = async ($: Api, host: string) => {
+  const own = await ownAddress($)
+  const at = await $.clock.now()
+  await update($, mirror, value => ({ host, at: value?.host === host ? value.at : 0, askedAt: at }))
+  const sent = await $.session.send({ to: { sessionId: host }, text: mirrorText({ kind: 'hello', address: own.address }) })
+
+  return { own, sent }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -260,9 +368,10 @@ export const register: Register = on => {
     if (Array.isArray(kept)) await update($, runs, () => kept as TestRun[])
     await loadSignals($, project)
     await $.command.register({ name: 'scv-dashboard', description: 'Open the SCV dashboard pane' })
+    await $.command.register({ name: 'scv-mirror', description: "Draw another session's SCV pane here: /scv-mirror <address>, or /scv-mirror stop", argumentHint: '<address> | stop' })
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     await refresh($)
-    $.clock.every(REFRESH_MS, () => void refresh($).catch(() => undefined))
+    $.clock.every(REFRESH_MS, () => void refresh($).then(() => pushMirror($)).catch(() => undefined))
     void openPane($).catch(() => undefined)
 
     return started
@@ -284,10 +393,79 @@ export const register: Register = on => {
     return submitted
   })
 
+  // Sent from a Remote Control viewer, the answer is the only part that reaches it, so it says how to see the pane there.
   on('command.run', { command: 'scv-dashboard' }, async $ => {
     const { isPlaced } = await openPane($)
+    const own = await ownAddress($)
+    const reach = own.isRemote ? '' : ' (Remote Control이 꺼져 있어 이 컴퓨터 안에서만 닿습니다)'
 
-    return { text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}.` }
+    return {
+      text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}. 다른 기기 앱에서 보려면 그 앱이 직접 연 세션에서: /scv-mirror ${own.address}${reach}`,
+    }
+  })
+
+  on('command.run', { command: 'scv-mirror' }, async ($, e) => {
+    const asked = e.args.trim().split(/\s+/)[0] ?? ''
+    if (!asked) {
+      const mirrored = await read($, mirror)
+      if (mirrored) {
+        const plan = await planInView($)
+        const count = plan ? countStages(deriveStages(plan).stages) : undefined
+        const got = mirrored.at ? `${formatDuration(Math.max(0, (await $.clock.now()) - mirrored.at))} 전 받음` : '아직 받은 상태 없음'
+
+        return { text: `거울 중: ${mirrored.host} · ${got}${plan && count ? ` · ${plan.title} ${count.done}/${count.total}` : ''}` }
+      }
+      const own = await ownAddress($)
+
+      return { text: `사용법: /scv-mirror <작업 세션 주소> — 작업 세션에서 /scv-dashboard 를 치면 주소가 나옵니다. 이 세션 주소: ${own.address}` }
+    }
+    if (asked === 'stop' || asked === 'off') {
+      const mirrored = await read($, mirror)
+      await update($, mirror, () => null)
+      if (mirrored) {
+        const own = await ownAddress($)
+        await $.session.send({ to: { sessionId: mirrored.host }, text: mirrorText({ kind: 'bye', address: own.address }) }).catch(() => undefined)
+      }
+      await refresh($).catch(() => undefined)
+
+      return { text: mirrored ? `거울 끔 — 이 세션의 SCV 칸은 이제 이 폴더를 보여 줍니다.` : '거울이 켜져 있지 않습니다.' }
+    }
+    const { own, sent } = await askMirror($, asked)
+    await openPane($).catch(() => undefined)
+    if (!sent.isDelivered) {
+      await update($, mirror, () => null)
+
+      return { text: `거울 요청을 보내지 못했습니다: ${sent.reason}` }
+    }
+    const reach = own.isRemote ? '' : ' 이 세션은 Remote Control이 꺼져 있어, 같은 컴퓨터의 작업 세션에서만 받을 수 있습니다.'
+
+    return { text: `거울 요청을 보냈습니다 → ${asked}. 상태가 오면 SCV 칸이 그 세션을 보여 줍니다.${reach}` }
+  })
+
+  // A Remote Control app joins after session.start, so the pane is opened again for it.
+  on('session.attach', async ($, e, next) => {
+    const attached = await next(e)
+    if (e.surface !== 'mobile') await openPane($).catch(() => undefined)
+
+    return attached
+  })
+
+  // Mirror messages between sessions are taken here and never reach the model; every other delivery goes on.
+  on('session.receive', async ($, e, next) => {
+    const message = e.origin.kind === 'peer' && !e.agentId ? parseMirror(e.text) : null
+    if (!message) return next(e)
+    if (message.kind === 'hello') {
+      const isNew = !viewers.has(message.address)
+      viewers.set(message.address, { sent: '', at: 0, misses: 0 })
+      if (isNew) $.ui.toast(`SCV: 다른 세션이 이 세션의 칸을 봅니다 (${message.address})`)
+      await pushMirror($)
+    } else if (message.kind === 'bye') {
+      viewers.delete(message.address)
+    } else {
+      await takeMirror($, message.body)
+    }
+
+    return { consumed: `scv mirror ${message.kind}` }
   })
 
   // Only the main conversation's turns move 'working / resting'; a subagent's run is a turn of its own loop.
@@ -485,6 +663,12 @@ export const register: Register = on => {
     const allRuns = await read($, runs)
     const dreams = parseDreams(shot.dreamsText)
     const message = await read($, note)
+    const mirrored = await read($, mirror)
+    const mirrorLine = mirrored ? (
+      <Text color="#4f8cff">
+        {`거울: ${mirrored.host} · ${mirrored.at ? `${formatDuration(Math.max(0, at - mirrored.at))} 전 받음` : '상태를 기다리는 중'}`}
+      </Text>
+    ) : null
 
     const toggle = (key: keyof Expanded) => () => void update($, expanded, value => ({ ...value, [key]: !value[key] }))
 
@@ -517,6 +701,7 @@ export const register: Register = on => {
     if (!plan) {
       return (
         <Box flexDirection="column">
+          {mirrorLine}
           <Text bold>SCV 대시보드</Text>
           <Text dimColor>이 폴더에 진행 중인 SCV 계획이 없습니다. /scv:promote 로 계획을 만들면 여기에 보입니다.</Text>
           <Text dimColor>{`확인한 곳: ${shot.cwd || '(작업 폴더 모름)'}/scv/promote`}</Text>
@@ -581,6 +766,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
+        {mirrorLine}
         {plans.length > 1 && Select ? (
           <Select
             key="plan"

@@ -686,3 +686,44 @@ export const barColor = (stages: readonly Stage[], blocks: readonly Block[]) =>
     : stages.length > 0 && stages.every(stage => stage.state === 'done')
       ? NODE_COLOR.done
       : NODE_COLOR.doing
+
+// ── mirror: another session's pane fed by this one ──────────────────────────
+// A Remote Control viewer cannot draw a pane, so a session the viewer's own app runs (a 'viewer session') asks the
+// working session for its state and draws that. The messages go between sessions and never reach either model.
+
+export const MIRROR_MARK = 'SCV-MIRROR'
+
+export type MirrorMessage = { kind: 'hello'; address: string } | { kind: 'bye'; address: string } | { kind: 'state'; body: string }
+
+// The state travels as JSON inside the delivery's envelope; <, > and & are escaped so the envelope's own tags stay whole.
+export const mirrorText = (message: MirrorMessage) =>
+  message.kind === 'state'
+    ? `${MIRROR_MARK} STATE ${message.body.replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')}`
+    : `${MIRROR_MARK} ${message.kind.toUpperCase()} ${message.address}`
+
+// A delivery that carries a mirror message, else null; the envelope around it (a cross-session tag) is left out.
+export const parseMirror = (text: string): MirrorMessage | null => {
+  const found = text.match(new RegExp(`${MIRROR_MARK} (HELLO|BYE|STATE) ([^\\n]*)`))
+  if (!found?.[1] || !found[2]) return null
+  const body = found[2].trim()
+  if (found[1] === 'STATE') return { kind: 'state', body }
+
+  if (!body) return null
+
+  return found[1] === 'HELLO' ? { kind: 'hello', address: body } : { kind: 'bye', address: body }
+}
+
+// Where other sessions reach this one: its Remote Control id when Remote Control is on (other computers reach that),
+// else its own id (this computer only). `files` is the session files' text, one JSON object per line.
+export const mirrorAddress = (files: string, sessionId: string) => {
+  for (const line of files.split('\n')) {
+    try {
+      const entry = JSON.parse(line) as { sessionId?: unknown; bridgeSessionId?: unknown }
+      if (entry.sessionId === sessionId && typeof entry.bridgeSessionId === 'string') return { address: entry.bridgeSessionId, isRemote: true }
+    } catch {
+      // a file being written, or not one of the session files
+    }
+  }
+
+  return { address: sessionId, isRemote: false }
+}
