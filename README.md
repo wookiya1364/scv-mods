@@ -21,6 +21,8 @@ Claude Code mods for the SCV workflow.
 
   It opens when a session starts; if you close it, it reopens on your next message, or type `/scv-dashboard`. The terminal is not a target.
 
+  A Remote Control viewer (the desktop app on another computer, claude.ai, the phone) cannot draw the pane. To see it on another computer, open a session in that computer's own desktop app and type `/scv-mirror <address>`: that session's pane then shows the working session's state, sent between the two sessions and never read by either model. `/scv-dashboard` in the working session prints its address (its Remote Control id while Remote Control is on). `/scv-mirror` alone says what it mirrors; `/scv-mirror stop` ends it. Both computers need scv-dashboard 0.2.0 or later.
+
 ## Versions
 
 Each mod has a version number, shown by `/scv:mods` and `claude plugin list`. What each version holds is in its release notes, one file per version, and on the repository's Releases page:

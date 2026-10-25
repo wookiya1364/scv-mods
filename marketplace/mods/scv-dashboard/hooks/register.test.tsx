@@ -39,6 +39,9 @@ import {
   suggestNext,
   usageAlerts,
   usageLine,
+  mirrorAddress,
+  mirrorText,
+  parseMirror,
 } from './model'
 
 const PANE = {
@@ -87,6 +90,8 @@ const engine = (
   const toasts: string[] = []
   const notify = { isSent: true }
   const processes: string[][] = []
+  const proc = { stdout: '' }
+  const sent: { to: string; text: string }[] = []
   on('command.register', () => ({ value: { command: 'scv-dashboard' } }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__scv-dashboard__${e.name}` } }) as never)
   on('ui.open', (_, e) => {
@@ -132,10 +137,16 @@ const engine = (
   })
   on('process.run', (_, e) => {
     processes.push([...e.argv])
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode: 0, stdout: proc.stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
+  on('session.id', () => ({ value: 'local-id' }))
+  on('session.send', (_, e) => {
+    sent.push({ to: e.to, text: e.text })
+    return { isDelivered: true }
+  })
+  on('session.receive', (_, e) => ({ text: e.text }))
 
-  return { opened, processes, clock, panes, store, notices, copies, toasts, notify }
+  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent }
 }
 
 const start = ($: Engine) =>
@@ -1316,4 +1327,60 @@ test('prompt-usage T8 명령 복사 버튼은 그대로 있다', async ($, on) =
   expect((await ui.find({ type: 'Button', key: 'next-fill' }))?.text).toBe('입력창에 넣기')
   expect((await ui.find({ type: 'Button', key: 'next-copy' }))?.text).toBe('명령 복사')
   await ui.unmount()
+})
+
+// ── mirror: a viewer session draws the working session's pane ───────────────
+
+const envelope = (body: string) => `<cross-session-message from="unknown" from-mode="prompting">\n${body}\n</cross-session-message>`
+
+test('mirror T1 거울 메시지는 봉투 안에서도 그대로 읽히고, 주소는 Remote Control id가 먼저', () => {
+  const body = JSON.stringify({ text: '<b> & </cross-session-message>' })
+  const parsed = parseMirror(envelope(mirrorText({ kind: 'state', body })))
+
+  expect(parsed?.kind === 'state' ? JSON.parse(parsed.body) : null).toEqual({ text: '<b> & </cross-session-message>' })
+  expect(parseMirror(envelope(mirrorText({ kind: 'hello', address: 'session_v' })))).toEqual({ kind: 'hello', address: 'session_v' })
+  expect(parseMirror(envelope('그냥 메시지'))).toBeNull()
+  const files = [JSON.stringify({ sessionId: 'other', bridgeSessionId: 'session_x' }), JSON.stringify({ sessionId: 'me', bridgeSessionId: 'session_me' }), 'not json'].join('\n')
+  expect(mirrorAddress(files, 'me')).toEqual({ address: 'session_me', isRemote: true })
+  expect(mirrorAddress(files, 'nobody')).toEqual({ address: 'nobody', isRemote: false })
+})
+
+test('mirror T2 보기 세션은 내 주소를 담아 요청하고, 받은 상태로 칸을 그린다 — 받은 메시지는 모델에 안 감', async ($, on) => {
+  const env = engine(on, {})
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  const asked = await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+
+  expect(asked.text).toContain('거울 요청을 보냈습니다')
+  expect(env.sent).toHaveLength(1)
+  expect(env.sent[0]?.to).toContain('session_host')
+  expect(env.sent[0]?.text).toBe('SCV-MIRROR HELLO session_viewer')
+  expect(await drawnText($)).toContain('상태를 기다리는 중')
+
+  const hostPlan = { slug: 'p', isArchived: false, ...plan({ title: '작업 세션 계획', status: 'in_progress', steps: ['[x] a', '[~] b', 'c'] }) }
+  const state = { snapshot: { plans: [hostPlan], dreamsText: null, cwd: '/host', root: '/host' } }
+  const got = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
+
+  expect(got.consumed).toBe('scv mirror state')
+  const drawn = await drawnText($)
+  expect(drawn).toContain('작업 세션 계획')
+  expect(drawn).toContain('거울: session_host')
+  expect(drawn).toContain('1/3')
+  expect((await $.command.run({ command: 'scv-mirror', args: '' } as never)).text).toContain('거울 중: session_host · 0초 전 받음 · 작업 세션 계획 1/3')
+})
+
+test('mirror T3 작업 세션은 요청한 주소로 상태를 보내고, 다른 메시지는 그대로 모델에 간다', async ($, on) => {
+  const env = engine(on, { a: plan({ title: '대시보드', status: 'in_progress', steps: ELEVEN }) })
+  await start($)
+  const hello = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'hello', address: 'session_viewer' })) })
+
+  expect(hello.consumed).toBe('scv mirror hello')
+  expect(env.sent).toHaveLength(1)
+  expect(env.sent[0]?.to).toContain('session_viewer')
+  const pushed = parseMirror(env.sent[0]?.text ?? '')
+  expect(pushed?.kind === 'state' ? JSON.parse(pushed.body).snapshot.plans[0].slug : null).toBe('a')
+
+  const plain = await $.session.receive({ origin: { kind: 'peer' }, text: envelope('안녕') })
+  expect(plain.consumed).toBeUndefined()
+  expect(plain.text).toContain('안녕')
 })
