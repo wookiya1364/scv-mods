@@ -541,6 +541,9 @@ export const register: Register = on => {
   // The mod's own phone notification asks no permission; the person's calls to it are judged as ever.
   on('tool.check', { tool: 'PushNotification' }, ($, e, next) => (isOwnCall(next.origin) ? { decision: 'allow' as const } : next(e)))
 
+  // The mod's own mirror messages ask no permission (auto mode has no verdict for a send nobody typed); the model's are judged as ever.
+  on('tool.check', { tool: 'SendMessage' }, ($, e, next) => (isOwnCall(next.origin) ? { decision: 'allow' as const } : next(e)))
+
   // Claude's instructions carry the step signal only while a plan is in progress.
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
