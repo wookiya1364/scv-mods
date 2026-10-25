@@ -14,3 +14,5 @@ decision	scv-hello-scv-dashboard-이름-변경-저장소-공개-유지-첫-릴�
 decision	scv-mods-릴리스-관리-버전-노트-태그-두-갈래-archived	scv/DECISIONS.md	13286	1746	2026-10-23 11:13	[archived] scv-mods 릴리스 관리 — 버전 · 노트 · 태그 · 두 갈래 archived
 decision	scv-칸-거울-줄-줄이기와-거울-칸-동작-넘기기	scv/DECISIONS.md	15032	819	2026-10-25 14:11	[adopted] SCV 칸 — 거울 줄 줄이기와 거울 칸 동작 넘기기
 decision	scv-칸-거울-줄-줄이기와-거울-칸-동작-넘기기-archived	scv/DECISIONS.md	15851	954	2026-10-25 14:16	[archived] SCV 칸 — 거울 줄 줄이기와 거울 칸 동작 넘기기 archived
+decision	scv-칸-거울-자기-주소-막기와-실패해도-거울-유지	scv/DECISIONS.md	16805	721	2026-10-25 14:25	[adopted] SCV 칸 — 거울 자기 주소 막기와 실패해도 거울 유지
+decision	scv-칸-거울-자기-주소-막기와-실패해도-거울-유지-archived	scv/DECISIONS.md	17526	735	2026-10-25 14:26	[archived] SCV 칸 — 거울 자기 주소 막기와 실패해도 거울 유지 archived

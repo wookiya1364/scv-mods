@@ -6,6 +6,7 @@ import type { MirrorAct } from './model'
 import {
   STEP_TOOL,
   isMirrorDue,
+  isOwnAddress,
   mirrorAddress,
   mirrorText,
   parseMirror,
@@ -389,14 +390,15 @@ const takeAct = async ($: Api, address: string, act: MirrorAct) => {
   await update($, note, () => (isFilled ? `입력창에 넣음 (거울에서): ${command}` : `입력창에 못 넣음 — ${command}`))
 }
 
-// Asks the working session to send its state here.
+// Asks the working session to send its state here; `previous` is the mirror as it stood, for a failed ask to put back.
 const askMirror = async ($: Api, host: string) => {
   const own = await ownAddress($)
+  const previous = await read($, mirror)
   const at = await $.clock.now()
   await update($, mirror, value => ({ host, at: value?.host === host ? value.at : 0, askedAt: at }))
   const sent = await $.session.send({ to: { sessionId: host }, text: mirrorText({ kind: 'hello', address: own.address }) })
 
-  return { own, sent }
+  return { own, sent, previous }
 }
 
 export const register: Register = on => {
@@ -441,7 +443,7 @@ export const register: Register = on => {
     const reach = own.isRemote ? '' : ' (Remote Control이 꺼져 있어 이 컴퓨터 안에서만 닿습니다)'
 
     return {
-      text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}. 다른 기기 앱에서 보려면 그 앱이 직접 연 세션에서: /scv-mirror ${own.address}${reach}`,
+      text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}. 이 세션을 다른 기기 앱에서 보려면, 그 기기에서 연 다른 세션에서: /scv-mirror ${own.address}${reach}`,
     }
   })
 
@@ -471,10 +473,17 @@ export const register: Register = on => {
 
       return { text: mirrored ? `거울 끔 — 이 세션의 SCV 칸은 이제 이 폴더를 보여 줍니다.` : '거울이 켜져 있지 않습니다.' }
     }
-    const { own, sent } = await askMirror($, asked)
+    // One's own address mirrors nothing; it is refused before anything is sent, and the mirror as it stands stays.
+    const self = await ownAddress($)
+    if (isOwnAddress(asked, { address: self.address, localId: await $.session.id() })) {
+      return {
+        text: `이건 이 세션 자신의 주소입니다 — 거울은 다른 세션의 칸을 여기에 그립니다. 보고 싶은 다른 세션에서 /scv-dashboard 를 쳐서 나온 주소를 넣으세요. 이 세션을 다른 기기에서 보려면, 그 기기에서 연 다른 세션에서: /scv-mirror ${self.address}`,
+      }
+    }
+    const { own, sent, previous } = await askMirror($, asked)
     await openPane($).catch(() => undefined)
     if (!sent.isDelivered) {
-      await update($, mirror, () => null)
+      await update($, mirror, () => previous)
 
       return { text: `거울 요청을 보내지 못했습니다: ${sent.reason}` }
     }

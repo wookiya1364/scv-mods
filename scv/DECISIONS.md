@@ -165,3 +165,19 @@ merge_policy: preserve
 - why: 작업 세션은 바뀐 상태만 최소 10초 간격으로 보내고, 보기 세션은 10분 무소식일 때만 다시 요청한다. 시청자 목록은 $.state 에 있어 모드 재적재에도 남는다. 거울 칸의 입력창 넣기·보고서 열기는 ACT 로 작업 세션이 하고, 명령은 작업 세션이 slug 로 다시 계산한다 — 메시지의 글자를 명령으로 믿지 않는 것은 앞으로도 지킨다.
 - path delta: 시험을 먼저 실패시키지 않고 구현 뒤에 붙였다(순서만 다름). 시험 하네스에 mock.clock 옵션을 더해 3초 새로 고침을 직접 돌렸다. viewer 메모는 '입력창(작업 세션)…' 으로 시작하게 바꿔 기존 메모 분류(isActionNote)에 맞췄다.
 - refs: scv/archive/20261025-wookiya1364-scv-dashboard-mirror-two-way/PLAN.md
+
+## [2026-10-25 14:25] wookiya1364 — SCV 칸 — 거울 자기 주소 막기와 실패해도 거울 유지
+
+- verdict: adopted
+- why: 자기 주소로 /scv-mirror 를 치는 실수가 실제로 두 컴퓨터에서 났고, 실패가 걸려 있던 거울까지 껐다. 보내기 전에 자기 주소를 거르고, 실패하면 이전 거울로 되돌린다.
+- discarded alternatives: 안내 문구만 고치기 — 실수 한 번에 거울이 꺼지는 문제는 남음 / 자기 주소 오류를 엔진 메시지 그대로 두기 — 영어라 원인을 알기 어려움
+- refs: scv/promote/20261025-wookiya1364-scv-mirror-self-address/PLAN.md
+- conversation: scv/conversations/20261025-142147-scv-mirror-self-address.md
+
+## [2026-10-25 14:26] wookiya1364 — SCV 칸 — 거울 자기 주소 막기와 실패해도 거울 유지 archived
+
+- verdict: archived
+- why: /scv-mirror 는 자기 주소(Remote Control id·로컬 id, bridge: 접두 포함)를 보내기 전에 한국어로 거절하고, 보내기에 실패하면 걸려 있던 거울로 되돌린다. /scv-dashboard 안내는 '그 기기에서 연 다른 세션에서' 로 바뀌었다.
+- path delta: as planned (이번엔 시험을 먼저 써 실패를 확인한 뒤 구현). 하네스 engine 에 전송 실패 스위치(delivery)를 더했다.
+- refs: scv/archive/20261025-wookiya1364-scv-mirror-self-address/PLAN.md
+- conversation: scv/conversations/20261025-142147-scv-mirror-self-address.md
