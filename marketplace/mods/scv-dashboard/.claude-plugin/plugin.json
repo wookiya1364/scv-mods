@@ -1,6 +1,6 @@
 {
   "name": "scv-dashboard",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "SCV dashboard pane: plan progress, stage flow, blocks, tests, live work, ETA and dreams",
   "types": "./types/index.d.ts"
 }
