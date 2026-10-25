@@ -344,6 +344,31 @@ test('progress T7 단계를 누르면 그 단계가 만드는 역할(파이프�
   await ui.unmount()
 })
 
+test('progress T7b 단계 줄 끝 글 꼬리는 그 단계의 하는 일, 백틱 꼬리는 표와 잇고, 꼬리가 없으면 지금 문구', async ($, on) => {
+  const pipeline = ['`render` | 정리된 값을 오른쪽 칸 화면으로 그린다 | View → 화면 | 부수효과 (출구)']
+  const steps = ['화면 그리기 — `render`', '시나리오: 비싸요 갈래 — 특약 빼기 제안 · 동의 · 거절 흐름을 시나리오에 넣는다', '녹음']
+  const parsed = parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps, pipeline }) })
+  expect(parsed.steps.map(({ name, refs, role }) => ({ name, refs, role }))).toEqual([
+    { name: '화면 그리기', refs: ['render'], role: undefined },
+    { name: '시나리오: 비싸요 갈래', refs: [], role: '특약 빼기 제안 · 동의 · 거절 흐름을 시나리오에 넣는다' },
+    { name: '녹음', refs: [], role: undefined },
+  ])
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps, pipeline }) })
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /^• /)).toBe('• 정리된 값을 오른쪽 칸 화면으로 그린다')
+  await ui.press({ key: 'step-2' })
+  expect(await text(ui, /^2\. /)).toBe('2. 시나리오: 비싸요 갈래 — 대기')
+  expect(await text(ui, /^• /)).toBe('• 특약 빼기 제안 · 동의 · 거절 흐름을 시나리오에 넣는다')
+  await ui.press({ key: 'step-3' })
+  expect(await text(ui, /^• /)).toBeUndefined()
+  expect(await text(ui, /찾지 못했습니다/)).toBe('계획서 파이프라인 표에서 이 단계가 하는 일을 찾지 못했습니다.')
+  await ui.unmount()
+})
+
 test('progress T8 계획이 여러 개면 선택 항목으로 고른다', async ($, on) => {
   engine(on, {
     '20261022-a': plan({ title: '진행 중 계획', status: 'in_progress', steps: ['a'] }),
