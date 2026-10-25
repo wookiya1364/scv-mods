@@ -749,6 +749,13 @@ export const parseMirror = (text: string): MirrorMessage | null => {
 export const isMirrorDue = (last: { sent: string; at: number }, body: string, at: number, gap: number) =>
   body !== last.sent && (last.at === 0 || at - last.at >= gap)
 
+// Whether an address the person typed is this session's own: its Remote Control id or its local id, `bridge:` or not.
+export const isOwnAddress = (asked: string, own: { address: string; localId: string }) => {
+  const bare = asked.trim().replace(/^bridge:/, '')
+
+  return bare === own.address || bare === own.localId
+}
+
 // Where other sessions reach this one: its Remote Control id when Remote Control is on (other computers reach that),
 // else its own id (this computer only). `files` is the session files' text, one JSON object per line.
 export const mirrorAddress = (files: string, sessionId: string) => {

@@ -40,6 +40,7 @@ import {
   usageAlerts,
   usageLine,
   isMirrorDue,
+  isOwnAddress,
   mirrorAddress,
   mirrorText,
   parseMirror,
@@ -95,6 +96,7 @@ const engine = (
   const processes: string[][] = []
   const proc = { stdout: '' }
   const sent: { to: string; text: string }[] = []
+  const delivery = { isDelivered: true }
   on('command.register', () => ({ value: { command: 'scv-dashboard' } }))
   on('tool.register', (_, e) => ({ value: { tool: `mcp__scv-dashboard__${e.name}` } }) as never)
   on('ui.open', (_, e) => {
@@ -146,12 +148,13 @@ const engine = (
   })
   on('session.id', () => ({ value: 'local-id' }))
   on('session.send', (_, e) => {
+    if (!delivery.isDelivered) return { isDelivered: false, reason: 'no such session' } as never
     sent.push({ to: e.to, text: e.text })
     return { isDelivered: true }
   })
   on('session.receive', (_, e) => ({ text: e.text }))
 
-  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent }
+  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent, delivery }
 }
 
 const start = ($: Engine) =>
@@ -1543,4 +1546,60 @@ test('mirror-two-way T9 ACT 는 모델에 안 가고, 모델의 SendMessage 는 
 
   expect(got.consumed).toBe('scv mirror act')
   expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'x', message: 'hi' } } as never)).decision).toBe('ask')
+})
+
+// ── mirror-self-address: one's own address is refused, and a failed ask keeps the mirror ──
+
+test('mirror-self-address T1 자기 주소 판단', () => {
+  const own = { address: 'session_me', localId: 'local-id' }
+
+  expect(isOwnAddress('session_me', own)).toBe(true)
+  expect(isOwnAddress('bridge:session_me', own)).toBe(true)
+  expect(isOwnAddress(' local-id ', own)).toBe(true)
+  expect(isOwnAddress('session_other', own)).toBe(false)
+})
+
+test('mirror-self-address T2 자기 주소로 /scv-mirror 를 치면 보내지 않고 한국어로 거절한다', async ($, on) => {
+  const env = engine(on, {})
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+
+  for (const args of ['session_viewer', 'bridge:session_viewer']) {
+    const got = await $.command.run({ command: 'scv-mirror', args } as never)
+    expect(got.text).toContain('이 세션 자신의 주소')
+    expect(got.text).toContain('다른 세션')
+  }
+  expect(env.sent).toHaveLength(0)
+  expect(await drawnText($)).not.toContain('거울:')
+})
+
+test('mirror-self-address T3 걸려 있던 거울은 자기 주소 실수에도 그대로 남는다', async ($, on) => {
+  await startViewer($, on)
+  await $.command.run({ command: 'scv-mirror', args: 'session_viewer' } as never)
+  const drawn = await drawnText($)
+
+  expect(drawn).toContain('거울: session_host')
+  expect(drawn).toContain('작업 세션 계획')
+})
+
+test('mirror-self-address T4 다른 세션으로 보내기에 실패해도 걸려 있던 거울은 그대로다', async ($, on) => {
+  const env = await startViewer($, on)
+  env.delivery.isDelivered = false
+  const got = await $.command.run({ command: 'scv-mirror', args: 'session_gone' } as never)
+
+  expect(got.text).toContain('거울 요청을 보내지 못했습니다')
+  const drawn = await drawnText($)
+  expect(drawn).toContain('거울: session_host')
+  expect(drawn).toContain('작업 세션 계획')
+})
+
+test('mirror-self-address T5 /scv-dashboard 안내가 다른 기기의 세션에서 치라고 말한다', async ($, on) => {
+  const env = engine(on, {})
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  const got = await $.command.run({ command: 'scv-dashboard', args: '' } as never)
+
+  expect(got.text).toContain('다른 기기')
+  expect(got.text).toContain('다른 세션')
+  expect(got.text).toContain('/scv-mirror session_viewer')
 })
