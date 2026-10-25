@@ -693,25 +693,61 @@ export const barColor = (stages: readonly Stage[], blocks: readonly Block[]) =>
 
 export const MIRROR_MARK = 'SCV-MIRROR'
 
-export type MirrorMessage = { kind: 'hello'; address: string } | { kind: 'bye'; address: string } | { kind: 'state'; body: string }
+// What a viewer's press asks the working session to do on its own side: put the plan's next command in its prompt
+// box, or open its dreams report. The working session works the command out from its own state, never from the message.
+export type MirrorAct = { do: 'fill'; slug: string } | { do: 'open-report' }
+
+export type MirrorMessage =
+  | { kind: 'hello'; address: string }
+  | { kind: 'bye'; address: string }
+  | { kind: 'state'; body: string }
+  | { kind: 'act'; address: string; act: MirrorAct }
+
+const escapeTags = (body: string) => body.replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')
 
 // The state travels as JSON inside the delivery's envelope; <, > and & are escaped so the envelope's own tags stay whole.
 export const mirrorText = (message: MirrorMessage) =>
   message.kind === 'state'
-    ? `${MIRROR_MARK} STATE ${message.body.replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026')}`
-    : `${MIRROR_MARK} ${message.kind.toUpperCase()} ${message.address}`
+    ? `${MIRROR_MARK} STATE ${escapeTags(message.body)}`
+    : message.kind === 'act'
+      ? `${MIRROR_MARK} ACT ${message.address} ${escapeTags(JSON.stringify(message.act))}`
+      : `${MIRROR_MARK} ${message.kind.toUpperCase()} ${message.address}`
+
+// An act this version knows, else null.
+const parseAct = (json: string): MirrorAct | null => {
+  try {
+    const act = JSON.parse(json) as { do?: unknown; slug?: unknown }
+    if (act.do === 'open-report') return { do: 'open-report' }
+    if (act.do === 'fill' && typeof act.slug === 'string' && act.slug) return { do: 'fill', slug: act.slug }
+  } catch {
+    // not JSON
+  }
+
+  return null
+}
 
 // A delivery that carries a mirror message, else null; the envelope around it (a cross-session tag) is left out.
 export const parseMirror = (text: string): MirrorMessage | null => {
-  const found = text.match(new RegExp(`${MIRROR_MARK} (HELLO|BYE|STATE) ([^\\n]*)`))
+  const found = text.match(new RegExp(`${MIRROR_MARK} (HELLO|BYE|STATE|ACT) ([^\\n]*)`))
   if (!found?.[1] || !found[2]) return null
   const body = found[2].trim()
   if (found[1] === 'STATE') return { kind: 'state', body }
 
   if (!body) return null
+  if (found[1] === 'ACT') {
+    const gap = body.indexOf(' ')
+    const act = gap > 0 ? parseAct(body.slice(gap + 1)) : null
+
+    return act ? { kind: 'act', address: body.slice(0, gap), act } : null
+  }
 
   return found[1] === 'HELLO' ? { kind: 'hello', address: body } : { kind: 'bye', address: body }
 }
+
+// Whether the working session sends its state to a viewer now: only when it changed, and not sooner than `gap` after
+// the last send — each send is a row in the viewer's app, so an idle session sends none and a busy one a few a minute.
+export const isMirrorDue = (last: { sent: string; at: number }, body: string, at: number, gap: number) =>
+  body !== last.sent && (last.at === 0 || at - last.at >= gap)
 
 // Where other sessions reach this one: its Remote Control id when Remote Control is on (other computers reach that),
 // else its own id (this computer only). `files` is the session files' text, one JSON object per line.

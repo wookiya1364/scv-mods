@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { Engine, TestBody } from 'claude-code/testing'
 
 type On = Parameters<TestBody>[1]
@@ -39,6 +39,7 @@ import {
   suggestNext,
   usageAlerts,
   usageLine,
+  isMirrorDue,
   mirrorAddress,
   mirrorText,
   parseMirror,
@@ -81,6 +82,8 @@ const engine = (
   dreams: string | null = DREAMS,
   clock = { at: 1_000_000 },
   archived: Files = {},
+  // true: the test answers $.clock itself (mock.clock), so the refresh timer can be advanced
+  isClockMocked = false,
 ) => {
   const opened: string[] = []
   const panes: { id: string }[] = []
@@ -100,8 +103,10 @@ const engine = (
   })
   on('ui.panes', () => ({ value: panes as never }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('clock.now', () => ({ value: clock.at }))
-  on('clock.every', () => ({ value: undefined }))
+  if (!isClockMocked) {
+    on('clock.now', () => ({ value: clock.at }))
+    on('clock.every', () => ({ value: undefined }))
+  }
   const dir = (name: string) => ({ name, kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false })
   on('fs.list', (_, e) => ({
     value:
@@ -1385,5 +1390,157 @@ test('mirror T3 작업 세션은 요청한 주소로 상태를 보내고, 다른
   expect(plain.consumed).toBeUndefined()
   expect(plain.text).toContain('안녕')
   // Only the mod's own sends skip the permission check; the model's SendMessage is judged as ever.
+  expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'x', message: 'hi' } } as never)).decision).toBe('ask')
+})
+
+// ── mirror-two-way: fewer rows, and the mirrored pane's presses done by the working session ──
+
+const PLANNED = () => ({ p: plan({ title: '작업 세션 계획', status: 'planned', steps: ['a', 'b'] }) })
+
+// A viewer session mirroring session_host, with the host's state (plan p, dreams report) already drawn.
+const startViewer = async ($: Engine, on: On) => {
+  const env = engine(on, {})
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  const hostPlan = { slug: 'p', isArchived: false, ...PLANNED().p }
+  const state = { snapshot: { plans: [hostPlan], dreamsText: DREAMS, cwd: '/host', root: '/host' } }
+  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
+
+  return env
+}
+
+const hello = (address = 'session_viewer') => ({ origin: { kind: 'peer' as const }, text: envelope(mirrorText({ kind: 'hello', address })) })
+
+test('mirror-two-way T1 ACT 메시지는 봉투 안에서도 읽히고, 모르는 형태는 버린다', () => {
+  const fill = { kind: 'act' as const, address: 'session_v', act: { do: 'fill' as const, slug: 'a' } }
+  const report = { kind: 'act' as const, address: 'session_v', act: { do: 'open-report' as const } }
+
+  expect(parseMirror(envelope(mirrorText(fill)))).toEqual(fill)
+  expect(parseMirror(envelope(mirrorText(report)))).toEqual(report)
+  expect(parseMirror(envelope('SCV-MIRROR ACT session_v {"do":"run"}'))).toBeNull()
+  expect(parseMirror(envelope('SCV-MIRROR ACT session_v {"do":"fill","slug":""}'))).toBeNull()
+  expect(parseMirror(envelope('SCV-MIRROR ACT session_v {not json'))).toBeNull()
+  expect(parseMirror(envelope('SCV-MIRROR ACT {"do":"open-report"}'))).toBeNull()
+})
+
+test('mirror-two-way T2 보낼지 판단 — 바뀌었고 간격이 지났을 때만', () => {
+  expect(isMirrorDue({ sent: 'x', at: 1000 }, 'x', 100_000, 10_000)).toBe(false)
+  expect(isMirrorDue({ sent: 'x', at: 1000 }, 'y', 6000, 10_000)).toBe(false)
+  expect(isMirrorDue({ sent: 'x', at: 1000 }, 'y', 11_000, 10_000)).toBe(true)
+  expect(isMirrorDue({ sent: '', at: 0 }, 'y', 5, 10_000)).toBe(true)
+})
+
+test('mirror-two-way T3 작업 세션은 바뀐 게 없으면 보내지 않고, 바뀌면 간격을 두고 보낸다', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const files = PLANNED()
+  const env = engine(on, files, DREAMS, undefined, {}, true)
+  await start($)
+  await $.session.receive(hello())
+  expect(env.sent).toHaveLength(1)
+
+  await clock.advance(10 * 60_000)
+  expect(env.sent).toHaveLength(1)
+
+  files.p = plan({ title: '작업 세션 계획', status: 'in_progress', steps: ['[x] a', 'b'] })
+  await clock.advance(3000)
+  expect(env.sent).toHaveLength(2)
+
+  files.p = plan({ title: '작업 세션 계획', status: 'in_progress', steps: ['[x] a', '[x] b'] })
+  await clock.advance(3000)
+  expect(env.sent).toHaveLength(2)
+
+  await clock.advance(9000)
+  expect(env.sent).toHaveLength(3)
+  expect(env.sent.every(one => one.to.includes('session_viewer'))).toBe(true)
+})
+
+test('mirror-two-way T4 BYE 를 받은 시청자에게는 바뀌어도 보내지 않는다', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const files = PLANNED()
+  const env = engine(on, files, DREAMS, undefined, {}, true)
+  await start($)
+  await $.session.receive(hello())
+  const bye = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'bye', address: 'session_viewer' })) })
+
+  expect(bye.consumed).toBe('scv mirror bye')
+  files.p = plan({ title: '작업 세션 계획', status: 'in_progress', steps: ['[x] a', 'b'] })
+  await clock.advance(30_000)
+  expect(env.sent).toHaveLength(1)
+})
+
+test('mirror-two-way T5 보기 세션은 소식이 없어도 10분 전에는 다시 요청하지 않는다', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const env = engine(on, {}, DREAMS, undefined, {}, true)
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  expect(env.sent).toHaveLength(1)
+
+  await clock.advance(9 * 60_000)
+  expect(env.sent).toHaveLength(1)
+
+  await clock.advance(2 * 60_000)
+  expect(env.sent).toHaveLength(2)
+  expect(env.sent[1]?.text).toBe('SCV-MIRROR HELLO session_viewer')
+})
+
+test('mirror-two-way T6 거울 칸의 입력창에 넣기는 작업 세션으로 ACT 를 보낸다', async ($, on) => {
+  const { fills } = promptEngine(on)
+  const env = await startViewer($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'next-fill' })
+
+  expect(env.sent).toHaveLength(2)
+  expect(env.sent[1]?.to).toContain('session_host')
+  expect(env.sent[1]?.text).toBe('SCV-MIRROR ACT session_viewer {"do":"fill","slug":"p"}')
+  expect(fills).toEqual([])
+  expect(await text(ui, /^입력창/)).toBe('입력창(작업 세션)에 넣으라고 보냄: /scv:work p')
+  await ui.unmount()
+})
+
+test('mirror-two-way T7 작업 세션은 시청자의 fill 만 받아, 자기 상태로 계산한 명령을 입력창에 넣는다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'planned', steps: FIVE }) })
+  const { fills } = promptEngine(on)
+  await start($)
+  await $.session.receive(hello())
+  const act = (address: string) => ({ origin: { kind: 'peer' as const }, text: envelope(mirrorText({ kind: 'act', address, act: { do: 'fill', slug: 'a' } })) })
+
+  const mine = await $.session.receive(act('session_viewer'))
+  expect(mine.consumed).toBe('scv mirror act')
+  expect(fills).toEqual([{ text: '/scv:work a', mode: 'replace' }])
+
+  const stranger = await $.session.receive(act('session_other'))
+  expect(stranger.consumed).toBe('scv mirror act')
+  expect(fills).toHaveLength(1)
+})
+
+test('mirror-two-way T8 거울 칸의 보고서 열기는 작업 세션에서 연다', async ($, on) => {
+  const env = await startViewer($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'dreams-report' })
+
+  expect(env.processes.some(argv => argv[0] === 'xdg-open' || argv[0] === 'open')).toBe(false)
+  expect(env.sent[env.sent.length - 1]?.text).toBe('SCV-MIRROR ACT session_viewer {"do":"open-report"}')
+  await ui.unmount()
+})
+
+test('mirror-two-way T8b 작업 세션은 시청자의 open-report 를 받아 자기 보고서를 연다', async ($, on) => {
+  const { processes } = engine(on, PLANNED())
+  await start($)
+  await $.session.receive(hello())
+  const got = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'act', address: 'session_viewer', act: { do: 'open-report' } })) })
+
+  expect(got.consumed).toBe('scv mirror act')
+  expect(processes).toContainEqual(['xdg-open', '/work/scv/dreams/x.html'])
+})
+
+test('mirror-two-way T9 ACT 는 모델에 안 가고, 모델의 SendMessage 는 여전히 검사받는다', async ($, on) => {
+  engine(on, PLANNED())
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  await start($)
+  const got = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'act', address: 'session_x', act: { do: 'open-report' } })) })
+
+  expect(got.consumed).toBe('scv mirror act')
   expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'x', message: 'hi' } } as never)).decision).toBe('ask')
 })

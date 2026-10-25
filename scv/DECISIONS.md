@@ -151,3 +151,17 @@ merge_policy: preserve
 - path delta: 올리기 직전 사용자가 이름을 문제 삼아, 첫 릴리스 전에 scv-hello → scv-dashboard 로 바꿨다(마켓 renames, 다른 계획 7개 시험 명령 경로 — 보관된 3개는 사용자 예외). 끝 기준 '84ae8d4b5ca9 → 0.1.0 업데이트'는 '새 이름으로 설치'로 바뀌었고, 실제로는 마켓 갱신 때 Claude Code 가 옛 설치를 스스로 지워 지우기 단계가 필요 없었다. 자동 작업은 같은 push 에서 1초 늦게 등록돼 첫 태그를 놓쳤고(실행 0건), 0.1.0 페이지는 사용자 승인 뒤 로그인된 gh 로 같은 명령을 돌려 만들었다. 손으로 돌리기(workflow_dispatch)는 develop 에만 있고 main 에는 다음 릴리스 때. 저장소는 비공개가 아니라 공개였고 사용자가 공개를 유지하기로 했다.
 - refs: scv/archive/20261023-wookiya1364-scv-mods-release/PLAN.md
 - conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-10-25 14:11] wooki — SCV 칸 — 거울 줄 줄이기와 거울 칸 동작 넘기기
+
+- verdict: adopted
+- why: 앱이 컴퓨터 간 세션 메시지마다 '다른 세션' 줄을 그리고 consumed 로도 못 막으므로, 바뀔 때만·최소 10초 간격으로 보내 줄 수를 줄인다. 거울 칸의 입력창 넣기·보고서 열기는 ACT 로 작업 세션에 맡기고, 명령은 작업 세션이 자기 상태로 계산한다.
+- discarded alternatives: 줄 0개 — 세션 메시지를 쓰는 한 모드로 불가 / 같은 컴퓨터 $.store 통로 — 이번 구성은 두 컴퓨터라 해당 없음 / ACT 에 명령 글자 싣기 — 메시지를 믿게 되어 버림 / fast-path — 함수 여러 개라 기준 밖
+- refs: scv/promote/20261025-wookiya1364-scv-dashboard-mirror-two-way/PLAN.md
+
+## [2026-10-25 14:16] wooki — SCV 칸 — 거울 줄 줄이기와 거울 칸 동작 넘기기 archived
+
+- verdict: archived
+- why: 작업 세션은 바뀐 상태만 최소 10초 간격으로 보내고, 보기 세션은 10분 무소식일 때만 다시 요청한다. 시청자 목록은 $.state 에 있어 모드 재적재에도 남는다. 거울 칸의 입력창 넣기·보고서 열기는 ACT 로 작업 세션이 하고, 명령은 작업 세션이 slug 로 다시 계산한다 — 메시지의 글자를 명령으로 믿지 않는 것은 앞으로도 지킨다.
+- path delta: 시험을 먼저 실패시키지 않고 구현 뒤에 붙였다(순서만 다름). 시험 하네스에 mock.clock 옵션을 더해 3초 새로 고침을 직접 돌렸다. viewer 메모는 '입력창(작업 세션)…' 으로 시작하게 바꿔 기존 메모 분류(isActionNote)에 맞췄다.
+- refs: scv/archive/20261025-wookiya1364-scv-dashboard-mirror-two-way/PLAN.md
