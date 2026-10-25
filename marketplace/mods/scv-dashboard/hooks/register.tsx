@@ -1,9 +1,11 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, Expanded, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepSignal, Stopped, TestRun, UsageLimit, WorkEntry } from '../types'
+import type { AgentState, Expanded, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
+import type { MirrorAct } from './model'
 import {
   STEP_TOOL,
+  isMirrorDue,
   mirrorAddress,
   mirrorText,
   parseMirror,
@@ -55,8 +57,11 @@ import {
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
 const REFRESH_MS = 3000
-// A mirror sends again after this long even when nothing changed, and a viewer that heard nothing for twice that asks again.
-const MIRROR_BEAT_MS = 30_000
+// A working session sends a changed state no sooner than this after its last send; an unchanged one is not sent.
+// Each send is a row in the viewer's app (the app draws one per delivery from another computer, consumed or not).
+const MIRROR_GAP_MS = 10_000
+// A viewer that heard nothing for this long asks again, in case the working session lost it.
+const MIRROR_ASK_MS = 10 * 60_000
 const MIRROR_MISSES = 3
 
 const snapshot = atom({ plugin: 'scv-dashboard', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '', root: '' } as Snapshot)
@@ -78,6 +83,7 @@ const agents = atom({ plugin: 'scv-dashboard', key: 'agents' } as const, [] as A
 const since = atom({ plugin: 'scv-dashboard', key: 'since' } as const, null as Since | null)
 const limits = atom({ plugin: 'scv-dashboard', key: 'limits' } as const, [] as UsageLimit[])
 const mirror = atom({ plugin: 'scv-dashboard', key: 'mirror' } as const, null as Mirror | null)
+const viewers = atom({ plugin: 'scv-dashboard', key: 'viewers' } as const, {} as Viewers)
 
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
 const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○' }
@@ -138,9 +144,9 @@ const loadSignals = async ($: Api, cwd: string) => {
   if (Array.isArray(kept)) await update($, signals, () => kept as StepSignal[])
 }
 
-// The plan on screen with Claude's step signals merged into its marks.
-const planInView = async ($: Api): Promise<Plan | undefined> => {
-  const plan = pickPlan(parsePlans((await read($, snapshot)).plans), await read($, chosen))
+// The plan on screen (or the one named) with Claude's step signals merged into its marks.
+const planInView = async ($: Api, slug?: string): Promise<Plan | undefined> => {
+  const plan = pickPlan(parsePlans((await read($, snapshot)).plans), slug ?? (await read($, chosen)))
 
   return plan && mergeMarks(plan, await read($, signals))
 }
@@ -159,7 +165,7 @@ const refresh = async ($: Api) => {
   const mirrored = await read($, mirror)
   if (mirrored) {
     await update($, now, () => at)
-    if (at - Math.max(mirrored.at, mirrored.askedAt) > 2 * MIRROR_BEAT_MS) await askMirror($, mirrored.host)
+    if (at - Math.max(mirrored.at, mirrored.askedAt) > MIRROR_ASK_MS) await askMirror($, mirrored.host)
 
     return
   }
@@ -199,14 +205,35 @@ const checkUsage = async ($: Api, at: number) => {
 }
 
 // What the person can do next on the plan in view, as the pane says it.
-const actionInView = async ($: Api) => {
-  const plan = await planInView($)
-  if (!plan) return null
+const actionInView = async ($: Api, slug?: string) => {
+  const plan = await planInView($, slug)
+  if (!plan || (slug && plan.slug !== slug)) return null
   const derived = deriveStages(plan)
   const run = runFor(plan, await read($, runs))
   const blocks = findBlocks(derived.stages, run, await read($, waiting), await read($, permit), await read($, stopped))
 
   return nextAction(plan.slug, plan.status, applyBlocks(derived.stages, blocks), blocks)
+}
+
+// Puts a command in this session's prompt box, keeping what the person typed; whether the box took it.
+const fillPrompt = async ($: Api, command: string) => {
+  const box = await $.prompt.read().catch(() => ({ text: '', cursor: 0 }))
+  const filled = await $.prompt.fill(planPromptFill(command, box.text)).catch(() => ({ isFilled: false }))
+
+  return filled.isFilled
+}
+
+// Opens this session's dreams report on this computer; the note says so when it could not.
+const openReport = async ($: Api) => {
+  const shot = await read($, snapshot)
+  const path = parseDreams(shot.dreamsText)?.reportPath
+  if (!path) return
+  const full = path.startsWith('/') ? path : `${shot.cwd}/${path}`
+  for (const opener of ['xdg-open', 'open']) {
+    const opened = await $.process.run([opener, full]).catch(() => undefined)
+    if (opened?.exitCode === 0) return void update($, note, () => null)
+  }
+  await update($, note, () => `보고서를 열지 못했습니다: ${full}`)
 }
 
 const STATE_WORD = { doing: '시작', done: '끝', blocked: '막힘' } as const
@@ -323,29 +350,43 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, mirror, value => (value ? { ...value, at } : value))
 }
 
-// The viewer sessions this session sends its state to, by address: what was sent last, when, and failed sends in a row.
-const viewers = new Map<string, { sent: string; at: number; misses: number }>()
+// Sends the state to each viewer when it changed and the gap passed (isMirrorDue); a viewer that keeps failing is let go.
+// The viewers live in the session's state, so a reload of the mod keeps sending to them.
 let isPushing = false
 
-// Sends the state to each viewer when it changed, or when a beat passed; a viewer that keeps failing is let go.
 const pushMirror = async ($: Api) => {
-  if (viewers.size === 0 || isPushing) return
+  if (isPushing || Object.keys(await read($, viewers)).length === 0) return
   isPushing = true
   try {
     const body = JSON.stringify(await mirrorState($))
     const at = await $.clock.now()
-    for (const [address, last] of viewers) {
-      if (body === last.sent && at - last.at < MIRROR_BEAT_MS) continue
+    for (const [address, last] of Object.entries(await read($, viewers))) {
+      if (!isMirrorDue(last, body, at, MIRROR_GAP_MS)) continue
       const sent = await $.session
         .send({ to: { sessionId: address }, text: mirrorText({ kind: 'state', body }) })
         .catch((error: unknown) => ({ isDelivered: false as const, reason: String(error) }))
-      if (sent.isDelivered) viewers.set(address, { sent: body, at, misses: 0 })
-      else if (last.misses + 1 >= MIRROR_MISSES) viewers.delete(address)
-      else viewers.set(address, { ...last, misses: last.misses + 1 })
+      await update($, viewers, value => {
+        const { [address]: current, ...rest } = value
+        if (!current) return value
+        if (sent.isDelivered) return { ...rest, [address]: { sent: body, at, misses: 0 } }
+
+        return current.misses + 1 >= MIRROR_MISSES ? rest : { ...rest, [address]: { ...current, misses: current.misses + 1 } }
+      })
     }
   } finally {
     isPushing = false
   }
+}
+
+// Does what a viewer pressed, on this side: only for a viewer this session sends to, and the command to fill is the
+// one this session works out for that plan itself — the message names the plan, never the command.
+const takeAct = async ($: Api, address: string, act: MirrorAct) => {
+  if (!(address in (await read($, viewers)))) return
+  if (act.do === 'open-report') return openReport($)
+  const command = (await actionInView($, act.slug))?.command
+  if (!command) return
+  const isFilled = await fillPrompt($, command)
+  await update($, note, () => (isFilled ? `입력창에 넣음 (거울에서): ${command}` : `입력창에 못 넣음 — ${command}`))
 }
 
 // Asks the working session to send its state here.
@@ -455,12 +496,14 @@ export const register: Register = on => {
     const message = e.origin.kind === 'peer' && !e.agentId ? parseMirror(e.text) : null
     if (!message) return next(e)
     if (message.kind === 'hello') {
-      const isNew = !viewers.has(message.address)
-      viewers.set(message.address, { sent: '', at: 0, misses: 0 })
+      const isNew = !(message.address in (await read($, viewers)))
+      await update($, viewers, value => ({ ...value, [message.address]: { sent: '', at: 0, misses: 0 } }))
       if (isNew) $.ui.toast(`SCV: 다른 세션이 이 세션의 칸을 봅니다 (${message.address})`)
       await pushMirror($)
     } else if (message.kind === 'bye') {
-      viewers.delete(message.address)
+      await update($, viewers, ({ [message.address]: _gone, ...rest }) => rest)
+    } else if (message.kind === 'act') {
+      await takeAct($, message.address, message.act)
     } else {
       await takeMirror($, message.body)
     }
@@ -675,25 +718,25 @@ export const register: Register = on => {
 
     const toggle = (key: keyof Expanded) => () => void update($, expanded, value => ({ ...value, [key]: !value[key] }))
 
+    // Mirroring, a press goes to the working session, which does it on its own side; the note says where it went.
+    const sendAct = async (act: MirrorAct, sentNote: string | null) => {
+      if (!mirrored) return
+      const own = await ownAddress($)
+      const sent = await $.session
+        .send({ to: { sessionId: mirrored.host }, text: mirrorText({ kind: 'act', address: own.address, act }) })
+        .catch((error: unknown) => ({ isDelivered: false as const, reason: String(error) }))
+      await update($, note, () => (sent.isDelivered ? sentNote : `작업 세션에 못 보냄: ${sent.reason}`))
+    }
+
     // The next command into the prompt box, keeping what the person typed; where the box will not take it, copied.
     const fillNext = async (command: string) => {
-      const box = await $.prompt.read().catch(() => ({ text: '', cursor: 0 }))
-      const filled = await $.prompt.fill(planPromptFill(command, box.text)).catch(() => ({ isFilled: false }))
-      if (filled.isFilled) return void (await update($, note, () => `입력창에 넣음: ${command}`))
+      if (mirrored) return plan && sendAct({ do: 'fill', slug: plan.slug }, `입력창(작업 세션)에 넣으라고 보냄: ${command}`)
+      if (await fillPrompt($, command)) return void (await update($, note, () => `입력창에 넣음: ${command}`))
       const copied = await $.ui.copy({ text: command, surface: e.surface }).catch(() => ({ isCopied: false }))
       await update($, note, () => (copied.isCopied ? `입력창에 못 넣어 복사함: ${command}` : `입력창에 못 넣음 — ${command}`))
     }
 
-    const openReport = async () => {
-      const path = dreams?.reportPath
-      if (!path) return
-      const full = path.startsWith('/') ? path : `${shot.cwd}/${path}`
-      for (const opener of ['xdg-open', 'open']) {
-        const opened = await $.process.run([opener, full]).catch(() => undefined)
-        if (opened?.exitCode === 0) return void update($, note, () => null)
-      }
-      await update($, note, () => `보고서를 열지 못했습니다: ${full}`)
-    }
+    const openDreamsReport = () => (mirrored ? sendAct({ do: 'open-report' }, null) : openReport($))
 
     const card = (children: RenderChildren, color = '#30363d') => (
       <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginBottom={1}>
@@ -756,7 +799,7 @@ export const register: Register = on => {
               {open.dreams && dreams.items.slice(1).map(item => <Text>· {item}</Text>)}
               <Box flexDirection="row" gap={1}>
                 <Button key="dreams-toggle" label={open.dreams ? '개선점 접기' : '개선점 펼치기'} onPress={toggle('dreams')} />
-                {dreams.reportPath && <Button key="dreams-report" label="보고서 열기" onPress={() => void openReport()} />}
+                {dreams.reportPath && <Button key="dreams-report" label="보고서 열기" onPress={() => void openDreamsReport()} />}
               </Box>
               {message && !isActionNote(message) && <Text color="#f85149">{message}</Text>}
             </>

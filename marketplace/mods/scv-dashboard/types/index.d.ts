@@ -69,6 +69,9 @@ export type Expanded = { steps: boolean; tests: boolean; blocks: boolean; dreams
 // A viewer session drawing another session's state: whose, when it last arrived (0: nothing yet) and when it was last asked for.
 export type Mirror = { host: string; at: number; askedAt: number }
 
+// The viewer sessions a working session sends its state to, by address: what was sent last, when, and failed sends in a row.
+export type Viewers = Record<string, { sent: string; at: number; misses: number }>
+
 declare module 'claude-code' {
   interface PluginState {
     'scv-dashboard': {
@@ -91,6 +94,7 @@ declare module 'claude-code' {
       since: Since | null
       limits: UsageLimit[]
       mirror: Mirror | null
+      viewers: Viewers
     }
   }
 }
