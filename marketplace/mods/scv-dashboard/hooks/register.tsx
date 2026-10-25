@@ -984,6 +984,8 @@ export const register: Register = on => {
                 <Text bold>하는 일</Text>
                 {stageRole(focusedStage, plan.pipeline).length > 0 ? (
                   stageRole(focusedStage, plan.pipeline).map(role => <Text>{`• ${describeRole(role)}`}</Text>)
+                ) : focusedStage.role ? (
+                  <Text>{`• ${focusedStage.role}`}</Text>
                 ) : (
                   <Text dimColor>계획서 파이프라인 표에서 이 단계가 하는 일을 찾지 못했습니다.</Text>
                 )}

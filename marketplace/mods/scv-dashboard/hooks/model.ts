@@ -42,11 +42,14 @@ const section = (text: string, names: readonly string[]) => {
   return lines.slice(start + 1, end < 0 ? undefined : end)
 }
 
-// A step line may name the pipeline steps it builds after a dash: "화면 그리기 — `render`".
-const splitRefs = (text: string) => {
-  const [head = '', tail] = text.split(/\s+—\s+(?=`)/)
+// A step line may name the pipeline steps it builds after a dash: "화면 그리기 — `render`",
+// or, when it builds none, say what it does in plain words: "녹음 — 고객 말을 녹음한다".
+const splitRefs = (text: string): { name: string; refs: string[]; role?: string } => {
+  const [, head = text, tail = ''] = text.match(/^(.*?)\s+—\s+(.*)$/) ?? []
+  if (!tail) return { name: text.trim(), refs: [] }
+  if (!tail.startsWith('`')) return { name: head.trim(), refs: [], role: tail.trim() }
 
-  return { name: head.trim(), refs: [...(tail ?? '').matchAll(/`([^`]+)`/g)].map(([, ref = '']) => ref.trim()) }
+  return { name: head.trim(), refs: [...tail.matchAll(/`([^`]+)`/g)].map(([, ref = '']) => ref.trim()) }
 }
 
 const parseStep = (raw: string): StepMark => {
@@ -117,7 +120,7 @@ export const deriveStages = (plan: Plan): { stages: Stage[]; isEstimated: boolea
   const isFinished = plan.status === 'done' || plan.status === 'archived'
   const isStarted = plan.status === 'in_progress' || plan.status === 'testing'
 
-  if (isFinished) return { stages: plan.steps.map(step => ({ name: step.name, refs: step.refs, state: 'done' })), isEstimated: !isMarked }
+  if (isFinished) return { stages: plan.steps.map(step => ({ name: step.name, refs: step.refs, ...(step.role ? { role: step.role } : {}), state: 'done' })), isEstimated: !isMarked }
 
   // Work stands at one place: the first step not done. Only that step may be doing or blocked;
   // a later step has not started, so whatever its mark says it is still waiting.
@@ -126,7 +129,9 @@ export const deriveStages = (plan: Plan): { stages: Stage[]; isEstimated: boolea
     const state: StageState =
       step.mark === 'done' ? 'done' : i !== current ? 'waiting' : step.mark === 'blocked' ? 'blocked' : step.mark === 'doing' || isStarted ? 'doing' : 'waiting'
 
-    return step.note ? { name: step.name, refs: step.refs, state, note: step.note } : { name: step.name, refs: step.refs, state }
+    const stage: Stage = { name: step.name, refs: step.refs, ...(step.role ? { role: step.role } : {}), state }
+
+    return step.note ? { ...stage, note: step.note } : stage
   })
 
   return { stages, isEstimated: !isMarked }

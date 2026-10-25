@@ -1,6 +1,6 @@
 export type StageState = 'done' | 'doing' | 'blocked' | 'waiting'
 
-export type StepMark = { name: string; mark: StageState | undefined; refs: string[]; note?: string }
+export type StepMark = { name: string; mark: StageState | undefined; refs: string[]; role?: string; note?: string }
 
 export type PipelineStep = { name: string; role: string; io: string; kind: string }
 
@@ -17,7 +17,7 @@ export type Plan = {
   isArchived: boolean
 }
 
-export type Stage = { name: string; state: StageState; refs: string[]; note?: string }
+export type Stage = { name: string; state: StageState; refs: string[]; role?: string; note?: string }
 
 // What Claude reported about one step of a plan's Suggested path, kept in the mod's own store.
 export type StepSignal = { plan: string; step: number; state: 'doing' | 'done' | 'blocked'; note: string; at: number; startedAt?: number }
