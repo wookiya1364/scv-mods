@@ -1371,6 +1371,7 @@ test('mirror T2 보기 세션은 내 주소를 담아 요청하고, 받은 상�
 
 test('mirror T3 작업 세션은 요청한 주소로 상태를 보내고, 다른 메시지는 그대로 모델에 간다', async ($, on) => {
   const env = engine(on, { a: plan({ title: '대시보드', status: 'in_progress', steps: ELEVEN }) })
+  on('tool.check', () => ({ decision: 'ask' as const }))
   await start($)
   const hello = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'hello', address: 'session_viewer' })) })
 
@@ -1383,4 +1384,6 @@ test('mirror T3 작업 세션은 요청한 주소로 상태를 보내고, 다른
   const plain = await $.session.receive({ origin: { kind: 'peer' }, text: envelope('안녕') })
   expect(plain.consumed).toBeUndefined()
   expect(plain.text).toContain('안녕')
+  // Only the mod's own sends skip the permission check; the model's SendMessage is judged as ever.
+  expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'x', message: 'hi' } } as never)).decision).toBe('ask')
 })
