@@ -7,6 +7,7 @@ import {
   STEP_TOOL,
   isMirrorDue,
   isOwnAddress,
+  isViewerOf,
   mirrorAddress,
   mirrorText,
   parseMirror,
@@ -478,6 +479,12 @@ export const register: Register = on => {
     if (isOwnAddress(asked, { address: self.address, localId: await $.session.id() })) {
       return {
         text: `이건 이 세션 자신의 주소입니다 — 거울은 다른 세션의 칸을 여기에 그립니다. 보고 싶은 다른 세션에서 /scv-dashboard 를 쳐서 나온 주소를 넣으세요. 이 세션을 다른 기기에서 보려면, 그 기기에서 연 다른 세션에서: /scv-mirror ${self.address}`,
+      }
+    }
+    // A session that mirrors this one would only copy it back: the two would freeze, each drawing the other.
+    if (isViewerOf(asked, await read($, viewers))) {
+      return {
+        text: `그 세션은 지금 이 세션을 거울로 보고 있습니다 — 서로 거울을 걸면 두 칸 모두 멈춥니다. 거울은 작업 세션이 아닌 다른 세션에서 겁니다. 이미 서로 걸려 있다면 한쪽에서 /scv-mirror stop`,
       }
     }
     const { own, sent, previous } = await askMirror($, asked)
