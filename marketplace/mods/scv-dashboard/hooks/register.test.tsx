@@ -41,6 +41,7 @@ import {
   usageLine,
   isMirrorDue,
   isOwnAddress,
+  isViewerOf,
   mirrorAddress,
   mirrorText,
   parseMirror,
@@ -1602,4 +1603,43 @@ test('mirror-self-address T5 /scv-dashboard 안내가 다른 기기의 세션에
   expect(got.text).toContain('다른 기기')
   expect(got.text).toContain('다른 세션')
   expect(got.text).toContain('/scv-mirror session_viewer')
+})
+
+// ── mirror-no-loop: no mirror onto a session that is mirroring this one ──
+
+test('mirror-no-loop T1 시청자인지 판단', () => {
+  const viewers = { session_v: { sent: '', at: 0, misses: 0 } }
+
+  expect(isViewerOf('session_v', viewers)).toBe(true)
+  expect(isViewerOf('bridge:session_v', viewers)).toBe(true)
+  expect(isViewerOf(' session_v ', viewers)).toBe(true)
+  expect(isViewerOf('session_x', viewers)).toBe(false)
+})
+
+test('mirror-no-loop T2 나를 보고 있는 세션으로 /scv-mirror 를 치면 보내지 않고 거절한다', async ($, on) => {
+  const env = engine(on, PLANNED())
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_host' })
+  await start($)
+  await $.session.receive(hello())
+  expect(env.sent).toHaveLength(1)
+
+  const got = await $.command.run({ command: 'scv-mirror', args: 'session_viewer' } as never)
+  expect(got.text).toContain('이 세션을 거울로 보고 있')
+  expect(got.text).toContain('/scv-mirror stop')
+  expect(env.sent).toHaveLength(1)
+  const drawn = await drawnText($)
+  expect(drawn).not.toContain('거울:')
+  expect(drawn).toContain('작업 세션 계획')
+})
+
+test('mirror-no-loop T3 나를 보지 않는 세션으로는 그대로 걸린다', async ($, on) => {
+  const env = engine(on, PLANNED())
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_host' })
+  await start($)
+  await $.session.receive(hello())
+  const got = await $.command.run({ command: 'scv-mirror', args: 'session_other' } as never)
+
+  expect(got.text).toContain('거울 요청을 보냈습니다')
+  expect(env.sent[1]?.to).toContain('session_other')
+  expect(env.sent[1]?.text).toBe('SCV-MIRROR HELLO session_host')
 })

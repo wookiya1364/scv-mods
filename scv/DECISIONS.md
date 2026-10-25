@@ -181,3 +181,19 @@ merge_policy: preserve
 - path delta: as planned (이번엔 시험을 먼저 써 실패를 확인한 뒤 구현). 하네스 engine 에 전송 실패 스위치(delivery)를 더했다.
 - refs: scv/archive/20261025-wookiya1364-scv-mirror-self-address/PLAN.md
 - conversation: scv/conversations/20261025-142147-scv-mirror-self-address.md
+
+## [2026-10-25 14:41] wookiya1364 — SCV 칸 — 서로 거울 거는 고리 막기
+
+- verdict: adopted
+- why: 작업 세션에서 자기를 보고 있는 세션으로 거울을 걸어 서로 베끼는 고리가 실제로 생겼고 두 칸이 멈췄다. 시청자 목록에 있는 주소로는 거울을 걸지 못하게 거절한다.
+- discarded alternatives: 고리를 자동으로 풀기 — 어느 쪽이 작업 세션인지 모드가 단정할 수 없음 / 긴 고리(A→B→C→A) 감지 — 지금 겪은 문제보다 큼
+- refs: scv/promote/20261025-wookiya1364-scv-mirror-no-loop/PLAN.md
+- conversation: scv/conversations/20261025-142147-scv-mirror-self-address.md
+
+## [2026-10-25 14:42] wookiya1364 — SCV 칸 — 서로 거울 거는 고리 막기 archived
+
+- verdict: archived
+- why: /scv-mirror 는 지금 이 세션을 거울로 보는 세션(시청자 목록, bridge: 접두 포함)으로는 걸리지 않고 한국어로 거절한다. 긴 고리와 동시에 거는 경우는 막지 못한다.
+- path delta: as planned (시험 먼저, 빈 함수로 실패 확인 후 구현)
+- refs: scv/archive/20261025-wookiya1364-scv-mirror-no-loop/PLAN.md
+- conversation: scv/conversations/20261025-142147-scv-mirror-self-address.md

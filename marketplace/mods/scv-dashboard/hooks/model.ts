@@ -756,6 +756,10 @@ export const isOwnAddress = (asked: string, own: { address: string; localId: str
   return bare === own.address || bare === own.localId
 }
 
+// Whether an address the person typed is a session mirroring this one (one of its viewers), `bridge:` or not.
+export const isViewerOf = (asked: string, viewers: Readonly<Record<string, unknown>>) =>
+  Object.hasOwn(viewers, asked.trim().replace(/^bridge:/, ''))
+
 // Where other sessions reach this one: its Remote Control id when Remote Control is on (other computers reach that),
 // else its own id (this computer only). `files` is the session files' text, one JSON object per line.
 export const mirrorAddress = (files: string, sessionId: string) => {

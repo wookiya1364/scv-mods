@@ -1,6 +1,6 @@
 # scv/archive/INDEX.yaml — auto-managed by /scv:work --archive and scripts/archive-index.sh (v0.11.0+).
 # Do not edit manually. Regenerated on every archive and on every obsolete marking.
-generated_at: 2026-10-25T05:26:45Z
+generated_at: 2026-10-25T05:42:29Z
 archives:
   - slug: 20261022-wookiya1364-scv-dashboard-pane-dreams
     title: "앱 오른쪽 SCV 대시보드 칸 — scv:dreams"
@@ -23,6 +23,10 @@ archives:
     status: done
   - slug: 20261025-wookiya1364-scv-dashboard-mirror-two-way
     title: "SCV 칸 — 거울 줄 줄이기와 거울 칸 동작 넘기기"
+    kind: feature
+    status: testing
+  - slug: 20261025-wookiya1364-scv-mirror-no-loop
+    title: "SCV 칸 — 서로 거울 거는 고리 막기"
     kind: feature
     status: testing
   - slug: 20261025-wookiya1364-scv-mirror-self-address
