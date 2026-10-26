@@ -767,10 +767,6 @@ export const isViewerOf = (asked: string, viewers: Readonly<Record<string, unkno
 
 // Where other sessions reach this one: its Remote Control id when Remote Control is on (other computers reach that),
 // else its own id (this computer only). `files` is the session files' text, one JSON object per line.
-// A Claude Desktop link that opens a new session with the mirror command already in its prompt box, so a viewer on
-// another device opens it and presses Enter. The app fills the box and sends nothing on its own.
-export const mirrorSessionLink = (address: string) => `claude://code/new?q=${encodeURIComponent(`/scv-mirror ${address}`)}`
-
 export const mirrorAddress = (files: string, sessionId: string) => {
   for (const line of files.split('\n')) {
     try {
