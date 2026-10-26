@@ -8,7 +8,9 @@ import {
   isMirrorDue,
   isOwnAddress,
   isViewerOf,
+  hostLabel,
   mirrorAddress,
+  sessionName,
   mirrorText,
   parseMirror,
   agentLines,
@@ -68,6 +70,10 @@ const MIRROR_MISSES = 3
 
 const snapshot = atom({ plugin: 'scv-dashboard', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '', root: '' } as Snapshot)
 const chosen = atom({ plugin: 'scv-dashboard', key: 'chosen' } as const, null as string | null)
+// The plan the working session has in view, for a viewer that has not picked one itself.
+const hostInView = atom({ plugin: 'scv-dashboard', key: 'host-in-view' } as const, null as string | null)
+
+const chosenSlug = async ($: Api) => (await read($, chosen)) ?? (await read($, hostInView))
 const expanded = atom({ plugin: 'scv-dashboard', key: 'expanded' } as const, { steps: false, tests: false, blocks: true, dreams: false } as Expanded)
 const runs = atom({ plugin: 'scv-dashboard', key: 'runs' } as const, [])
 const waiting = atom({ plugin: 'scv-dashboard', key: 'waiting' } as const, null as string | null)
@@ -152,7 +158,7 @@ const loadSignals = async ($: Api, cwd: string) => {
 
 // The plan on screen (or the one named) with Claude's step signals merged into its marks.
 const planInView = async ($: Api, slug?: string): Promise<Plan | undefined> => {
-  const plan = pickPlan(parsePlans((await read($, snapshot)).plans), slug ?? (await read($, chosen)))
+  const plan = pickPlan(parsePlans((await read($, snapshot)).plans), slug ?? (await chosenSlug($)))
 
   return plan && mergeMarks(plan, await read($, signals))
 }
@@ -309,14 +315,14 @@ const isOwnCall = (origin: { plugin: string }) => origin.plugin === 'scv-dashboa
 const openPane = ($: Api) => $.ui.open({ id: PANE, title: TITLE })
 
 // Where other sessions reach this one, read from the session files Claude Code keeps for each running session.
-const ownAddress = async ($: Api) => {
-  const id = await $.session.id()
-  const listed = await $.process
-    .run(['sh', '-c', 'for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/sessions/*.json; do cat "$f"; echo; done'])
-    .catch(() => undefined)
+const sessionFiles = async ($: Api) =>
+  (
+    await $.process
+      .run(['sh', '-c', 'for f in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/sessions/*.json; do cat "$f"; echo; done'])
+      .catch(() => undefined)
+  )?.stdout ?? ''
 
-  return mirrorAddress(listed?.stdout ?? '', id)
-}
+const ownAddress = async ($: Api) => mirrorAddress(await sessionFiles($), await $.session.id())
 
 // The working session's state a viewer session draws from; the viewer's own choices and clock stay its own.
 const mirrorState = async ($: Api) => ({
@@ -333,6 +339,8 @@ const mirrorState = async ($: Api) => ({
   agents: await read($, agents),
   since: await read($, since),
   limits: await read($, limits),
+  hostName: sessionName(await sessionFiles($), await $.session.id()),
+  inView: (await planInView($))?.slug ?? null,
 })
 
 type MirrorState = Awaited<ReturnType<typeof mirrorState>>
@@ -361,9 +369,11 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, agents, () => state.agents ?? [])
   await update($, since, () => state.since ?? null)
   await update($, limits, () => state.limits ?? [])
+  await update($, hostInView, () => (typeof state.inView === 'string' ? state.inView : null))
   const at = await $.clock.now()
-  if (mirrored.at === 0) $.ui.toast(`SCV: ${mirrored.host} 의 상태를 받았습니다`)
-  await update($, mirror, value => (value ? { ...value, at } : value))
+  const name = typeof state.hostName === 'string' ? state.hostName : (mirrored.name ?? null)
+  if (mirrored.at === 0) $.ui.toast(`SCV: ${hostLabel(mirrored.host, name)} 의 상태를 받았습니다`)
+  await update($, mirror, value => (value ? { ...value, at, name } : value))
 }
 
 // Sends the state to each viewer when it changed and the gap passed (isMirrorDue); a viewer that keeps failing is let go.
@@ -410,6 +420,8 @@ const askMirror = async ($: Api, host: string) => {
   const own = await ownAddress($)
   const previous = await read($, mirror)
   const at = await $.clock.now()
+  // A pick made for another session's plans would hide the plan this one is working in.
+  if (previous?.host !== host) await update($, chosen, () => null)
   await update($, mirror, value => ({ host, at: value?.host === host ? value.at : 0, askedAt: at }))
   const sent = await $.session.send({ to: { sessionId: host }, text: mirrorText({ kind: 'hello', address: own.address }) })
 
@@ -478,7 +490,7 @@ export const register: Register = on => {
         const count = plan ? countStages(deriveStages(plan).stages) : undefined
         const got = mirrored.at ? `${formatDuration(Math.max(0, (await $.clock.now()) - mirrored.at))} 전 받음` : '아직 받은 상태 없음'
 
-        return { text: `거울 중: ${mirrored.host} · ${got}${plan && count ? ` · ${plan.title} ${count.done}/${count.total}` : ''}` }
+        return { text: `거울 중: ${hostLabel(mirrored.host, mirrored.name)} · ${got}${plan && count ? ` · ${plan.title} ${count.done}/${count.total}` : ''}` }
       }
       const own = await ownAddress($)
 
@@ -487,6 +499,7 @@ export const register: Register = on => {
     if (asked === 'stop' || asked === 'off') {
       const mirrored = await read($, mirror)
       await update($, mirror, () => null)
+      await update($, hostInView, () => null)
       if (mirrored) {
         const own = await ownAddress($)
         await $.session.send({ to: { sessionId: mirrored.host }, text: mirrorText({ kind: 'bye', address: own.address }) }).catch(() => undefined)
@@ -731,7 +744,7 @@ export const register: Register = on => {
     const Svg = 'Svg' in elements ? elements.Svg : undefined
     const shot = await read($, snapshot)
     const plans = parsePlans(shot.plans)
-    const picked = pickPlan(plans, await read($, chosen))
+    const picked = pickPlan(plans, await chosenSlug($))
     const reported = await read($, signals)
     const plan = picked && mergeMarks(picked, reported)
     const open = await read($, expanded)
@@ -749,7 +762,7 @@ export const register: Register = on => {
     const mirrored = await read($, mirror)
     const mirrorLine = mirrored ? (
       <Text color="#4f8cff">
-        {`거울: ${mirrored.host} · ${mirrored.at ? `${formatDuration(Math.max(0, at - mirrored.at))} 전 받음` : '상태를 기다리는 중'}`}
+        {`거울: ${hostLabel(mirrored.host, mirrored.name)} · ${mirrored.at ? `${formatDuration(Math.max(0, at - mirrored.at))} 전 받음` : '상태를 기다리는 중'}`}
       </Text>
     ) : null
 

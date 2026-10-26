@@ -779,3 +779,20 @@ export const mirrorAddress = (files: string, sessionId: string) => {
 
   return { address: sessionId, isRemote: false }
 }
+
+// The name the app shows for this session (its sidebar title), from the same session files; null when it has none.
+export const sessionName = (files: string, sessionId: string) => {
+  for (const line of files.split('\n')) {
+    try {
+      const entry = JSON.parse(line) as { sessionId?: unknown; name?: unknown }
+      if (entry.sessionId === sessionId) return typeof entry.name === 'string' && entry.name ? entry.name : null
+    } catch {
+      // a file being written, or not one of the session files
+    }
+  }
+
+  return null
+}
+
+// How a viewer names the session it mirrors: its name and address together, or the address alone.
+export const hostLabel = (host: string, name?: string | null) => (name ? `${name} (${host})` : host)
