@@ -42,7 +42,9 @@ import {
   isMirrorDue,
   isOwnAddress,
   isViewerOf,
+  hostLabel,
   mirrorAddress,
+  sessionName,
   mirrorText,
   parseMirror,
 } from './model'
@@ -1634,6 +1636,48 @@ test('mirror-self-address T4 다른 세션으로 보내기에 실패해도 걸�
   const drawn = await drawnText($)
   expect(drawn).toContain('거울: session_host')
   expect(drawn).toContain('작업 세션 계획')
+})
+
+test('mirror-host-name T1 세션 기록에서 이름을 읽고, 이름과 주소를 함께 쓴다', () => {
+  const files = [JSON.stringify({ sessionId: 'me', bridgeSessionId: 'session_me', name: '맥프로_aitmcenter' }), JSON.stringify({ sessionId: 'other' })].join('\n')
+
+  expect(sessionName(files, 'me')).toBe('맥프로_aitmcenter')
+  expect(sessionName(files, 'other')).toBeNull()
+  expect(hostLabel('session_me', '맥프로_aitmcenter')).toBe('맥프로_aitmcenter (session_me)')
+  expect(hostLabel('session_me', null)).toBe('session_me')
+})
+
+test('mirror-host-name T2 거울 칸 맨 위에 작업 세션 이름과 주소가 함께 보인다', async ($, on) => {
+  await startViewer($, on)
+  const hostPlan = { slug: 'p', isArchived: false, ...PLANNED().p }
+  const state = { snapshot: { plans: [hostPlan], dreamsText: DREAMS, cwd: '/host', root: '/host' }, hostName: '맥프로_aitmcenter' }
+  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
+
+  expect(await drawnText($)).toContain('거울: 맥프로_aitmcenter (session_host)')
+})
+
+test('mirror-plan-in-view T1 거울 칸은 작업 세션이 보고 있는 계획을 따라 그린다', async ($, on) => {
+  await startViewer($, on)
+  const first = { slug: 'a', isArchived: false, ...plan({ title: '대본 통화', status: 'in_progress', steps: ['초안'] }) }
+  const second = { slug: 'b', isArchived: false, ...plan({ title: 'STT 연결', status: 'in_progress', steps: ['다리', '확인'] }) }
+  const state = { snapshot: { plans: [first, second], dreamsText: DREAMS, cwd: '/host', root: '/host' }, inView: 'b' }
+  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
+
+  const drawn = await drawnText($)
+  expect(drawn).toContain('다리')
+  expect(drawn).not.toContain('초안')
+})
+
+test('mirror-plan-in-view T2 작업 세션은 자기가 보고 있는 계획을 상태에 실어 보낸다', async ($, on) => {
+  const env = engine(on, { a: plan({ title: '대본 통화', status: 'in_progress', steps: ['초안'] }), b: plan({ title: 'STT 연결', status: 'in_progress', steps: ['다리'] }) })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.select({ key: 'plan', value: 'b' })
+  await ui.unmount()
+  await $.session.receive(hello())
+
+  const body = env.sent[env.sent.length - 1]?.text.replace(/^SCV-MIRROR STATE /, '') ?? '{}'
+  expect(JSON.parse(body).inView).toBe('b')
 })
 
 test('mirror-viewer-chat T1 거울 세션에서 친 글은 Claude에게 가지 않고 작업 세션 창에서 하라고 알린다', async ($, on) => {
