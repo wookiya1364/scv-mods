@@ -1619,6 +1619,25 @@ test('mirror-self-address T4 다른 세션으로 보내기에 실패해도 걸�
   expect(drawn).toContain('작업 세션 계획')
 })
 
+test('mirror-viewer-chat T1 거울 세션에서 친 글은 Claude에게 가지 않고 작업 세션 창에서 하라고 알린다', async ($, on) => {
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  await startViewer($, on)
+  const typedHere = await $.prompt.submit(typed('음성 다시 들려줘'))
+  const fromPhone = await $.prompt.submit({ ...typed('계속해'), origin: { kind: 'bridge' } } as never)
+
+  expect(typedHere).toEqual({ drop: expect.stringContaining('대화는 작업 세션 창에서') })
+  expect(typedHere.drop).toContain('session_host')
+  expect(fromPhone.drop).toContain('/scv-mirror stop')
+})
+
+test('mirror-viewer-chat T2 거울을 끄면 다시 대화가 된다', async ($, on) => {
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  await startViewer($, on)
+  await $.command.run({ command: 'scv-mirror', args: 'stop' } as never)
+
+  expect(await $.prompt.submit(typed('계속해'))).toEqual(expect.objectContaining({ text: '계속해' }))
+})
+
 test('mirror-self-address T5 /scv-dashboard 안내가 다른 기기의 세션에서 치라고 말한다', async ($, on) => {
   const env = engine(on, {})
   env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
