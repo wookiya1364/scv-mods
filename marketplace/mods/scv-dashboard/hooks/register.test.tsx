@@ -124,6 +124,7 @@ const engine = (
     const found = slug ? (where === 'archive' ? archived : files)[slug] : undefined
     if (found) return { value: file === 'PLAN' ? found.planText : found.testsText }
     if (e.path.endsWith('scv/dreams/latest.json') && dreams) return { value: dreams }
+    if (e.path.endsWith('scv/dreams/x.html') && dreams) return { value: '<h1>드림</h1>' }
     return { deny: `ENOENT ${e.path}` }
   })
   on('store.get', (_, e) => ({ value: store.get(e.key) }))
@@ -1544,14 +1545,30 @@ test('mirror-two-way T7 작업 세션은 시청자의 fill 만 받아, 자기 �
   expect(fills).toHaveLength(1)
 })
 
-test('mirror-two-way T8 거울 칸의 보고서 열기는 작업 세션에서 연다', async ($, on) => {
+test('mirror-two-way T8 거울 칸의 보고서 열기는 받은 보고서를 이 기기에서 열고, 작업 세션에 보내지 않는다', async ($, on) => {
   const env = await startViewer($, on)
+  const hostPlan = { slug: 'p', isArchived: false, ...PLANNED().p }
+  const state = { snapshot: { plans: [hostPlan], dreamsText: DREAMS, reportHtml: '<h1>드림</h1>', cwd: '/host', root: '/host' } }
+  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
+  const sentBefore = env.sent.length
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'dreams-report' })
 
-  expect(env.processes.some(argv => argv[0] === 'xdg-open' || argv[0] === 'open')).toBe(false)
-  expect(env.sent[env.sent.length - 1]?.text).toBe('SCV-MIRROR ACT session_viewer {"do":"open-report"}')
+  const opened = env.processes[env.processes.length - 1] ?? []
+  expect(opened[0]).toBe('sh')
+  expect(opened).toContain('<h1>드림</h1>')
+  expect(opened.join(' ')).toContain('xdg-open')
+  expect(env.sent).toHaveLength(sentBefore)
   await ui.unmount()
+})
+
+test('mirror-two-way T8c 작업 세션은 보고서 내용을 상태에 실어 보낸다', async ($, on) => {
+  const env = engine(on, PLANNED())
+  await start($)
+  await $.session.receive(hello())
+
+  const body = env.sent[env.sent.length - 1]?.text.replace(/^SCV-MIRROR STATE /, '') ?? '{}'
+  expect(JSON.parse(body).snapshot.reportHtml).toBe('<h1>드림</h1>')
 })
 
 test('mirror-two-way T8b 작업 세션은 시청자의 open-report 를 받아 자기 보고서를 연다', async ($, on) => {

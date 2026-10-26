@@ -133,7 +133,11 @@ const readSources = async ($: Api, cwd: string): Promise<Omit<Snapshot, 'root'>>
   const active = await readPlans($, `${scv}/promote`, false)
   const plans = active.length > 0 ? active : (await readPlans($, `${scv}/archive`, true)).sort((a, b) => b.slug.localeCompare(a.slug))
 
-  return { plans, dreamsText: await readText($, `${scv}/dreams/latest.json`), cwd }
+  const dreamsText = await readText($, `${scv}/dreams/latest.json`)
+  const report = parseDreams(dreamsText)?.reportPath
+  const reportHtml = report ? await readText($, report.startsWith('/') ? report : `${cwd ? `${cwd}/` : ''}${report}`) : null
+
+  return { plans, dreamsText, reportHtml, cwd }
 }
 
 // Test runs and step signals are kept in the mod's own store, per project folder, so a new session
@@ -226,8 +230,18 @@ const fillPrompt = async ($: Api, command: string) => {
 }
 
 // Opens this session's dreams report on this computer; the note says so when it could not.
+// A viewer opens the copy the working session sent, on its own device: the file itself lives on the other computer.
+const openMirroredReport = async ($: Api, html: string | null | undefined) => {
+  if (!html) return void update($, note, () => '작업 세션이 보고서를 아직 보내지 않았습니다')
+  const opened = await $.process
+    .run(['sh', '-c', 'f="$(mktemp -d)/scv-report.html" && printf %s "$1" > "$f" && { xdg-open "$f" || open "$f"; }', 'sh', html])
+    .catch(() => undefined)
+  await update($, note, () => (opened?.exitCode === 0 ? null : '보고서를 이 기기에서 열지 못했습니다'))
+}
+
 const openReport = async ($: Api) => {
   const shot = await read($, snapshot)
+  if (await read($, mirror)) return openMirroredReport($, shot.reportHtml)
   const path = parseDreams(shot.dreamsText)?.reportPath
   if (!path) return
   const full = path.startsWith('/') ? path : `${shot.cwd}/${path}`
@@ -759,7 +773,7 @@ export const register: Register = on => {
       await update($, note, () => (copied.isCopied ? `입력창에 못 넣어 복사함: ${command}` : `입력창에 못 넣음 — ${command}`))
     }
 
-    const openDreamsReport = () => (mirrored ? sendAct({ do: 'open-report' }, null) : openReport($))
+    const openDreamsReport = () => openReport($)
 
     const card = (children: RenderChildren, color = '#30363d') => (
       <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginBottom={1}>
