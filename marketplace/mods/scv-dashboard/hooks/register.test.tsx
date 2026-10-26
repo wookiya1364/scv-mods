@@ -1647,7 +1647,9 @@ test('mirror-self-address T5 /scv-dashboard 안내가 다른 기기의 세션에
   expect(got.text).toContain('다른 기기')
   expect(got.text).toContain('다른 세션')
   expect(got.text).toContain('/scv-mirror session_viewer')
-  expect(got.text).toContain('[거울 세션 열기](claude://code/new?q=%2Fscv-mirror%20session_viewer)')
+  expect(got.text).toContain("xdg-open 'claude://code/new?q=%2Fscv-mirror%20session_viewer'")
+  expect(got.text).toContain("open 'claude://code/new?q=%2Fscv-mirror%20session_viewer'")
+  expect(got.text).not.toContain('](claude://')
 })
 
 // ── mirror-no-loop: no mirror onto a session that is mirroring this one ──
