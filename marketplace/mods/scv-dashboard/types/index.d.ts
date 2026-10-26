@@ -56,7 +56,8 @@ export type Task = { id: string; subject: string; status: 'pending' | 'in_progre
 export type Dreams = { date: string; items: string[]; reportPath: string | null }
 
 // cwd: the project folder the pane reads (the nearest holding scv/); root: the session root it was found from.
-export type Snapshot = { plans: PlanFile[]; dreamsText: string | null; cwd: string; root: string }
+// reportHtml: the dreams report itself, so a viewer on another device can open its own copy.
+export type Snapshot = { plans: PlanFile[]; dreamsText: string | null; reportHtml?: string | null; cwd: string; root: string }
 
 export type Live = {
   isWorking: boolean
