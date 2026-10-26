@@ -9,7 +9,6 @@ import {
   isOwnAddress,
   isViewerOf,
   mirrorAddress,
-  mirrorSessionLink,
   mirrorText,
   parseMirror,
   agentLines,
@@ -452,8 +451,7 @@ export const register: Register = on => {
     const reach = own.isRemote ? '' : ' (Remote Control이 꺼져 있어 이 컴퓨터 안에서만 닿습니다)'
 
     return {
-      // The app does not follow a claude:// link clicked inside the chat, so the link goes to the device's own opener.
-      text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}. 이 세션을 다른 기기 앱에서 보려면, 그 기기 터미널에 붙여 넣고 열린 새 세션에서 Enter — 리눅스: xdg-open '${mirrorSessionLink(own.address)}' · 맥: open '${mirrorSessionLink(own.address)}' — 또는 그 기기에서 연 다른 세션에서: /scv-mirror ${own.address}${reach}`,
+      text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}. 이 세션을 다른 기기 앱에서 보려면, 그 기기에서 연 다른 세션에서: /scv-mirror ${own.address}${reach}`,
     }
   })
 
