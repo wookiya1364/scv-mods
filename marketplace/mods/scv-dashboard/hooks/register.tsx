@@ -422,6 +422,13 @@ export const register: Register = on => {
   })
 
   on('prompt.submit', async ($, e, next) => {
+    // A viewer session only draws the working session's pane; what the person types here would reach another Claude
+    // that knows nothing of the work, so it is stopped. Slash commands (/scv-mirror stop) still run.
+    const kind = (e as { origin?: { kind?: string } }).origin?.kind
+    const mirrored = await read($, mirror)
+    if (mirrored && !e.command && !e.isMeta && (kind === 'composer' || kind === 'bridge')) {
+      return { drop: `이 세션은 ${mirrored.host} 의 SCV 칸만 보여 주는 거울입니다 — 대화는 작업 세션 창에서 하세요. 이 세션을 다시 쓰려면 /scv-mirror stop` }
+    }
     const submitted = await next(e)
     // The person's own message (not one a plugin sent) starts a new 'while you were away'.
     const origin = (e as { origin?: { kind?: string } }).origin
