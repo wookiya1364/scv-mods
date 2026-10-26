@@ -987,7 +987,7 @@ export const register: Register = on => {
                 ) : focusedStage.role ? (
                   <Text>{`• ${focusedStage.role}`}</Text>
                 ) : (
-                  <Text dimColor>계획서 파이프라인 표에서 이 단계가 하는 일을 찾지 못했습니다.</Text>
+                  <Text>{`• ${focusedStage.name}`}</Text>
                 )}
                 <Text bold>이 단계에서 한 일</Text>
                 {work.length > 0 ? (
