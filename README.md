@@ -21,7 +21,38 @@ Claude Code mods for the SCV workflow.
 
   It opens when a session starts; if you close it, it reopens on your next message, or type `/scv-dashboard`. The terminal is not a target.
 
-  A Remote Control viewer (the desktop app on another computer, claude.ai, the phone) cannot draw the pane. To see it on another computer, open a session in that computer's own desktop app and type `/scv-mirror <address>`: that session's pane then shows the working session's state, sent between the two sessions and never read by either model. `/scv-dashboard` in the working session prints its address (its Remote Control id while Remote Control is on). `/scv-mirror` alone says what it mirrors; `/scv-mirror stop` ends it. Both computers need scv-dashboard 0.2.0 or later.
+  A Remote Control viewer (the desktop app on another computer, claude.ai, the phone) cannot draw the pane. To see it on another computer, mirror it — see [Mirror: the pane on another computer](#mirror-the-pane-on-another-computer).
+
+## Mirror: the pane on another computer
+
+1. In the working session on computer A, type `/scv-dashboard`. It prints the session's address (its Remote Control id while Remote Control is on).
+2. On computer B, open a session in that computer's own desktop app and type `/scv-mirror <address>`.
+3. B's SCV pane now shows A's state, sent between the two sessions and never read by either model.
+4. `/scv-mirror` alone says what it mirrors; `/scv-mirror stop` ends it.
+
+```mermaid
+%%{init: {'theme':'base', 'themeVariables': {'primaryColor':'#1e1e1e','primaryTextColor':'#fff','primaryBorderColor':'#9096a8','lineColor':'#e7e9f0','secondaryColor':'#2d2d2d','tertiaryColor':'#1e1e1e','background':'#171922','edgeLabelBackground':'#171922'}}}%%
+sequenceDiagram
+  actor You
+  participant A as Computer A (working session)
+  participant B as Computer B (its own desktop app)
+  You->>A: /scv-dashboard
+  A-->>You: address (the Remote Control id while Remote Control is on)
+  You->>B: /scv-mirror address
+  loop while mirroring
+    A->>B: session state, session to session (no model reads it)
+    B->>B: the SCV pane draws A's state
+  end
+  You->>B: /scv-mirror stop
+```
+
+![Mirror: computer B's SCV pane shows computer A's session](assets/mirror.gif)
+
+Pitfalls:
+
+- `/scv-mirror` typed in the working session itself fails: it is itself, so there is nowhere to send.
+- A Remote Control viewer (claude.ai, the phone, another computer's remote view) cannot draw the pane. Open a session in computer B's own desktop app.
+- Both computers need scv-dashboard 0.2.0 or later.
 
 ## Versions
 
