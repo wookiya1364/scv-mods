@@ -34,8 +34,8 @@ Claude Code mods for the SCV workflow.
 %%{init: {'theme':'base', 'themeVariables': {'primaryColor':'#1e1e1e','primaryTextColor':'#fff','primaryBorderColor':'#9096a8','lineColor':'#e7e9f0','secondaryColor':'#2d2d2d','tertiaryColor':'#1e1e1e','background':'#171922','edgeLabelBackground':'#171922'}}}%%
 sequenceDiagram
   actor You
-  participant A as Computer A: working session
-  participant B as Computer B: its own desktop app
+  participant A as Computer A (working session)
+  participant B as Computer B (its own desktop app)
   You->>A: /scv-dashboard
   A-->>You: address (the Remote Control id while Remote Control is on)
   You->>B: /scv-mirror address
