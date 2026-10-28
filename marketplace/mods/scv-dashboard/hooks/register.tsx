@@ -343,9 +343,11 @@ const mirrorState = async ($: Api) => ({
   inView: (await planInView($))?.slug ?? null,
 })
 
-type MirrorState = Awaited<ReturnType<typeof mirrorState>>
+// sentAt: the working session's clock when it sent; a version before it sends none.
+type MirrorState = Awaited<ReturnType<typeof mirrorState>> & { sentAt?: number }
 
 // Takes a state another session sent, while this session is mirroring; anything else is dropped.
+// A state sent before the newest one taken (one held up on the way) is dropped too, so it cannot draw an older plan.
 const takeMirror = async ($: Api, body: string) => {
   const mirrored = await read($, mirror)
   if (!mirrored) return
@@ -356,6 +358,8 @@ const takeMirror = async ($: Api, body: string) => {
     return
   }
   if (!Array.isArray(state?.snapshot?.plans)) return
+  const sentAt = typeof state.sentAt === 'number' ? state.sentAt : undefined
+  if (sentAt !== undefined && mirrored.hostAt !== undefined && sentAt < mirrored.hostAt) return
   await update($, snapshot, () => state.snapshot)
   await update($, runs, () => state.runs ?? [])
   await update($, waiting, () => state.waiting ?? null)
@@ -373,7 +377,7 @@ const takeMirror = async ($: Api, body: string) => {
   const at = await $.clock.now()
   const name = typeof state.hostName === 'string' ? state.hostName : (mirrored.name ?? null)
   if (mirrored.at === 0) $.ui.toast(`SCV: ${hostLabel(mirrored.host, name)} 의 상태를 받았습니다`)
-  await update($, mirror, value => (value ? { ...value, at, name } : value))
+  await update($, mirror, value => (value ? { ...value, at, name, ...(sentAt !== undefined ? { hostAt: sentAt } : {}) } : value))
 }
 
 // Sends the state to each viewer when it changed and the gap passed (isMirrorDue); a viewer that keeps failing is let go.
@@ -384,12 +388,15 @@ const pushMirror = async ($: Api) => {
   if (isPushing || Object.keys(await read($, viewers)).length === 0) return
   isPushing = true
   try {
-    const body = JSON.stringify(await mirrorState($))
+    const state = await mirrorState($)
+    const body = JSON.stringify(state)
     const at = await $.clock.now()
+    // The send time rides along but is not compared, so an unchanged state is still not sent again.
+    const wire = JSON.stringify({ ...state, sentAt: at })
     for (const [address, last] of Object.entries(await read($, viewers))) {
       if (!isMirrorDue(last, body, at, MIRROR_GAP_MS)) continue
       const sent = await $.session
-        .send({ to: { sessionId: address }, text: mirrorText({ kind: 'state', body }) })
+        .send({ to: { sessionId: address }, text: mirrorText({ kind: 'state', body: wire }) })
         .catch((error: unknown) => ({ isDelivered: false as const, reason: String(error) }))
       await update($, viewers, value => {
         const { [address]: current, ...rest } = value
@@ -416,13 +423,18 @@ const takeAct = async ($: Api, address: string, act: MirrorAct) => {
 }
 
 // Asks the working session to send its state here; `previous` is the mirror as it stood, for a failed ask to put back.
-const askMirror = async ($: Api, host: string) => {
+// A fresh ask (the person typed /scv-mirror) starts over: what was drawn before is not shown as the host's state.
+const askMirror = async ($: Api, host: string, isFresh = false) => {
   const own = await ownAddress($)
   const previous = await read($, mirror)
   const at = await $.clock.now()
-  // A pick made for another session's plans would hide the plan this one is working in.
-  if (previous?.host !== host) await update($, chosen, () => null)
-  await update($, mirror, value => ({ host, at: value?.host === host ? value.at : 0, askedAt: at }))
+  const isSame = !isFresh && previous?.host === host
+  // A pick made for another session's plans, or an earlier one, would hide the plan the host is working in.
+  if (!isSame) {
+    await update($, chosen, () => null)
+    await update($, hostInView, () => null)
+  }
+  await update($, mirror, value => (isSame && value ? { ...value, askedAt: at } : { host, at: 0, askedAt: at }))
   const sent = await $.session.send({ to: { sessionId: host }, text: mirrorText({ kind: 'hello', address: own.address }) })
 
   return { own, sent, previous }
@@ -521,7 +533,7 @@ export const register: Register = on => {
         text: `그 세션은 지금 이 세션을 거울로 보고 있습니다 — 서로 거울을 걸면 두 칸 모두 멈춥니다. 거울은 작업 세션이 아닌 다른 세션에서 겁니다. 이미 서로 걸려 있다면 한쪽에서 /scv-mirror stop`,
       }
     }
-    const { own, sent, previous } = await askMirror($, asked)
+    const { own, sent, previous } = await askMirror($, asked, true)
     await openPane($).catch(() => undefined)
     if (!sent.isDelivered) {
       await update($, mirror, () => previous)
@@ -793,6 +805,17 @@ export const register: Register = on => {
         {children}
       </Box>
     )
+
+    // Until the host's first state comes, what this session holds is its own folder or an older state: not shown.
+    if (mirrored && !mirrored.at) {
+      return (
+        <Box flexDirection="column">
+          {mirrorLine}
+          <Text bold>SCV 대시보드</Text>
+          <Text dimColor>작업 세션의 상태가 오면 여기에 그립니다.</Text>
+        </Box>
+      )
+    }
 
     if (!plan) {
       return (

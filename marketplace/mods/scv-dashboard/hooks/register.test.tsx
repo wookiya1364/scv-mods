@@ -1444,6 +1444,60 @@ const startViewer = async ($: Engine, on: On) => {
 
 const hello = (address = 'session_viewer') => ({ origin: { kind: 'peer' as const }, text: envelope(mirrorText({ kind: 'hello', address })) })
 
+// ── mirror-first-ask: a fresh mirror shows no older plan, and a state held up on the way does not draw over a newer one ──
+
+const stateOf = (title: string, sentAt?: number) =>
+  JSON.stringify({ snapshot: { plans: [{ slug: 'p', isArchived: false, ...plan({ title, status: 'in_progress', steps: ['a', 'b'] }) }], dreamsText: null, cwd: '/host', root: '/host' }, ...(sentAt === undefined ? {} : { sentAt }) })
+
+test('mirror-first-ask T1 새로 건 거울은 상태가 올 때까지 이 폴더의 계획도, 예전에 받은 계획도 그리지 않는다', async ($, on) => {
+  const env = engine(on, { own: plan({ title: '보기 기기 폴더의 예전 계획', status: 'in_progress', steps: ['a'] }) })
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  expect(await drawnText($)).toContain('보기 기기 폴더의 예전 계획')
+
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  let drawn = await drawnText($)
+  expect(drawn).toContain('상태를 기다리는 중')
+  expect(drawn).not.toContain('보기 기기 폴더의 예전 계획')
+
+  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: stateOf('어제 받은 계획', 1000) })) })
+  expect(await drawnText($)).toContain('어제 받은 계획')
+
+  // Asked again by hand (same host), what was drawn before waits for the host's answer.
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  drawn = await drawnText($)
+  expect(drawn).toContain('상태를 기다리는 중')
+  expect(drawn).not.toContain('어제 받은 계획')
+})
+
+test('mirror-first-ask T2 늦게 도착한 옛 상태는 새 상태를 덮지 않고, 보낸 시각이 없는 상태(옛 버전)는 받는다', async ($, on) => {
+  const env = engine(on, {})
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  const take = (body: string) => $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body })) })
+
+  await take(stateOf('지금 계획', 2000))
+  await take(stateOf('밀려 있던 옛 계획', 1000))
+  expect(await drawnText($)).toContain('지금 계획')
+  expect(await drawnText($)).not.toContain('밀려 있던 옛 계획')
+
+  await take(stateOf('옛 버전이 보낸 계획'))
+  expect(await drawnText($)).toContain('옛 버전이 보낸 계획')
+})
+
+test('mirror-first-ask T3 작업 세션은 보낸 시각을 붙이되, 그대로인 상태는 다시 보내지 않는다', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const env = engine(on, PLANNED(), DREAMS, undefined, {}, true)
+  await start($)
+  await $.session.receive(hello())
+  const pushed = parseMirror(env.sent[0]?.text ?? '')
+
+  expect(pushed?.kind === 'state' ? JSON.parse(pushed.body).sentAt : null).toBe(1_000_000)
+  await clock.advance(60_000)
+  expect(env.sent).toHaveLength(1)
+})
+
 test('mirror-two-way T1 ACT 메시지는 봉투 안에서도 읽히고, 모르는 형태는 버린다', () => {
   const fill = { kind: 'act' as const, address: 'session_v', act: { do: 'fill' as const, slug: 'a' } }
   const report = { kind: 'act' as const, address: 'session_v', act: { do: 'open-report' as const } }
