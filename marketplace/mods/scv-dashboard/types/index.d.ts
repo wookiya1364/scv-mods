@@ -69,7 +69,8 @@ export type Expanded = { steps: boolean; tests: boolean; blocks: boolean; dreams
 
 // A viewer session drawing another session's state: whose, when it last arrived (0: nothing yet) and when it was last asked for.
 // hostAt: the working session's own clock on the newest state taken, so a state that arrives late is dropped.
-export type Mirror = { host: string; at: number; askedAt: number; name?: string | null; hostAt?: number }
+// from: the address this session gave in its last ask; a newer one (Remote Control written down late) asks again.
+export type Mirror = { host: string; at: number; askedAt: number; name?: string | null; hostAt?: number; from?: string }
 
 // The viewer sessions a working session sends its state to, by address: what was sent last, when, and failed sends in a row.
 export type Viewers = Record<string, { sent: string; at: number; misses: number }>

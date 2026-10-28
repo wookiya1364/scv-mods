@@ -1571,6 +1571,42 @@ test('mirror-two-way T5 보기 세션은 소식이 없어도 10분 전에는 다
   expect(env.sent[1]?.text).toBe('SCV-MIRROR HELLO session_viewer')
 })
 
+test('mirror-late-address T1 원격 주소가 늦게 적히면, 상태를 기다리는 동안 새 주소로 저절로 다시 요청한다', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const env = engine(on, {}, DREAMS, undefined, {}, true)
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id' })
+  await start($)
+  const asked = await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+
+  expect(asked.text).toContain('아직 찾지 못해')
+  expect(env.sent).toHaveLength(1)
+  expect(env.sent[0]?.text).toBe('SCV-MIRROR HELLO local-id')
+
+  await clock.advance(3000)
+  expect(env.sent).toHaveLength(1)
+
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await clock.advance(3000)
+  expect(env.sent).toHaveLength(2)
+  expect(env.sent[1]?.text).toBe('SCV-MIRROR HELLO session_viewer')
+
+  await clock.advance(30_000)
+  expect(env.sent).toHaveLength(2)
+})
+
+test('mirror-late-address T2 상태를 받은 뒤에는 주소가 바뀌어도 10분 규칙만 따른다', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const env = engine(on, {}, DREAMS, undefined, {}, true)
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id' })
+  await start($)
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: stateOf('작업 세션 계획', 1) })) })
+
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await clock.advance(30_000)
+  expect(env.sent).toHaveLength(1)
+})
+
 test('mirror-two-way T6 거울 칸의 입력창에 넣기는 작업 세션으로 ACT 를 보낸다', async ($, on) => {
   const { fills } = promptEngine(on)
   const env = await startViewer($, on)

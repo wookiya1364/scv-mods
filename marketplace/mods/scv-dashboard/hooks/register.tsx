@@ -178,6 +178,9 @@ const refresh = async ($: Api) => {
   if (mirrored) {
     await update($, now, () => at)
     if (at - Math.max(mirrored.at, mirrored.askedAt) > MIRROR_ASK_MS) await askMirror($, mirrored.host)
+    // A session's Remote Control address is written down a little after it starts, so its first ask may carry the
+    // local one, which another computer cannot reach. While nothing has come, a newer address asks again.
+    else if (!mirrored.at && (await ownAddress($)).address !== mirrored.from) await askMirror($, mirrored.host)
 
     return
   }
@@ -434,7 +437,7 @@ const askMirror = async ($: Api, host: string, isFresh = false) => {
     await update($, chosen, () => null)
     await update($, hostInView, () => null)
   }
-  await update($, mirror, value => (isSame && value ? { ...value, askedAt: at } : { host, at: 0, askedAt: at }))
+  await update($, mirror, value => (isSame && value ? { ...value, askedAt: at, from: own.address } : { host, at: 0, askedAt: at, from: own.address }))
   const sent = await $.session.send({ to: { sessionId: host }, text: mirrorText({ kind: 'hello', address: own.address }) })
 
   return { own, sent, previous }
@@ -540,7 +543,9 @@ export const register: Register = on => {
 
       return { text: `거울 요청을 보내지 못했습니다: ${sent.reason}` }
     }
-    const reach = own.isRemote ? '' : ' 이 세션은 Remote Control이 꺼져 있어, 같은 컴퓨터의 작업 세션에서만 받을 수 있습니다.'
+    const reach = own.isRemote
+      ? ''
+      : ' 이 세션의 Remote Control 주소를 아직 찾지 못해, 지금은 같은 컴퓨터의 작업 세션만 답할 수 있습니다. 주소가 생기면 저절로 다시 요청합니다.'
 
     return { text: `거울 요청을 보냈습니다 → ${asked}. 상태가 오면 SCV 칸이 그 세션을 보여 줍니다.${reach}` }
   })
