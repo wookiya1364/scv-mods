@@ -340,6 +340,7 @@ test('progress T7 단계를 누르면 그 단계가 만드는 역할(파이프�
   engine(on, { a: plan({ title: 'p', status: 'in_progress', steps, pipeline }) })
   on('tool.call', () => ({ result: {} }))
   await start($)
+  await signal($, 2, 'doing')
   await $.tool.call({ tool: 'Edit', file_path: '/work/hooks/view.tsx', old_string: 'a', new_string: 'b' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
@@ -1932,6 +1933,7 @@ test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계�
   const env = engine(on, files, DREAMS, undefined, {}, true, { 'INDEX.md': INDEX_MD, 'compare.md': COMPARE_MD })
   on('tool.call', () => ({ result: {} }))
   await start($)
+  await signal($, 2, 'doing')
   await $.tool.call({ tool: 'Write', file_path: '/work/core/scripts/lib/step.sh', content: MADE_SH })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
@@ -1941,6 +1943,8 @@ test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계�
 
   files.a = STEP_PLAN(['[x] ', '[x] ', '[~] '])
   await clock.advance(3000)
+  await signal($, 2, 'done')
+  await signal($, 3, 'doing')
   await $.tool.call({ tool: 'Edit', file_path: '/work/core/hooks/on-turn.sh', old_string: 'x', new_string: 'line="$(scv_step_line "$(scv_step_active_plan "$p")" "$t")"\nscv_ver_lt "$a" "$b"' })
 
   expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음 — 훅과 절차 문서만 고침')
@@ -1949,5 +1953,28 @@ test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계�
   expect(await text(ui, /^가져다 씀: scv_ver_lt/)).toBe('가져다 씀: scv_ver_lt — 첫 버전이 둘째 버전보다 낮으면 참(숫자로 비교, 접미사는 무시)')
   // Kept per project, so a new session still shows what each step did.
   expect(env.store.get('functions:/work')).toBeDefined()
+  await ui.unmount()
+})
+
+test('step-functions T5 단계 시작을 알리기 전 작업과 끝을 알린 뒤 작업은 어느 단계에도 쌓이지 않고, 기록 없는 단계는 기록 없음', async ($, on) => {
+  const env = engine(on, { a: STEP_PLAN(['[x] ', '[~] ', '']) })
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  // The plan file says step 2 is in progress (left from another day); this session has not said it started it.
+  await $.tool.call({ tool: 'Write', file_path: '/work/core/x.sh', content: MADE_SH })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /^기록 없음/)).toBe('기록 없음 — Claude가 이 세션에서 단계 시작을 알린 뒤의 작업만 셉니다')
+  expect(await drawnText($)).not.toContain('도구 호출')
+
+  await signal($, 2, 'doing')
+  await $.tool.call({ tool: 'Edit', file_path: '/work/core/y.sh', old_string: 'a', new_string: 'b' })
+  await signal($, 2, 'done')
+  await $.tool.call({ tool: 'Edit', file_path: '/work/core/z.sh', old_string: 'a', new_string: 'b' })
+  await ui.press({ key: 'step-2' })
+
+  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0 · 가져다 씀 0')
+  expect(await drawnText($)).toContain('▸ 도구 호출 1건')
+  expect(env.store.get('functions:/work')).toBeUndefined()
   await ui.unmount()
 })

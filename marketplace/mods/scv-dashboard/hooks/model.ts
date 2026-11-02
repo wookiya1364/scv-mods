@@ -517,6 +517,15 @@ export const checkSignal = (input: SignalInput, plans: readonly Plan[], signals:
 }
 
 // The newest signal for a step replaces the one before it; a step still open keeps the time it started.
+// The step this session's work goes to: the one Claude last said it started here, until it says that step is done or
+// blocked. A plan file's own "in progress" mark is not enough — it can be left from another day.
+export const nextWorkingOn = (current: { plan: string; step: number } | null, signal: { plan: string; step: number; state: string }) =>
+  signal.state === 'doing'
+    ? { plan: signal.plan, step: signal.step }
+    : current?.plan === signal.plan && current.step === signal.step
+      ? null
+      : current
+
 export const applySignal = (signals: readonly StepSignal[], input: SignalInput, at: number): StepSignal[] => {
   const before = signals.find(signal => signal.plan === input.plan && signal.step === input.step)
   const startedAt = before && before.state !== 'done' ? (before.startedAt ?? before.at) : undefined

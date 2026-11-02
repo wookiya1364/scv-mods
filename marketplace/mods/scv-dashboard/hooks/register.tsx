@@ -58,6 +58,7 @@ import {
   usedLineText,
   usedNames,
   writtenCode,
+  nextWorkingOn,
   statusWords,
   suggestNext,
   summarizeAway,
@@ -97,6 +98,8 @@ const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as
 const stepFunctions = atom({ plugin: 'scv-dashboard', key: 'stepFunctions' } as const, {} as Record<string, StepFunctions>)
 // Whether a step's tool calls show under its functions (folded by default).
 const showCalls = atom({ plugin: 'scv-dashboard', key: 'showCalls' } as const, false)
+// The step this session said it started (scv_step doing) and has not yet said is done or blocked; its work goes there.
+const workingOn = atom({ plugin: 'scv-dashboard', key: 'workingOn' } as const, null as { plan: string; step: number } | null)
 const signals = atom({ plugin: 'scv-dashboard', key: 'signals' } as const, [] as StepSignal[])
 const permit = atom({ plugin: 'scv-dashboard', key: 'permit' } as const, null as Permit | null)
 const stopped = atom({ plugin: 'scv-dashboard', key: 'stopped' } as const, null as Stopped | null)
@@ -291,18 +294,18 @@ const openReport = async ($: Api) => {
 
 // What a step's writing made and called, kept with the step: functions under a marker are made; known functions (the
 // dictionary's, and those the plan's other steps made) it names are used.
-const noteFunctions = async ($: Api, plan: Plan, step: number, code: string) => {
+const noteFunctions = async ($: Api, slug: string, step: number, code: string) => {
   const made = extractMarked(code)
   if (made.length === 0 && !code.trim()) return
   const shot = await read($, snapshot)
   const log = await read($, stepFunctions)
   const earlier = Object.entries(log)
-    .filter(([key]) => key.startsWith(`${plan.slug}#`) && key !== `${plan.slug}#${step}`)
+    .filter(([key]) => key.startsWith(`${slug}#`) && key !== `${slug}#${step}`)
     .flatMap(([, found]) => found.made.map(one => one.name))
   const known = [...Object.keys(shot.catalog ?? {}), ...earlier]
   const used = usedNames(code, known, made.map(one => one.name))
   if (made.length === 0 && used.length === 0) return
-  const next = recordFunctions(log, `${plan.slug}#${step}`, { made, used })
+  const next = recordFunctions(log, `${slug}#${step}`, { made, used })
   await update($, stepFunctions, () => next)
   await $.store.set(functionsKey(shot.cwd), next).catch(() => undefined)
 }
@@ -742,6 +745,7 @@ export const register: Register = on => {
     const kept = applySignal(before, asked, await $.clock.now())
     await $.store.set(signalsKey(shot.cwd), kept).catch(() => undefined)
     await update($, signals, () => kept)
+    await update($, workingOn, current => nextWorkingOn(current, asked))
     const plan = plans.find(one => one.slug === asked.plan)
     const count = plan ? countStages(deriveStages(mergeMarks(plan, kept)).stages) : undefined
 
@@ -762,13 +766,13 @@ export const register: Register = on => {
     } else {
       await update($, agents, list => applyAgentEvent(list, { kind: 'tool', id: e.agentId ?? '', tool: e.tool, target: describeTool(e.tool, input), at }))
     }
-    const plan = await planInView($)
-    const current = plan ? deriveStages(plan).stages.findIndex(stage => stage.state === 'doing') : -1
-    if (plan && current >= 0) {
+    // Only work after this session said it started a step is that step's; a plan's leftover mark takes nothing.
+    const working = await read($, workingOn)
+    if (working) {
       const entry = { tool: e.tool, target: describeTool(e.tool, input), at }
-      await update($, stepLog, log => logWork(log, `${plan.slug}#${current}`, entry))
+      await update($, stepLog, log => logWork(log, `${working.plan}#${working.step - 1}`, entry))
       const code = writtenCode(e.tool, input)
-      if (code !== null) await noteFunctions($, plan, current, code)
+      if (code !== null) await noteFunctions($, working.plan, working.step - 1, code)
     }
     if (e.tool === 'AskUserQuestion') {
       const question = describeTool(e.tool, input) || '질문'
@@ -1107,7 +1111,11 @@ export const register: Register = on => {
                 <Text bold>하는 일</Text>
                 {builds.length > 0 ? builds.map((line, i) => <Text>{functionLineText(line, i)}</Text>) : <Text>{noFunctionText(focusedStage)}</Text>}
                 <Text bold>이 단계에서 한 일</Text>
-                <Text>{functionsSummary(did)}</Text>
+                {did || work.length > 0 ? (
+                  <Text>{functionsSummary(did)}</Text>
+                ) : (
+                  <Text dimColor>기록 없음 — Claude가 이 세션에서 단계 시작을 알린 뒤의 작업만 셉니다</Text>
+                )}
                 {(did?.made ?? []).map(one => <Text dimColor>{`새로 만듦: ${madeLineText(one)}`}</Text>)}
                 {(did?.used ?? []).map(name => <Text dimColor>{`가져다 씀: ${usedLineText(name, catalog, earlier)}`}</Text>)}
                 {work.length > 0 ? (
