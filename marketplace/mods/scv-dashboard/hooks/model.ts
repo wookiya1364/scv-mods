@@ -4,7 +4,9 @@
 import type {
   AgentState,
   Block,
+  Catalog,
   Dreams,
+  MadeFunction,
   Permit,
   PipelineStep,
   PlanFile,
@@ -12,6 +14,7 @@ import type {
   Since,
   Stage,
   StageState,
+  StepFunctions,
   StepMark,
   StepSignal,
   Stopped,
@@ -224,6 +227,163 @@ export const describeRole = (step: PipelineStep) => {
 
   return output ? `받음: ${input} · 내놓음: ${output}` : step.io || step.name
 }
+
+// ── step functions: what a step builds and did, said with the project's pure-function dictionary ──
+// The rules are SCV core's (contracts/purity.md, scripts/lib/pure-catalog.sh), so the pane and the dictionary agree.
+
+// The dictionary files (scv/core/catalog/pure/<kind>.md) as one table: each "### name" with its "- 역할:" line, and the
+// kind from the file's title "# <kind> — …". The contents file (INDEX.md) has no entries and adds nothing.
+export const parseCatalog = (texts: readonly string[]): Catalog => {
+  const catalog: Catalog = {}
+  for (const text of texts) {
+    const kind = text.match(/^#\s+(.+?)\s+—/m)?.[1]?.trim() ?? ''
+    let name = ''
+    for (const line of text.split('\n')) {
+      const head = line.match(/^###\s+(\S+)/)?.[1]
+      if (head) {
+        name = head
+        catalog[name] = { role: '', kind }
+        continue
+      }
+      const role = line.match(/^-\s*역할:\s*(.+)$/)?.[1]?.trim()
+      const entry = catalog[name]
+      if (role && entry) catalog[name] = { ...entry, role }
+    }
+  }
+
+  return catalog
+}
+
+// A comment line's text without its lead (# // /// /* * */ -- ; % '), as the dictionary reads any language; else null.
+const commentBody = (line: string) => {
+  const lead = line.match(/^\s*(\/\/\/?|\/\*+|\*\/|\*|#+|--|;+|%+|')/)
+
+  return lead ? line.slice(lead[0].length).trim() : null
+}
+
+const commentField = (body: string, key: string) => (body.startsWith(`${key}:`) ? body.slice(key.length + 1).trim() : '')
+
+// The functions a piece of writing defines under an @pure / @deterministic marker, with the role and kind its comment
+// gives. The name is the marker's own ("@pure add"), or for shell the "name() {" line under the comment.
+export const extractMarked = (text: string): MadeFunction[] => {
+  const made: MadeFunction[] = []
+  let tier: MadeFunction['tier'] | '' = ''
+  let name = ''
+  let role = ''
+  let kind = ''
+  const reset = () => {
+    tier = ''
+    name = ''
+    role = ''
+    kind = ''
+  }
+  const emit = (found: string) => {
+    if (tier) made.push({ name: found, tier, role, kind })
+  }
+  for (const line of text.split('\n')) {
+    const body = commentBody(line)
+    if (body !== null) {
+      const marker = body.match(/^@(pure|deterministic)(?:\s+([A-Za-z_][A-Za-z0-9_.:$-]*))?$/)
+      if (marker) {
+        if (tier && name) emit(name)
+        reset()
+        tier = marker[1] === 'pure' ? 'pure' : 'deterministic'
+        name = marker[2] ?? ''
+        continue
+      }
+      role = commentField(body, '역할') || role
+      kind = commentField(body, '종류') || kind
+      continue
+    }
+    if (!line.trim()) {
+      if (!tier) reset()
+      continue
+    }
+    if (tier && name) {
+      emit(name)
+      reset()
+      continue
+    }
+    const shell = tier ? line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\(\)\s*\{/)?.[1] : undefined
+    if (shell) emit(shell)
+    reset()
+  }
+  if (tier && name) emit(name)
+
+  return made
+}
+
+const wordPattern = (name: string) => new RegExp(`(^|[^A-Za-z0-9_])${name.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}($|[^A-Za-z0-9_])`)
+
+// The known functions a piece of writing calls: each known name standing as a whole word, other than those it defines.
+export const usedNames = (text: string, known: readonly string[], defined: readonly string[]) =>
+  [...new Set(known)].filter(name => name && !defined.includes(name) && wordPattern(name).test(text))
+
+// A step's functions with one more piece of writing taken in: a function written again keeps its newest comment,
+// and one this step made is not also counted as used.
+export const recordFunctions = (log: Readonly<Record<string, StepFunctions>>, key: string, found: StepFunctions): Record<string, StepFunctions> => {
+  const was = log[key] ?? { made: [], used: [] }
+  const made = [...was.made.filter(old => !found.made.some(one => one.name === old.name)), ...found.made]
+  const used = [...new Set([...was.used, ...found.used])].filter(name => !made.some(one => one.name === name))
+
+  return { ...log, [key]: { made, used } }
+}
+
+export type FunctionLine = { name: string; kind: string; role: string }
+
+// What a step builds, one line per function its line names (else the plan's table rows it matches): the dictionary's
+// role first, then the comment of one made in this session but not yet in the dictionary, then the plan's 하는 일.
+export const stageFunctions = (stage: Stage, pipeline: readonly PipelineStep[], catalog: Catalog, made: readonly MadeFunction[]): FunctionLine[] => {
+  const names = stage.refs.length > 0 ? stage.refs : stageRole(stage, pipeline).map(step => step.name)
+
+  return names.map(name => {
+    const entry = catalog[name]
+    const own = made.find(one => one.name === name)
+    const row = pipeline.find(step => step.name === name)
+
+    return { name, kind: entry?.kind || own?.kind || '', role: entry?.role || own?.role || (row ? describeRole(row) : '') }
+  })
+}
+
+export const functionLineText = (line: FunctionLine, i: number) => `${i + 1}. ${line.name}${line.kind ? ` (${line.kind})` : ''}${line.role ? ` ${line.role}` : ''}`
+
+// A step whose line names no function, said in the line's own words.
+export const noFunctionText = (stage: Stage) => `순수함수 없음 — ${stage.role ?? stage.name}`
+
+// The step's work in one line: how many it made (by kind, as they go into the dictionary) and how many known ones it called.
+export const functionsSummary = (found: StepFunctions | undefined) => {
+  const made = found?.made ?? []
+  const kinds = new Map<string, number>()
+  for (const one of made) if (one.kind) kinds.set(one.kind, (kinds.get(one.kind) ?? 0) + 1)
+  const listed = [...kinds].map(([kind, count]) => `${kind} ${count}`).join(' · ')
+
+  return `새로 만듦 ${made.length}${listed ? ` · 사전 등록: ${listed}` : ''} · 가져다 씀 ${found?.used.length ?? 0}`
+}
+
+// One called function: its role (the dictionary's, else the comment it was made with) and, when an earlier step of
+// the plan made it, which step.
+export const usedLineText = (name: string, catalog: Catalog, earlier: readonly { step: number; made: readonly MadeFunction[] }[]) => {
+  const from = earlier.find(one => one.made.some(fn => fn.name === name))
+  const role = catalog[name]?.role || from?.made.find(fn => fn.name === name)?.role || ''
+
+  return `${name}${role ? ` — ${role}` : ''}${from ? ` (${from.step}단계에서 만든 것)` : ''}`
+}
+
+// The code a tool call writes: Write's content, Edit's new_string, MultiEdit's new_strings. Files under the project's
+// scv folder (plans, the dictionary, records) only name functions, they do not call them, so they are left out.
+export const writtenCode = (tool: string, input: Record<string, unknown>): string | null => {
+  const path = typeof input.file_path === 'string' ? input.file_path : ''
+  if (!path || /(^|\/)scv\//.test(path)) return null
+  if (tool === 'Write' && typeof input.content === 'string') return input.content
+  if (tool === 'Edit' && typeof input.new_string === 'string') return input.new_string
+  if (tool === 'MultiEdit' && Array.isArray(input.edits)) {
+    return (input.edits as { new_string?: unknown }[]).map(edit => (typeof edit.new_string === 'string' ? edit.new_string : '')).join('\n')
+  }
+
+  return null
+}
+
+export const madeLineText = (one: MadeFunction) => `${one.name}${one.kind ? ` (${one.kind})` : ''}${one.role ? ` ${one.role}` : ''}`
 
 export const logWork = (log: Readonly<Record<string, WorkEntry[]>>, key: string, entry: WorkEntry): Record<string, WorkEntry[]> => {
   const last = log[key]?.[log[key].length - 1]

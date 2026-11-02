@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, Expanded, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
+import type { AgentState, Expanded, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
 import type { MirrorAct } from './model'
 import {
   STEP_TOOL,
@@ -25,7 +25,6 @@ import {
   checkSignal,
   classifyTurnEnd,
   countStages,
-  describeRole,
   nodeIconSvg,
   deriveStages,
   describeTool,
@@ -48,7 +47,17 @@ import {
   planPromptFill,
   recordStepTimes,
   runFor,
-  stageRole,
+  extractMarked,
+  functionLineText,
+  functionsSummary,
+  madeLineText,
+  noFunctionText,
+  parseCatalog,
+  recordFunctions,
+  stageFunctions,
+  usedLineText,
+  usedNames,
+  writtenCode,
   statusWords,
   suggestNext,
   summarizeAway,
@@ -84,6 +93,10 @@ const now = atom({ plugin: 'scv-dashboard', key: 'now' } as const, 0)
 const note = atom({ plugin: 'scv-dashboard', key: 'note' } as const, null as string | null)
 const focusStep = atom({ plugin: 'scv-dashboard', key: 'focusStep' } as const, null as number | null)
 const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
+// The functions each step made and called, by `<plan>#<step index>`; kept per project like the step signals.
+const stepFunctions = atom({ plugin: 'scv-dashboard', key: 'stepFunctions' } as const, {} as Record<string, StepFunctions>)
+// Whether a step's tool calls show under its functions (folded by default).
+const showCalls = atom({ plugin: 'scv-dashboard', key: 'showCalls' } as const, false)
 const signals = atom({ plugin: 'scv-dashboard', key: 'signals' } as const, [] as StepSignal[])
 const permit = atom({ plugin: 'scv-dashboard', key: 'permit' } as const, null as Permit | null)
 const stopped = atom({ plugin: 'scv-dashboard', key: 'stopped' } as const, null as Stopped | null)
@@ -143,17 +156,32 @@ const readSources = async ($: Api, cwd: string): Promise<Omit<Snapshot, 'root'>>
   const report = parseDreams(dreamsText)?.reportPath
   const reportHtml = report ? await readText($, report.startsWith('/') ? report : `${cwd ? `${cwd}/` : ''}${report}`) : null
 
-  return { plans, dreamsText, reportHtml, cwd }
+  return { plans, dreamsText, reportHtml, cwd, catalog: await readCatalog($, `${scv}/core/catalog/pure`) }
+}
+
+// The project's pure-function dictionary, every kind file in it; none yet (no build) is an empty one.
+const readCatalog = async ($: Api, dir: string) => {
+  const entries = await $.fs.list(dir).catch(() => [])
+  const texts: string[] = []
+  for (const entry of entries.filter(one => one.kind === 'file' && one.name.endsWith('.md'))) {
+    const text = await readText($, `${dir}/${entry.name}`)
+    if (text) texts.push(text)
+  }
+
+  return parseCatalog(texts)
 }
 
 // Test runs and step signals are kept in the mod's own store, per project folder, so a new session
 // (or another session on this computer) still shows them.
 const runsKey = (cwd: string) => `runs:${cwd}`
 const signalsKey = (cwd: string) => `signals:${cwd}`
+const functionsKey = (cwd: string) => `functions:${cwd}`
 
 const loadSignals = async ($: Api, cwd: string) => {
   const kept = await $.store.get(signalsKey(cwd)).catch(() => undefined)
   if (Array.isArray(kept)) await update($, signals, () => kept as StepSignal[])
+  const functions = await $.store.get(functionsKey(cwd)).catch(() => undefined)
+  if (functions && typeof functions === 'object' && !Array.isArray(functions)) await update($, stepFunctions, () => functions as Record<string, StepFunctions>)
 }
 
 // The plan on screen (or the one named) with Claude's step signals merged into its marks.
@@ -261,6 +289,24 @@ const openReport = async ($: Api) => {
   await update($, note, () => `보고서를 열지 못했습니다: ${full}`)
 }
 
+// What a step's writing made and called, kept with the step: functions under a marker are made; known functions (the
+// dictionary's, and those the plan's other steps made) it names are used.
+const noteFunctions = async ($: Api, plan: Plan, step: number, code: string) => {
+  const made = extractMarked(code)
+  if (made.length === 0 && !code.trim()) return
+  const shot = await read($, snapshot)
+  const log = await read($, stepFunctions)
+  const earlier = Object.entries(log)
+    .filter(([key]) => key.startsWith(`${plan.slug}#`) && key !== `${plan.slug}#${step}`)
+    .flatMap(([, found]) => found.made.map(one => one.name))
+  const known = [...Object.keys(shot.catalog ?? {}), ...earlier]
+  const used = usedNames(code, known, made.map(one => one.name))
+  if (made.length === 0 && used.length === 0) return
+  const next = recordFunctions(log, `${plan.slug}#${step}`, { made, used })
+  await update($, stepFunctions, () => next)
+  await $.store.set(functionsKey(shot.cwd), next).catch(() => undefined)
+}
+
 const STATE_WORD = { doing: '시작', done: '끝', blocked: '막힘' } as const
 
 // The mod's own tool is not among the tool names the types know, so its hooks match it by pattern.
@@ -336,6 +382,7 @@ const mirrorState = async ($: Api) => ({
   tasks: await read($, tasks),
   history: await read($, history),
   stepLog: await read($, stepLog),
+  stepFunctions: await read($, stepFunctions),
   signals: await read($, signals),
   permit: await read($, permit),
   stopped: await read($, stopped),
@@ -370,6 +417,7 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, tasks, () => state.tasks ?? [])
   await update($, history, () => state.history ?? [])
   await update($, stepLog, () => state.stepLog ?? {})
+  await update($, stepFunctions, () => state.stepFunctions ?? {})
   await update($, signals, () => state.signals ?? [])
   await update($, permit, () => state.permit ?? null)
   await update($, stopped, () => state.stopped ?? null)
@@ -719,6 +767,8 @@ export const register: Register = on => {
     if (plan && current >= 0) {
       const entry = { tool: e.tool, target: describeTool(e.tool, input), at }
       await update($, stepLog, log => logWork(log, `${plan.slug}#${current}`, entry))
+      const code = writtenCode(e.tool, input)
+      if (code !== null) await noteFunctions($, plan, current, code)
     }
     if (e.tool === 'AskUserQuestion') {
       const question = describeTool(e.tool, input) || '질문'
@@ -844,6 +894,17 @@ export const register: Register = on => {
     const focused = (await read($, focusStep)) ?? (here >= 0 ? here : null)
     const focusedStage = focused === null ? undefined : stages[focused]
     const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
+    const catalog = shot.catalog ?? {}
+    const functionLog = await read($, stepFunctions)
+    const did = focused === null ? undefined : functionLog[`${plan.slug}#${focused}`]
+    // The plan's other steps that made functions, so a call to one says which step made it.
+    const earlier = stages.flatMap((_, i) => {
+      const found = i === focused ? undefined : functionLog[`${plan.slug}#${i}`]
+
+      return found && found.made.length > 0 ? [{ step: i + 1, made: found.made }] : []
+    })
+    const builds = focusedStage ? stageFunctions(focusedStage, plan.pipeline, catalog, earlier.flatMap(one => one.made).concat(did?.made ?? [])) : []
+    const callsOpen = await read($, showCalls)
     const count = countStages(stages)
     // Step times from Claude's signals survive a new session; the times seen in this session are the fallback.
     const durations = stepDurationsFromSignals(reported, plan.slug)
@@ -1044,19 +1105,17 @@ export const register: Register = on => {
               <Box flexDirection="column" borderStyle="round" borderColor={STATE_COLOR[focusedStage.state]} paddingX={1} marginTop={1}>
                 <Text bold color={STATE_COLOR[focusedStage.state]}>{`${focused + 1}. ${focusedStage.name} — ${STATE_LABEL[focusedStage.state]}`}</Text>
                 <Text bold>하는 일</Text>
-                {stageRole(focusedStage, plan.pipeline).length > 0 ? (
-                  stageRole(focusedStage, plan.pipeline).map(role => <Text>{`• ${describeRole(role)}`}</Text>)
-                ) : focusedStage.role ? (
-                  <Text>{`• ${focusedStage.role}`}</Text>
-                ) : (
-                  <Text>{`• ${focusedStage.name}`}</Text>
-                )}
+                {builds.length > 0 ? builds.map((line, i) => <Text>{functionLineText(line, i)}</Text>) : <Text>{noFunctionText(focusedStage)}</Text>}
                 <Text bold>이 단계에서 한 일</Text>
+                <Text>{functionsSummary(did)}</Text>
+                {(did?.made ?? []).map(one => <Text dimColor>{`새로 만듦: ${madeLineText(one)}`}</Text>)}
+                {(did?.used ?? []).map(name => <Text dimColor>{`가져다 씀: ${usedLineText(name, catalog, earlier)}`}</Text>)}
                 {work.length > 0 ? (
-                  work.map(entry => <Text dimColor>{`${entry.tool}${entry.target ? `: ${entry.target}` : ''}`}</Text>)
-                ) : (
-                  <Text dimColor>이 세션에서 기록된 일 없음</Text>
-                )}
+                  <Button key="calls-toggle" plain onPress={() => void update($, showCalls, value => !value)}>
+                    {`${callsOpen ? '▾' : '▸'} 도구 호출 ${work.length}건`}
+                  </Button>
+                ) : null}
+                {callsOpen ? work.map(entry => <Text dimColor>{`${entry.tool}${entry.target ? `: ${entry.target}` : ''}`}</Text>) : null}
               </Box>
             ) : null}
           </>,

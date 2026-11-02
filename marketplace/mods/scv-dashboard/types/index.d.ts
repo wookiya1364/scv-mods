@@ -24,6 +24,15 @@ export type StepSignal = { plan: string; step: number; state: 'doing' | 'done' |
 
 export type WorkEntry = { tool: string; target: string; at: number }
 
+// The project's pure-function dictionary (scv/core/catalog/pure/*.md), by function name: its role and kind.
+export type Catalog = Record<string, { role: string; kind: string }>
+
+// A function a step wrote under an @pure / @deterministic marker, with what its comment says.
+export type MadeFunction = { name: string; tier: 'pure' | 'deterministic'; role: string; kind: string }
+
+// What a step did in functions: the ones it wrote under a marker, and the known ones its writing calls.
+export type StepFunctions = { made: MadeFunction[]; used: string[] }
+
 export type TestRun = {
   command: string
   isOk: boolean
@@ -57,7 +66,8 @@ export type Dreams = { date: string; items: string[]; reportPath: string | null 
 
 // cwd: the project folder the pane reads (the nearest holding scv/); root: the session root it was found from.
 // reportHtml: the dreams report itself, so a viewer on another device can open its own copy.
-export type Snapshot = { plans: PlanFile[]; dreamsText: string | null; reportHtml?: string | null; cwd: string; root: string }
+// catalog: the project's pure-function dictionary, read with the plans.
+export type Snapshot = { plans: PlanFile[]; dreamsText: string | null; reportHtml?: string | null; cwd: string; root: string; catalog?: Catalog }
 
 export type Live = {
   isWorking: boolean
@@ -91,6 +101,8 @@ declare module 'claude-code' {
       note: string | null
       focusStep: number | null
       stepLog: Record<string, WorkEntry[]>
+      stepFunctions: Record<string, StepFunctions>
+      showCalls: boolean
       signals: StepSignal[]
       permit: Permit | null
       stopped: Stopped | null

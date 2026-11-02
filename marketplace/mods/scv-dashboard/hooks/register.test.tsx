@@ -47,6 +47,11 @@ import {
   sessionName,
   mirrorText,
   parseMirror,
+  extractMarked,
+  parseCatalog,
+  usedNames,
+  writtenCode,
+  functionsSummary,
 } from './model'
 
 const PANE = {
@@ -88,6 +93,8 @@ const engine = (
   archived: Files = {},
   // true: the test answers $.clock itself (mock.clock), so the refresh timer can be advanced
   isClockMocked = false,
+  // the project's pure-function dictionary: file name → its text, under scv/core/catalog/pure
+  catalog: Record<string, string> = {},
 ) => {
   const opened: string[] = []
   const panes: { id: string }[] = []
@@ -119,12 +126,16 @@ const engine = (
         ? [dir('scv'), dir('marketplace')]
         : /scv\/(promote|archive)$/.test(e.path)
           ? Object.keys(e.path.endsWith('scv/archive') ? archived : files).map(dir)
-          : [],
+          : e.path.endsWith('scv/core/catalog/pure')
+            ? Object.keys(catalog).map(name => ({ ...dir(name), kind: 'file' as const }))
+            : [],
   }))
   on('fs.read', (_, e) => {
     const [, where, slug, file] = e.path.match(/scv\/(promote|archive)\/([^/]+)\/(PLAN|TESTS)\.md$/) ?? []
     const found = slug ? (where === 'archive' ? archived : files)[slug] : undefined
     if (found) return { value: file === 'PLAN' ? found.planText : found.testsText }
+    const kept = e.path.match(/scv\/core\/catalog\/pure\/([^/]+)$/)?.[1]
+    if (kept && catalog[kept] !== undefined) return { value: catalog[kept] }
     if (e.path.endsWith('scv/dreams/latest.json') && dreams) return { value: dreams }
     if (e.path.endsWith('scv/dreams/x.html') && dreams) return { value: '<h1>드림</h1>' }
     return { deny: `ENOENT ${e.path}` }
@@ -333,14 +344,19 @@ test('progress T7 단계를 누르면 그 단계가 만드는 역할(파이프�
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   expect(await text(ui, /^2\. 화면 그리기 — /)).toBe('2. 화면 그리기 — 진행 중')
-  expect(await text(ui, /^• /)).toBe('• 정리된 값을 오른쪽 칸 화면으로 그린다')
-  expect(await text(ui, /render|부수효과|순수/)).toBeUndefined()
+  // Each function the step builds, with what it does: the dictionary is empty here, so the plan's table says it.
+  expect(await text(ui, /^1\. render/)).toBe('1. render 정리된 값을 오른쪽 칸 화면으로 그린다')
+  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0 · 가져다 씀 0')
+  // The tool calls are folded under one line, and open on a press.
+  expect(await text(ui, /^Edit: view\.tsx$/)).toBeUndefined()
+  expect(await drawnText($)).toContain('▸ 도구 호출 1건')
+  await ui.press({ key: 'calls-toggle' })
   expect(await text(ui, /^Edit: view\.tsx$/)).toBe('Edit: view.tsx')
 
   await ui.press({ key: 'step-1' })
   expect(await text(ui, /^1\. 파싱 만들기 — /)).toBe('1. 파싱 만들기 — 완료')
-  expect(await text(ui, /^• /)).toBe('• 계획서 글을 읽어 제목·상태·단계 목록으로 정리한다')
-  expect(await text(ui, /이 세션에서 기록된 일 없음/)).toBe('이 세션에서 기록된 일 없음')
+  expect(await text(ui, /^1\. parsePlans/)).toBe('1. parsePlans 계획서 글을 읽어 제목·상태·단계 목록으로 정리한다')
+  expect(await drawnText($)).not.toContain('도구 호출')
 
   await ui.press({ key: 'step-1' })
   expect(await text(ui, /^1\. 파싱 만들기 — /)).toBeUndefined()
@@ -362,12 +378,12 @@ test('progress T7b 단계 줄 끝 글 꼬리는 그 단계의 하는 일, 백틱
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await text(ui, /^• /)).toBe('• 정리된 값을 오른쪽 칸 화면으로 그린다')
+  expect(await text(ui, /^1\. render/)).toBe('1. render 정리된 값을 오른쪽 칸 화면으로 그린다')
   await ui.press({ key: 'step-2' })
   expect(await text(ui, /^2\. /)).toBe('2. 시나리오: 비싸요 갈래 — 대기')
-  expect(await text(ui, /^• /)).toBe('• 특약 빼기 제안 · 동의 · 거절 흐름을 시나리오에 넣는다')
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음 — 특약 빼기 제안 · 동의 · 거절 흐름을 시나리오에 넣는다')
   await ui.press({ key: 'step-3' })
-  expect(await text(ui, /^• /)).toBe('• 녹음')
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음 — 녹음')
   expect(await text(ui, /찾지 못했습니다/)).toBeUndefined()
   await ui.unmount()
 })
@@ -1838,4 +1854,100 @@ test('mirror-no-loop T3 나를 보지 않는 세션으로는 그대로 걸린다
   expect(got.text).toContain('거울 요청을 보냈습니다')
   expect(env.sent[1]?.to).toContain('session_other')
   expect(env.sent[1]?.text).toBe('SCV-MIRROR HELLO session_host')
+})
+
+// ── step-functions: a step's detail says the functions it builds and what its writing made and called ──
+
+const COMPARE_MD = `# 비교 — 둘을 비교해 순서나 같음을 낸다 — 버전 · 숫자 · 집합
+
+> 생성물 — 원본은 각 함수 위 주석(역할 · 종류 · 예). 1개.
+
+### scv_ver_lt
+- 역할: 첫 버전이 둘째 버전보다 낮으면 참(숫자로 비교, 접미사는 무시)
+- 위치: scripts/lib/template-digest.sh · @pure · sh
+- 예: \`0.9.1 0.10.0 → ""\`
+`
+const INDEX_MD = '# 순수함수 사전 — 차례\n\n| 종류 | 하는 일 | 개수 | 파일 |\n|---|---|---|---|\n| 비교 | 둘을 비교 | 1 | [compare.md](compare.md) |\n'
+
+test('step-functions T1 사전 파일에서 이름마다 역할 · 종류를 읽고, 차례 파일은 아무것도 더하지 않는다', () => {
+  expect(parseCatalog([INDEX_MD, COMPARE_MD])).toEqual({
+    scv_ver_lt: { role: '첫 버전이 둘째 버전보다 낮으면 참(숫자로 비교, 접미사는 무시)', kind: '비교' },
+  })
+  expect(parseCatalog([])).toEqual({})
+})
+
+test('step-functions T2 표식 읽기는 코어 사전과 같은 규칙 — 셸은 이름 줄, 다른 언어는 표식에 적힌 이름', () => {
+  // The three examples of SCV core's own extractor (scripts/lib/pure-catalog.sh), the same here.
+  expect(extractMarked('# @pure\n# 역할: 센다\n# 종류: 세기\n# 예: "a" → "1"\nf() {\n}')).toEqual([{ name: 'f', tier: 'pure', role: '센다', kind: '세기' }])
+  expect(extractMarked('// @pure add\n// 역할: 더한다\n// 종류: 세기\n// 예: 1 2 → 3\nexport const add = (a, b) => a + b')).toEqual([
+    { name: 'add', tier: 'pure', role: '더한다', kind: '세기' },
+  ])
+  expect(extractMarked('/**\n * @deterministic clamp\n * 역할: 범위로 자른다\n * 종류: 다듬기\n * 예: 5 0 3 → 3\n */\nint clamp(int v, int lo, int hi)')).toEqual([
+    { name: 'clamp', tier: 'deterministic', role: '범위로 자른다', kind: '다듬기' },
+  ])
+  // No marker, or a marker with no definition under it (a bare shell marker over code that is not a function), is nothing.
+  expect(extractMarked('# 역할: 센다\nf() {\n}')).toEqual([])
+  expect(extractMarked('# @pure\necho hi')).toEqual([])
+})
+
+test('step-functions T3 부른 함수는 아는 이름이 낱말로 설 때만, 같은 글에서 만든 것은 빼고', () => {
+  const code = 'line="$(scv_step_line "$tool")"\nscv_step_linex\nmy_scv_ver_lt'
+  expect(usedNames(code, ['scv_step_line', 'scv_ver_lt', 'scv_step_active_plan'], [])).toEqual(['scv_step_line'])
+  expect(usedNames(code, ['scv_step_line'], ['scv_step_line'])).toEqual([])
+  expect(writtenCode('Write', { file_path: '/p/scv/promote/a/PLAN.md', content: 'scv_step_line' })).toBeNull()
+  expect(writtenCode('Edit', { file_path: '/p/core/hooks/x.sh', new_string: 'b' })).toBe('b')
+  expect(writtenCode('MultiEdit', { file_path: '/p/x.sh', edits: [{ new_string: 'a' }, { new_string: 'b' }] })).toBe('a\nb')
+  expect(functionsSummary(undefined)).toBe('새로 만듦 0 · 가져다 씀 0')
+})
+
+const STEP_PLAN = (marks: [string, string, string]) =>
+  plan({
+    title: '단계 보고',
+    status: 'in_progress',
+    steps: [`${marks[0]}계획 고르기 규칙`, `${marks[1]}순수부와 단계 보고 스크립트 — \`scv_step_active_plan\`, \`scv_step_line\``, `${marks[2]}매 턴 훅에 한 줄, 시점 규칙 — 훅과 절차 문서만 고침`],
+    pipeline: ['`scv_step_active_plan` | 계획 하나를 고른다 | 목록 → 이름 | 순수', '`scv_step_line` | 안내 한 줄을 만든다 | 이름 → 줄 | 순수'],
+  })
+
+const MADE_SH = [
+  '# @pure',
+  '# 역할: 구현 중인 계획 이름 하나를 고른다',
+  '# 종류: 고르기',
+  '# 예: "a" → "a"',
+  'scv_step_active_plan() {',
+  '  printf %s "$1"',
+  '}',
+  '',
+  '# @pure',
+  '# 역할: 도구 이름과 계획 이름으로 매 턴 안내 한 줄을 만든다',
+  '# 종류: 조립',
+  '# 예: "t" "p" → "t p"',
+  'scv_step_line() {',
+  '  printf "%s %s" "$1" "$2"',
+  '}',
+].join('\n')
+
+test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계는 순수함수 없음과 앞 단계 함수 두 개 가져다 씀', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const files = { a: STEP_PLAN(['[x] ', '[~] ', '']) }
+  const env = engine(on, files, DREAMS, undefined, {}, true, { 'INDEX.md': INDEX_MD, 'compare.md': COMPARE_MD })
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  await $.tool.call({ tool: 'Write', file_path: '/work/core/scripts/lib/step.sh', content: MADE_SH })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /^1\. scv_step_active_plan/)).toBe('1. scv_step_active_plan (고르기) 구현 중인 계획 이름 하나를 고른다')
+  expect(await text(ui, /^2\. scv_step_line/)).toBe('2. scv_step_line (조립) 도구 이름과 계획 이름으로 매 턴 안내 한 줄을 만든다')
+  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 2 · 사전 등록: 고르기 1 · 조립 1 · 가져다 씀 0')
+
+  files.a = STEP_PLAN(['[x] ', '[x] ', '[~] '])
+  await clock.advance(3000)
+  await $.tool.call({ tool: 'Edit', file_path: '/work/core/hooks/on-turn.sh', old_string: 'x', new_string: 'line="$(scv_step_line "$(scv_step_active_plan "$p")" "$t")"\nscv_ver_lt "$a" "$b"' })
+
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음 — 훅과 절차 문서만 고침')
+  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0 · 가져다 씀 3')
+  expect(await text(ui, /^가져다 씀: scv_step_line/)).toBe('가져다 씀: scv_step_line — 도구 이름과 계획 이름으로 매 턴 안내 한 줄을 만든다 (2단계에서 만든 것)')
+  expect(await text(ui, /^가져다 씀: scv_ver_lt/)).toBe('가져다 씀: scv_ver_lt — 첫 버전이 둘째 버전보다 낮으면 참(숫자로 비교, 접미사는 무시)')
+  // Kept per project, so a new session still shows what each step did.
+  expect(env.store.get('functions:/work')).toBeDefined()
+  await ui.unmount()
 })
