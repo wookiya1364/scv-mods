@@ -1,6 +1,6 @@
 # scv/archive/INDEX.yaml — auto-managed by /scv:work --archive and scripts/archive-index.sh (v0.11.0+).
 # Do not edit manually. Regenerated on every archive and on every obsolete marking.
-generated_at: 2026-10-25T05:42:29Z
+generated_at: 2026-11-02T05:18:14Z
 archives:
   - slug: 20261022-wookiya1364-scv-dashboard-pane-dreams
     title: "앱 오른쪽 SCV 대시보드 칸 — scv:dreams"
@@ -17,6 +17,11 @@ archives:
     kind: feature
     status: done
     epic: 20261022-scv-dashboard-pane
+  - slug: 20261022-wookiya1364-scv-dashboard-work-view
+    title: "SCV 칸 — 자리 비운 사이 요약과 에이전트별 줄"
+    kind: feature
+    status: testing
+    epic: 20261022-scv-dashboard-next
   - slug: 20261023-wookiya1364-scv-mods-release
     title: "scv-mods 릴리스 관리 — 버전 · 노트 · 태그 · 두 갈래"
     kind: feature

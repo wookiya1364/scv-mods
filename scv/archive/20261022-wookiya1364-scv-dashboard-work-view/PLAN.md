@@ -85,7 +85,7 @@ agentLines          // (에이전트 목록, 지금, 최대 5) → 줄들 + '+N�
 1. [x] 그 사이 요약 · 에이전트 목록 순수 함수 + 단위 시험 — `eventsSince` `summarizeAway` `applyAgentEvent` `agentLines`
 2. [x] 메시지 시각 기록, 그 사이 카드 그리기 — `메시지·도구·차례 관찰` `그리기`
 3. [x] 에이전트별 도구 기억, 진행 중 카드에 줄 — `applyAgentEvent` `agentLines`
-4. [~] 자동 시험 · 검사 · (물어본 뒤) 올리기 · 맥 앱에서 확인
+4. [x] 자동 시험 · 검사 · (물어본 뒤) 올리기 · 맥 앱에서 확인 — 시험 통과와 맥 앱 칸 화면 확인
 
 ## Related Documents
 

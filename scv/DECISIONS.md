@@ -197,3 +197,11 @@ merge_policy: preserve
 - path delta: as planned (시험 먼저, 빈 함수로 실패 확인 후 구현)
 - refs: scv/archive/20261025-wookiya1364-scv-mirror-no-loop/PLAN.md
 - conversation: scv/conversations/20261025-142147-scv-mirror-self-address.md
+
+## [2026-11-02 14:18] wookiya1364 — SCV 칸 — 자리 비운 사이 요약과 에이전트별 줄 archived
+
+- verdict: archived
+- why: 자리 비운 사이 일을 세 줄로 요약하는 '그 사이' 카드와 서브에이전트별 도구 줄을 칸에 넣었다. 기준 시각(사람이 보낸 마지막 메시지) 앞의 일은 넣지 않고, 긴 명령 원문 대신 설명만 쓴다 — 이 둘은 앞으로도 깨지면 안 된다. 맥 앱 칸에서 '그 사이' 카드를 확인함.
+- path delta: 4단계를 마치는 동안 같은 모드에 단계 상세 개편(0.2.15·0.2.16)과 거울 고침(0.2.13·0.2.14)이 함께 나갔다 — 사용자 요청이 그사이 들어와서; 이 계획의 범위 자체는 계획대로
+- refs: scv/archive/20261022-wookiya1364-scv-dashboard-work-view/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
