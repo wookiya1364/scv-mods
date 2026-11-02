@@ -52,6 +52,8 @@ import {
   usedNames,
   writtenCode,
   functionsSummary,
+  archivedAtOf,
+  parsePlans,
 } from './model'
 
 const PANE = {
@@ -83,7 +85,8 @@ const DREAMS = JSON.stringify({
   report: 'scv/dreams/x.html',
 })
 
-type Files = Record<string, { planText: string; testsText: string }>
+// record: an archived plan's ARCHIVED_AT.md
+type Files = Record<string, { planText: string; testsText: string; record?: string }>
 
 const engine = (
   on: On,
@@ -134,6 +137,8 @@ const engine = (
     const [, where, slug, file] = e.path.match(/scv\/(promote|archive)\/([^/]+)\/(PLAN|TESTS)\.md$/) ?? []
     const found = slug ? (where === 'archive' ? archived : files)[slug] : undefined
     if (found) return { value: file === 'PLAN' ? found.planText : found.testsText }
+    const recorded = e.path.match(/scv\/archive\/([^/]+)\/ARCHIVED_AT\.md$/)?.[1]
+    if (recorded && archived[recorded]?.record) return { value: archived[recorded]!.record! }
     const kept = e.path.match(/scv\/core\/catalog\/pure\/([^/]+)$/)?.[1]
     if (kept && catalog[kept] !== undefined) return { value: catalog[kept] }
     if (e.path.endsWith('scv/dreams/latest.json') && dreams) return { value: dreams }
@@ -1976,5 +1981,32 @@ test('step-functions T5 단계 시작을 알리기 전 작업과 끝을 알린 �
   expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0 · 가져다 씀 0')
   expect(await drawnText($)).toContain('▸ 도구 호출 1건')
   expect(env.store.get('functions:/work')).toBeUndefined()
+  await ui.unmount()
+})
+
+// ── recent-archived: with no plan in progress, the plan archived last stands in, not the one created last ──
+
+test('recent-archived T1 보관 기록 날짜가 늦은 계획이 앞, 같은 날이면 이름순, 기록 없는 계획은 뒤', () => {
+  expect(archivedAtOf('---\narchived_at: 2026-11-02\narchived_by: w\n---')).toBe('2026-11-02')
+  expect(archivedAtOf(null)).toBe('')
+  const file = (slug: string, archivedAt?: string) => ({ slug, isArchived: true, ...plan({ title: slug, status: 'done', steps: ['a'] }), ...(archivedAt ? { archivedAt } : {}) })
+  expect(parsePlans([file('20261025-b', '2026-10-25'), file('20261022-a', '2026-11-02'), file('20261030-old'), file('20261022-c', '2026-11-02')]).map(one => one.slug)).toEqual([
+    '20261022-c',
+    '20261022-a',
+    '20261025-b',
+    '20261030-old',
+  ])
+})
+
+test('recent-archived T2 진행 중 계획이 없으면 칸은 가장 최근에 보관한 계획을 보여 준다', async ($, on) => {
+  const record = (date: string) => `---\narchived_at: ${date}\narchived_by: w\nreason: t\n---\n`
+  engine(on, {}, DREAMS, undefined, {
+    '20261025-mirror': { ...plan({ title: '열흘 전 보관한 거울 계획', status: 'done', steps: ['a'] }), record: record('2026-10-25') },
+    '20261022-alerts': { ...plan({ title: '오늘 보관한 알림 계획', status: 'done', steps: ['a'] }), record: record('2026-11-02') },
+  })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect((await ui.find({ type: 'Select', key: 'plan' }))?.props.value).toBe('20261022-alerts')
   await ui.unmount()
 })

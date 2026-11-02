@@ -58,6 +58,7 @@ import {
   usedLineText,
   usedNames,
   writtenCode,
+  archivedAtOf,
   nextWorkingOn,
   statusWords,
   suggestNext,
@@ -130,7 +131,10 @@ const readPlans = async ($: Api, dir: string, isArchived: boolean): Promise<Plan
   const plans: PlanFile[] = []
   for (const entry of entries.filter(one => one.kind === 'dir')) {
     const planText = await readText($, `${dir}/${entry.name}/PLAN.md`)
-    if (planText) plans.push({ slug: entry.name, planText, testsText: (await readText($, `${dir}/${entry.name}/TESTS.md`)) ?? '', isArchived })
+    if (!planText) continue
+    const testsText = (await readText($, `${dir}/${entry.name}/TESTS.md`)) ?? ''
+    const archivedAt = isArchived ? archivedAtOf(await readText($, `${dir}/${entry.name}/ARCHIVED_AT.md`)) : ''
+    plans.push({ slug: entry.name, planText, testsText, isArchived, ...(archivedAt ? { archivedAt } : {}) })
   }
 
   return plans

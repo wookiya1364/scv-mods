@@ -102,12 +102,17 @@ export const parsePlan = (file: PlanFile): Plan => ({
   howToRun: howToRun(file.testsText),
   pipeline: parsePipeline(file.planText),
   isArchived: file.isArchived === true,
+  archivedAt: file.archivedAt ?? '',
 })
 
+// Plans by status; archived ones the most recently archived first (a plan with no record date last), then by name.
 export const parsePlans = (files: readonly PlanFile[]): Plan[] =>
   files
     .map(parsePlan)
-    .sort((a, b) => rank(a.status) - rank(b.status) || b.slug.localeCompare(a.slug))
+    .sort((a, b) => rank(a.status) - rank(b.status) || b.archivedAt.localeCompare(a.archivedAt) || b.slug.localeCompare(a.slug))
+
+// The date an archive record (ARCHIVED_AT.md) gives in its archived_at line; '' when it has none.
+export const archivedAtOf = (text: string | null) => text?.match(/^archived_at:\s*(\S+)/m)?.[1] ?? ''
 
 const rank = (status: string) => {
   const at = STATUS_ORDER.indexOf(status)

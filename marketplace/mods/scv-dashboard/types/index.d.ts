@@ -4,7 +4,8 @@ export type StepMark = { name: string; mark: StageState | undefined; refs: strin
 
 export type PipelineStep = { name: string; role: string; io: string; kind: string }
 
-export type PlanFile = { slug: string; planText: string; testsText: string; isArchived?: boolean }
+// archivedAt: the date its archive record (ARCHIVED_AT.md) gives, for an archived plan.
+export type PlanFile = { slug: string; planText: string; testsText: string; isArchived?: boolean; archivedAt?: string }
 
 export type Plan = {
   slug: string
@@ -15,6 +16,7 @@ export type Plan = {
   howToRun: string[]
   pipeline: PipelineStep[]
   isArchived: boolean
+  archivedAt: string
 }
 
 export type Stage = { name: string; state: StageState; refs: string[]; role?: string; note?: string }
