@@ -350,28 +350,33 @@ export const stageFunctions = (stage: Stage, pipeline: readonly PipelineStep[], 
   })
 }
 
-export const functionLineText = (line: FunctionLine, i: number) => `${i + 1}. ${line.name}${line.kind ? ` (${line.kind})` : ''}${line.role ? ` ${line.role}` : ''}`
+// A function's one-line description: its role up to the first ' — ' (the rest is detail for the dictionary).
+export const firstClause = (role: string) => role.split(' — ')[0]?.trim() ?? ''
 
-// A step whose line names no function, said in the line's own words.
-export const noFunctionText = (stage: Stage) => `순수함수 없음 — ${stage.role ?? stage.name}`
+// The bullet a function stands on: its name, and its kind when known.
+export const functionBullet = (name: string, kind = '') => `• ${name}${kind ? ` (${kind})` : ''}`
 
-// The step's work in one line: how many it made (by kind, as they go into the dictionary) and how many known ones it called.
-export const functionsSummary = (found: StepFunctions | undefined) => {
-  const made = found?.made ?? []
-  const kinds = new Map<string, number>()
-  for (const one of made) if (one.kind) kinds.set(one.kind, (kinds.get(one.kind) ?? 0) + 1)
-  const listed = [...kinds].map(([kind, count]) => `${kind} ${count}`).join(' · ')
+export type DoneFunction = { name: string; detail: string }
 
-  return `새로 만듦 ${made.length}${listed ? ` · 사전 등록: ${listed}` : ''} · 가져다 씀 ${found?.used.length ?? 0}`
-}
+// What a step did, as two lists under '새로 만듦 N' and '가져다 씀 N': a function the step's 하는 일 already shows
+// is named only; another gets its one-line description (the dictionary's role, else the comment it was made with).
+export const doneFunctions = (
+  found: StepFunctions | undefined,
+  shown: readonly string[],
+  catalog: Catalog,
+  earlier: readonly { step: number; made: readonly MadeFunction[] }[],
+): { made: DoneFunction[]; used: DoneFunction[] } => {
+  const detail = (name: string, own?: MadeFunction) => {
+    if (shown.includes(name)) return ''
+    const role = catalog[name]?.role || own?.role || earlier.flatMap(one => one.made).find(fn => fn.name === name)?.role || ''
 
-// One called function: its role (the dictionary's, else the comment it was made with) and, when an earlier step of
-// the plan made it, which step.
-export const usedLineText = (name: string, catalog: Catalog, earlier: readonly { step: number; made: readonly MadeFunction[] }[]) => {
-  const from = earlier.find(one => one.made.some(fn => fn.name === name))
-  const role = catalog[name]?.role || from?.made.find(fn => fn.name === name)?.role || ''
+    return firstClause(role)
+  }
 
-  return `${name}${role ? ` — ${role}` : ''}${from ? ` (${from.step}단계에서 만든 것)` : ''}`
+  return {
+    made: (found?.made ?? []).map(one => ({ name: one.name, detail: detail(one.name, one) })),
+    used: (found?.used ?? []).map(name => ({ name, detail: detail(name) })),
+  }
 }
 
 // The code a tool call writes: Write's content, Edit's new_string, MultiEdit's new_strings. Files under the project's
@@ -388,7 +393,6 @@ export const writtenCode = (tool: string, input: Record<string, unknown>): strin
   return null
 }
 
-export const madeLineText = (one: MadeFunction) => `${one.name}${one.kind ? ` (${one.kind})` : ''}${one.role ? ` ${one.role}` : ''}`
 
 export const logWork = (log: Readonly<Record<string, WorkEntry[]>>, key: string, entry: WorkEntry): Record<string, WorkEntry[]> => {
   const last = log[key]?.[log[key].length - 1]

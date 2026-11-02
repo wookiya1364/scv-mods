@@ -48,14 +48,12 @@ import {
   recordStepTimes,
   runFor,
   extractMarked,
-  functionLineText,
-  functionsSummary,
-  madeLineText,
-  noFunctionText,
   parseCatalog,
   recordFunctions,
   stageFunctions,
-  usedLineText,
+  doneFunctions,
+  firstClause,
+  functionBullet,
   usedNames,
   writtenCode,
   archivedAtOf,
@@ -913,6 +911,7 @@ export const register: Register = on => {
     })
     const builds = focusedStage ? stageFunctions(focusedStage, plan.pipeline, catalog, earlier.flatMap(one => one.made).concat(did?.made ?? [])) : []
     const callsOpen = await read($, showCalls)
+    const done = doneFunctions(did, builds.map(line => line.name), catalog, earlier)
     const count = countStages(stages)
     // Step times from Claude's signals survive a new session; the times seen in this session are the fallback.
     const durations = stepDurationsFromSignals(reported, plan.slug)
@@ -1113,15 +1112,52 @@ export const register: Register = on => {
               <Box flexDirection="column" borderStyle="round" borderColor={STATE_COLOR[focusedStage.state]} paddingX={1} marginTop={1}>
                 <Text bold color={STATE_COLOR[focusedStage.state]}>{`${focused + 1}. ${focusedStage.name} — ${STATE_LABEL[focusedStage.state]}`}</Text>
                 <Text bold>하는 일</Text>
-                {builds.length > 0 ? builds.map((line, i) => <Text>{functionLineText(line, i)}</Text>) : <Text>{noFunctionText(focusedStage)}</Text>}
-                <Text bold>이 단계에서 한 일</Text>
+                {builds.length > 0 ? (
+                  builds.map(line => (
+                    <Box flexDirection="column">
+                      <Text>{functionBullet(line.name, line.kind)}</Text>
+                      {line.role ? (
+                        <Box paddingLeft={4}>
+                          <Text dimColor>{firstClause(line.role)}</Text>
+                        </Box>
+                      ) : null}
+                    </Box>
+                  ))
+                ) : (
+                  <Box flexDirection="column">
+                    <Text>순수함수 없음</Text>
+                    <Box paddingLeft={4}>
+                      <Text dimColor>{focusedStage.role ?? focusedStage.name}</Text>
+                    </Box>
+                  </Box>
+                )}
+                <Box marginTop={1}>
+                  <Text bold>이 단계에서 한 일</Text>
+                </Box>
                 {did || work.length > 0 ? (
-                  <Text>{functionsSummary(did)}</Text>
+                  (
+                    [
+                      ['새로 만듦', done.made],
+                      ['가져다 씀', done.used],
+                    ] as const
+                  ).map(([title, list]) => (
+                    <Box flexDirection="column">
+                      <Text>{`${title} ${list.length}`}</Text>
+                      {list.map(one => (
+                        <Box flexDirection="column">
+                          <Text>{functionBullet(one.name)}</Text>
+                          {one.detail ? (
+                            <Box paddingLeft={4}>
+                              <Text dimColor>{one.detail}</Text>
+                            </Box>
+                          ) : null}
+                        </Box>
+                      ))}
+                    </Box>
+                  ))
                 ) : (
                   <Text dimColor>기록 없음 — Claude가 이 세션에서 단계 시작을 알린 뒤의 작업만 셉니다</Text>
                 )}
-                {(did?.made ?? []).map(one => <Text dimColor>{`새로 만듦: ${madeLineText(one)}`}</Text>)}
-                {(did?.used ?? []).map(name => <Text dimColor>{`가져다 씀: ${usedLineText(name, catalog, earlier)}`}</Text>)}
                 {work.length > 0 ? (
                   <Button key="calls-toggle" plain onPress={() => void update($, showCalls, value => !value)}>
                     {`${callsOpen ? '▾' : '▸'} 도구 호출 ${work.length}건`}

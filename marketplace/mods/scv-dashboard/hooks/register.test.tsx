@@ -51,7 +51,8 @@ import {
   parseCatalog,
   usedNames,
   writtenCode,
-  functionsSummary,
+  doneFunctions,
+  firstClause,
   archivedAtOf,
   parsePlans,
 } from './model'
@@ -351,8 +352,10 @@ test('progress T7 단계를 누르면 그 단계가 만드는 역할(파이프�
 
   expect(await text(ui, /^2\. 화면 그리기 — /)).toBe('2. 화면 그리기 — 진행 중')
   // Each function the step builds, with what it does: the dictionary is empty here, so the plan's table says it.
-  expect(await text(ui, /^1\. render/)).toBe('1. render 정리된 값을 오른쪽 칸 화면으로 그린다')
-  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0 · 가져다 씀 0')
+  expect(await text(ui, /^• render/)).toBe('• render')
+  expect(await text(ui, /^정리된 값/)).toBe('정리된 값을 오른쪽 칸 화면으로 그린다')
+  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0')
+  expect(await text(ui, /^가져다 씀 /)).toBe('가져다 씀 0')
   // The tool calls are folded under one line, and open on a press.
   expect(await text(ui, /^Edit: view\.tsx$/)).toBeUndefined()
   expect(await drawnText($)).toContain('▸ 도구 호출 1건')
@@ -361,7 +364,8 @@ test('progress T7 단계를 누르면 그 단계가 만드는 역할(파이프�
 
   await ui.press({ key: 'step-1' })
   expect(await text(ui, /^1\. 파싱 만들기 — /)).toBe('1. 파싱 만들기 — 완료')
-  expect(await text(ui, /^1\. parsePlans/)).toBe('1. parsePlans 계획서 글을 읽어 제목·상태·단계 목록으로 정리한다')
+  expect(await text(ui, /^• parsePlans/)).toBe('• parsePlans')
+  expect(await text(ui, /^계획서 글을/)).toBe('계획서 글을 읽어 제목·상태·단계 목록으로 정리한다')
   expect(await drawnText($)).not.toContain('도구 호출')
 
   await ui.press({ key: 'step-1' })
@@ -384,12 +388,14 @@ test('progress T7b 단계 줄 끝 글 꼬리는 그 단계의 하는 일, 백틱
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await text(ui, /^1\. render/)).toBe('1. render 정리된 값을 오른쪽 칸 화면으로 그린다')
+  expect(await text(ui, /^• render/)).toBe('• render')
   await ui.press({ key: 'step-2' })
   expect(await text(ui, /^2\. /)).toBe('2. 시나리오: 비싸요 갈래 — 대기')
-  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음 — 특약 빼기 제안 · 동의 · 거절 흐름을 시나리오에 넣는다')
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
+  expect(await text(ui, /^특약 빼기/)).toBe('특약 빼기 제안 · 동의 · 거절 흐름을 시나리오에 넣는다')
   await ui.press({ key: 'step-3' })
-  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음 — 녹음')
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
+  expect(await text(ui, /^녹음$/)).toBe('녹음')
   expect(await text(ui, /찾지 못했습니다/)).toBeUndefined()
   await ui.unmount()
 })
@@ -1903,7 +1909,16 @@ test('step-functions T3 부른 함수는 아는 이름이 낱말로 설 때만, 
   expect(writtenCode('Write', { file_path: '/p/scv/promote/a/PLAN.md', content: 'scv_step_line' })).toBeNull()
   expect(writtenCode('Edit', { file_path: '/p/core/hooks/x.sh', new_string: 'b' })).toBe('b')
   expect(writtenCode('MultiEdit', { file_path: '/p/x.sh', edits: [{ new_string: 'a' }, { new_string: 'b' }] })).toBe('a\nb')
-  expect(functionsSummary(undefined)).toBe('새로 만듦 0 · 가져다 씀 0')
+  // One line of description: a role up to its first ' — '.
+  expect(firstClause('계획 이름 하나를 고른다 — 여럿이면 마지막 줄')).toBe('계획 이름 하나를 고른다')
+  expect(firstClause('센다')).toBe('센다')
+  // A function the step's 하는 일 already shows is named only; another gets its description.
+  const made = { name: 'f', tier: 'pure' as const, role: '센다 — 길게', kind: '세기' }
+  expect(doneFunctions({ made: [made], used: ['g'] }, ['f'], { g: { role: '고른다 — 길게', kind: '고르기' } }, [])).toEqual({
+    made: [{ name: 'f', detail: '' }],
+    used: [{ name: 'g', detail: '고른다' }],
+  })
+  expect(doneFunctions(undefined, [], {}, [])).toEqual({ made: [], used: [] })
 })
 
 const STEP_PLAN = (marks: [string, string, string]) =>
@@ -1942,9 +1957,11 @@ test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계�
   await $.tool.call({ tool: 'Write', file_path: '/work/core/scripts/lib/step.sh', content: MADE_SH })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await text(ui, /^1\. scv_step_active_plan/)).toBe('1. scv_step_active_plan (고르기) 구현 중인 계획 이름 하나를 고른다')
-  expect(await text(ui, /^2\. scv_step_line/)).toBe('2. scv_step_line (조립) 도구 이름과 계획 이름으로 매 턴 안내 한 줄을 만든다')
-  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 2 · 사전 등록: 고르기 1 · 조립 1 · 가져다 씀 0')
+  expect(await text(ui, /^• scv_step_active_plan \(/)).toBe('• scv_step_active_plan (고르기)')
+  expect(await text(ui, /^구현 중인/)).toBe('구현 중인 계획 이름 하나를 고른다')
+  expect(await text(ui, /^• scv_step_line \(/)).toBe('• scv_step_line (조립)')
+  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 2')
+  expect(await text(ui, /^가져다 씀 /)).toBe('가져다 씀 0')
 
   files.a = STEP_PLAN(['[x] ', '[x] ', '[~] '])
   await clock.advance(3000)
@@ -1952,10 +1969,13 @@ test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계�
   await signal($, 3, 'doing')
   await $.tool.call({ tool: 'Edit', file_path: '/work/core/hooks/on-turn.sh', old_string: 'x', new_string: 'line="$(scv_step_line "$(scv_step_active_plan "$p")" "$t")"\nscv_ver_lt "$a" "$b"' })
 
-  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음 — 훅과 절차 문서만 고침')
-  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0 · 가져다 씀 3')
-  expect(await text(ui, /^가져다 씀: scv_step_line/)).toBe('가져다 씀: scv_step_line — 도구 이름과 계획 이름으로 매 턴 안내 한 줄을 만든다 (2단계에서 만든 것)')
-  expect(await text(ui, /^가져다 씀: scv_ver_lt/)).toBe('가져다 씀: scv_ver_lt — 첫 버전이 둘째 버전보다 낮으면 참(숫자로 비교, 접미사는 무시)')
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
+  expect(await text(ui, /^훅과 절차/)).toBe('훅과 절차 문서만 고침')
+  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0')
+  expect(await text(ui, /^가져다 씀 /)).toBe('가져다 씀 3')
+  expect(await text(ui, /^• scv_step_line$/)).toBe('• scv_step_line')
+  expect(await text(ui, /^도구 이름과 계획/)).toBe('도구 이름과 계획 이름으로 매 턴 안내 한 줄을 만든다')
+  expect(await text(ui, /^첫 버전이/)).toBe('첫 버전이 둘째 버전보다 낮으면 참(숫자로 비교, 접미사는 무시)')
   // Kept per project, so a new session still shows what each step did.
   expect(env.store.get('functions:/work')).toBeDefined()
   await ui.unmount()
@@ -1978,7 +1998,7 @@ test('step-functions T5 단계 시작을 알리기 전 작업과 끝을 알린 �
   await $.tool.call({ tool: 'Edit', file_path: '/work/core/z.sh', old_string: 'a', new_string: 'b' })
   await ui.press({ key: 'step-2' })
 
-  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0 · 가져다 씀 0')
+  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0')
   expect(await drawnText($)).toContain('▸ 도구 호출 1건')
   expect(env.store.get('functions:/work')).toBeUndefined()
   await ui.unmount()
