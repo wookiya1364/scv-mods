@@ -103,6 +103,7 @@ declare module 'claude-code' {
       stepLog: Record<string, WorkEntry[]>
       stepFunctions: Record<string, StepFunctions>
       showCalls: boolean
+      workingOn: { plan: string; step: number } | null
       signals: StepSignal[]
       permit: Permit | null
       stopped: Stopped | null
