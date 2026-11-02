@@ -90,7 +90,7 @@ flow(
 2. [x] '입력창에 넣기' 버튼과, 못 넣을 때 복사 — `planPromptFill` `넣기·제안·알리기·그리기`
 3. [x] 차례 끝 Tab 제안 — `suggestNext`
 4. [x] 한도 줄 · 90% 알림 — `usageLine` `usageAlerts`
-5. [~] 자동 시험 · 검사 · (물어본 뒤) 올리기 · 맥 앱에서 확인
+5. [x] 자동 시험 · 검사 · (물어본 뒤) 올리기 · 맥 앱에서 확인 — 시험 통과와 맥 앱 확인
 
 ## Related Documents
 

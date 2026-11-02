@@ -205,3 +205,27 @@ merge_policy: preserve
 - path delta: 4단계를 마치는 동안 같은 모드에 단계 상세 개편(0.2.15·0.2.16)과 거울 고침(0.2.13·0.2.14)이 함께 나갔다 — 사용자 요청이 그사이 들어와서; 이 계획의 범위 자체는 계획대로
 - refs: scv/archive/20261022-wookiya1364-scv-dashboard-work-view/PLAN.md
 - conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-11-02 14:28] wookiya1364 — SCV 칸 — 끝·오류·허락 기다림 알림과 휴대폰 알림 archived
+
+- verdict: archived
+- why: 2분 넘는 일의 끝, 오류 멈춤, 허락 창을 맥 알림(원격 연결 중이면 휴대폰)으로 알리고, 허락 창이 떠 있는 동안 칸에 '허락 기다림'을 보인다. 알리는 길 하나가 실패해도 나머지 길은 간다 — 깨지면 안 됨. 맥 앱에서 사용자가 확인.
+- path delta: as planned
+- refs: scv/archive/20261022-wookiya1364-scv-dashboard-alerts/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-11-02 14:28] wookiya1364 — SCV 칸 — 다음 할 일 입력창 넣기와 사용 한도 archived
+
+- verdict: archived
+- why: '다음' 명령을 입력창에 넣고(못 넣으면 복사), 5시간·7일 한도를 칸에 보이며 90% 넘으면 기간마다 한 번 알린다. 사람이 친 글은 지우지 않는다 — 깨지면 안 됨. 맥 앱에서 사용자가 확인.
+- path delta: as planned
+- refs: scv/archive/20261022-wookiya1364-scv-dashboard-prompt-usage/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
+
+## [2026-11-02 14:28] wookiya1364 — SCV 칸 — 진행률이 실제 작업 중에 움직이기 archived
+
+- verdict: archived
+- why: Claude가 단계 신호(scv_step)로 시작·끝·막힘을 알리면 진행률·단계 흐름·예상 시간이 움직인다. 신호도 표시도 없으면 '(추정)'으로 돌아간다. 0.2.16부터 단계 기록도 이 신호를 따른다. 맥 앱에서 사용자가 확인.
+- path delta: as planned (단계 기록이 신호를 따르게 한 것은 이 계획 밖 0.2.16 변경)
+- refs: scv/archive/20261022-wookiya1364-scv-dashboard-step-signal/PLAN.md
+- conversation: scv/conversations/20261022-102049-read-shared-claude-link.md
