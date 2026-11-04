@@ -416,17 +416,19 @@ test('progress T8 계획이 여러 개면 선택 항목으로 고른다', async 
   await ui.unmount()
 })
 
-test('progress T9 세션 시작 때 열리고, 닫혀 있으면 다음 메시지 때 다시 열림', async ($, on) => {
-  const { opened, panes } = engine(on, {})
+test('progress T9 세션 시작 때 열리고, 닫힌 칸은 메시지로 다시 열리지 않고 /scv-panel · /scv-dashboard 로 열림', async ($, on) => {
+  const { opened } = engine(on, {})
   on('prompt.submit', (_, e) => ({ text: e.text }))
 
   await start($)
   expect(opened).toEqual(['scv-dashboard'])
   await $.prompt.submit(typed('hi'))
-  expect(opened).toEqual(['scv-dashboard', 'scv-dashboard'])
-  panes.push({ id: 'scv-dashboard' })
   await $.prompt.submit(typed('again'))
+  expect(opened).toEqual(['scv-dashboard'])
+  await $.command.run({ command: 'scv-panel', args: '' } as never)
   expect(opened).toEqual(['scv-dashboard', 'scv-dashboard'])
+  await $.command.run({ command: 'scv-dashboard', args: '' } as never)
+  expect(opened).toEqual(['scv-dashboard', 'scv-dashboard', 'scv-dashboard'])
 })
 
 test('progress T10 프로젝트 파일을 쓰지 않는다', async ($, on) => {

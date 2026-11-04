@@ -496,6 +496,18 @@ const askMirror = async ($: Api, host: string, isFresh = false) => {
   return { own, sent, previous }
 }
 
+// Sent from a Remote Control viewer, the answer is the only part that reaches it, so it says how to see the pane there.
+// A closed pane stays closed until one of these two commands opens it.
+const openByCommand = async ($: Api) => {
+  const { isPlaced } = await openPane($)
+  const own = await ownAddress($)
+  const reach = own.isRemote ? '' : ' (Remote Control이 꺼져 있어 이 컴퓨터 안에서만 닿습니다)'
+
+  return {
+    text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}. 이 세션을 다른 기기 앱에서 보려면, 그 기기에서 연 다른 세션에서: /scv-mirror ${own.address}${reach}`,
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -506,6 +518,7 @@ export const register: Register = on => {
     if (Array.isArray(kept)) await update($, runs, () => kept as TestRun[])
     await loadSignals($, project)
     await $.command.register({ name: 'scv-dashboard', description: 'Open the SCV dashboard pane' })
+    await $.command.register({ name: 'scv-panel', description: 'Open the SCV dashboard pane' })
     await $.command.register({ name: 'scv-mirror', description: "Draw another session's SCV pane here: /scv-mirror <address>, or /scv-mirror stop", argumentHint: '<address> | stop' })
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     await refresh($)
@@ -532,22 +545,11 @@ export const register: Register = on => {
       const doneSteps = plan ? deriveStages(plan).stages.flatMap((stage, i) => (stage.state === 'done' ? [i] : [])) : []
       await update($, since, () => ({ at, slug: plan?.slug ?? '', doneSteps }))
     }
-    const isOpen = (await $.ui.panes()).some(pane => pane.id === PANE)
-    if (!isOpen) await openPane($)
-
     return submitted
   })
 
-  // Sent from a Remote Control viewer, the answer is the only part that reaches it, so it says how to see the pane there.
-  on('command.run', { command: 'scv-dashboard' }, async $ => {
-    const { isPlaced } = await openPane($)
-    const own = await ownAddress($)
-    const reach = own.isRemote ? '' : ' (Remote Control이 꺼져 있어 이 컴퓨터 안에서만 닿습니다)'
-
-    return {
-      text: `SCV dashboard ${isPlaced ? 'is open' : 'is not drawn here'}. 이 세션을 다른 기기 앱에서 보려면, 그 기기에서 연 다른 세션에서: /scv-mirror ${own.address}${reach}`,
-    }
-  })
+  on('command.run', { command: 'scv-dashboard' }, openByCommand)
+  on('command.run', { command: 'scv-panel' }, openByCommand)
 
   on('command.run', { command: 'scv-mirror' }, async ($, e) => {
     const asked = e.args.trim().split(/\s+/)[0] ?? ''
