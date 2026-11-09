@@ -90,14 +90,44 @@ const parsePipeline = (planText: string): PipelineStep[] => {
     .map(cells => ({ name: pick(cells, at.name), role: pick(cells, at.role), io: pick(cells, at.io), kind: pick(cells, at.kind) }))
 }
 
+// `## 변경 이력` entries, newest first: each "- **…**" headline without its leading "- " and bold marks.
+export const historyOf = (planText: string): string[] =>
+  section(planText, ['변경 이력'])
+    .filter(line => line.startsWith('- **'))
+    .map(line => line.slice(2).replace(/\*\*/g, ''))
+    .reverse()
+
+// Step marks from the plan's own progress lines ("- **<day> 진행** — <n>단계 시작|끝|막힘: …"), oldest first so the
+// latest line for a step wins. A step the plan already marks keeps that mark; the mod's own step signals still apply
+// on top (mergeMarks). This is what keeps the pane right when a step report was missed, and without the step tool.
+const PROGRESS_STATE: Record<string, 'doing' | 'done' | 'blocked'> = { 시작: 'doing', 끝: 'done', 막힘: 'blocked' }
+export const progressMarks = (planText: string): Map<number, 'doing' | 'done' | 'blocked'> => {
+  const marks = new Map<number, 'doing' | 'done' | 'blocked'>()
+  for (const line of section(planText, ['변경 이력'])) {
+    const hit = line.match(/^- \*\*\S+ 진행\*\* — (\d+)단계 (시작|끝|막힘):/)
+    if (hit) marks.set(Number(hit[1]), PROGRESS_STATE[hit[2] ?? '끝'] ?? 'done')
+  }
+
+  return marks
+}
+
+const withProgress = (steps: StepMark[], planText: string): StepMark[] => {
+  const marks = progressMarks(planText)
+
+  return steps.map((step, i) => (step.mark || !marks.has(i + 1) ? step : { ...step, mark: marks.get(i + 1) }))
+}
+
 export const parsePlan = (file: PlanFile): Plan => ({
   slug: file.slug,
   title: frontmatter(file.planText, 'title') ?? file.slug,
   status: file.isArchived ? 'archived' : (frontmatter(file.planText, 'status') ?? 'planned'),
-  steps: section(file.planText, ['Suggested path', 'Steps'])
-    .map(line => line.match(/^\s*\d+\.\s+(.+)$/)?.[1])
-    .filter((step): step is string => Boolean(step))
-    .map(parseStep),
+  steps: withProgress(
+    section(file.planText, ['Suggested path', 'Steps'])
+      .map(line => line.match(/^\s*\d+[a-z]?\.\s+(.+)$/)?.[1])
+      .filter((step): step is string => Boolean(step))
+      .map(parseStep),
+    file.planText,
+  ),
   scenarios: [...file.testsText.matchAll(/^###\s+(T\d+)\.\s*(.+)$/gm)].map(([, id = '', name = '']) => ({ id, name: name.trim() })),
   howToRun: howToRun(file.testsText),
   pipeline: parsePipeline(file.planText),
@@ -106,6 +136,7 @@ export const parsePlan = (file: PlanFile): Plan => ({
   pausedBy: frontmatter(file.planText, 'paused_by') ?? '',
   resumeAt: frontmatter(file.planText, 'resume_at') ?? '',
   returnTo: frontmatter(file.planText, 'return_to') ?? '',
+  history: historyOf(file.planText),
 })
 
 // A plan's title from its folder name; the folder name itself when that plan is not in the list.

@@ -2055,3 +2055,40 @@ test('paused T10 보류인 계획은 "보류 · <먼저 할 계획> 끝나면 �
   expect(nextAction('p-a', 'paused', [], [])).toEqual({ text: '보류 중 — 먼저 할 계획이 끝나면 이어서 함', command: null })
   expect(statusWords('in_progress', [{ name: 'a', state: 'doing', refs: [] }])).toBe('만드는 중')
 })
+
+test('history T14 변경 이력은 최근 것부터 보이고, 2b 같은 단계 번호도 단계로 센다', async () => {
+  const planText = [
+    '---', 'title: 조합 밸런스', 'status: in_progress', '---', '',
+    '## Suggested path', '', '1. 하나', '2. 둘', '2b. (추가) 연계 효과', '3. 셋', '',
+    '## 변경 이력', '',
+    '- **2026-11-09 01:24 선택** — 답: 지금 상태 다시 재고 계획 고침', '  - 질문: 3단계는 왜 멈췄나', '',
+    '- **2026-11-09 진행** — 3단계: 성직자 체력 64', '  - 요청: 체력 64 (요청 ab12cd34)', '',
+    '- **2026-11-09 04:54 선택** — 답: 덩굴 2턴 유지', '  - 질문: 회복은?', '',
+    '## Links', '',
+  ].join('\n')
+  const [plan] = parsePlans([{ slug: 'p', planText, testsText: '' }])
+  expect(plan!.steps.length).toBe(4)
+  expect(plan!.history).toEqual([
+    '2026-11-09 04:54 선택 — 답: 덩굴 2턴 유지',
+    '2026-11-09 진행 — 3단계: 성직자 체력 64',
+    '2026-11-09 01:24 선택 — 답: 지금 상태 다시 재고 계획 고침',
+  ])
+  const [none] = parsePlans([{ slug: 'q', planText: '---\ntitle: q\nstatus: planned\n---\n', testsText: '' }])
+  expect(none!.history).toEqual([])
+})
+
+test('progress T15 단계 보고가 빠져도 계획 파일의 진행 줄로 단계 상태를 센다(마지막 줄이 이김)', async () => {
+  const planText = [
+    '---', 'title: a', 'status: in_progress', '---', '',
+    '## Suggested path', '', '1. 하나', '2. 둘', '3. 셋', '4. [x] 넷', '',
+    '## 변경 이력', '',
+    '- **2026-11-09 진행** — 1단계 시작: a', '',
+    '- **2026-11-09 진행** — 1단계 끝: a', '',
+    '- **2026-11-09 진행** — 2단계 막힘: 키 없음', '',
+    '- **2026-11-09 진행** — 4단계 시작: 이미 끝난 단계는 그대로', '',
+    '- **2026-11-09 진행** — 3단계: 상태 없는 옛 줄은 세지 않음', '',
+    '## Links', '',
+  ].join('\n')
+  const [plan] = parsePlans([{ slug: 'p', planText, testsText: '' }])
+  expect(plan!.steps.map(step => step.mark)).toEqual(['done', 'blocked', undefined, 'done'])
+})

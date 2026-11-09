@@ -22,6 +22,8 @@ export type Plan = {
   pausedBy: string
   resumeAt: string
   returnTo: string
+  // The plan's `## 변경 이력` entries — headline only, newest first (step progress, added steps, pauses, choice answers).
+  history: string[]
 }
 
 export type Stage = { name: string; state: StageState; refs: string[]; role?: string; note?: string }

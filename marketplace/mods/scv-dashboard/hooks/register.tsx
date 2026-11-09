@@ -976,6 +976,14 @@ export const register: Register = on => {
         {plans.length > 1 && Select ? null : <Text bold>{plan.title}</Text>}
         <Text dimColor>{`상태: ${statusWords(plan.status, stages, plan.pausedBy ? titleOf(plans, plan.pausedBy) : '')}`}</Text>
         {returnLine(plan, plans) ? <Text dimColor>{returnLine(plan, plans)}</Text> : null}
+        {plan.history.length > 0 ? (
+          <Box flexDirection="column">
+            <Text dimColor>{`변경 이력 (최근 ${Math.min(3, plan.history.length)} / ${plan.history.length})`}</Text>
+            {plan.history.slice(0, 3).map((h, i) => (
+              <Text key={`hist-${i}`} dimColor>{`· ${h}`}</Text>
+            ))}
+          </Box>
+        ) : null}
         {card(
           <>
             <Text bold>{headline(stages, blocks, eta, formatDuration)}</Text>
