@@ -18,6 +18,8 @@ import {
   headline,
   nextAction,
   statusWords,
+  returnLine,
+  titleOf,
   describeRole,
   nodeIconSvg,
   stageRole,
@@ -2031,4 +2033,25 @@ test('recent-archived T2 진행 중 계획이 없으면 칸은 가장 최근에 
 
   expect((await ui.find({ type: 'Select', key: 'plan' }))?.props.value).toBe('20261022-alerts')
   await ui.unmount()
+})
+
+test('paused T10 보류인 계획은 "보류 · <먼저 할 계획> 끝나면 재개", 새 계획엔 돌아갈 곳, 정렬은 진행 중 바로 뒤', async () => {
+  const files = [
+    { slug: 'p-done', planText: '---\ntitle: 끝남\nstatus: done\n---\n', testsText: '' },
+    { slug: 'p-a', planText: '---\ntitle: 결제 화면\nstatus: paused\npaused_by: p-b\nresume_at: 2\n---\n', testsText: '' },
+    { slug: 'p-b', planText: '---\ntitle: 로그 정리\nstatus: in_progress\nreturn_to: p-a\n---\n', testsText: '' },
+    { slug: 'p-t', planText: '---\ntitle: 시험 중\nstatus: testing\n---\n', testsText: '' },
+  ]
+  const plans = parsePlans(files)
+  expect(plans.map(one => one.slug)).toEqual(['p-b', 'p-a', 'p-t', 'p-done'])
+  const a = plans.find(one => one.slug === 'p-a')!
+  const b = plans.find(one => one.slug === 'p-b')!
+  expect([a.pausedBy, a.resumeAt, a.returnTo, b.returnTo]).toEqual(['p-b', '2', '', 'p-a'])
+  expect(statusWords(a.status, [], titleOf(plans, a.pausedBy))).toBe('보류 · 로그 정리 끝나면 재개')
+  expect(statusWords('paused', [])).toBe('보류')
+  expect(returnLine(b, plans)).toBe('끝나면 돌아갈 계획: 결제 화면')
+  expect(returnLine(a, plans)).toBe('')
+  expect(titleOf(plans, 'gone')).toBe('gone')
+  expect(nextAction('p-a', 'paused', [], [])).toEqual({ text: '보류 중 — 먼저 할 계획이 끝나면 이어서 함', command: null })
+  expect(statusWords('in_progress', [{ name: 'a', state: 'doing', refs: [] }])).toBe('만드는 중')
 })

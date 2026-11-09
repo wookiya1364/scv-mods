@@ -17,6 +17,11 @@ export type Plan = {
   pipeline: PipelineStep[]
   isArchived: boolean
   archivedAt: string
+  // A plan set aside for another (status: paused): the plan it waits for and the step it resumes from;
+  // a plan made for such a detour: the plan to go back to. '' when absent.
+  pausedBy: string
+  resumeAt: string
+  returnTo: string
 }
 
 export type Stage = { name: string; state: StageState; refs: string[]; role?: string; note?: string }
