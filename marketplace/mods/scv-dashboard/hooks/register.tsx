@@ -979,8 +979,8 @@ export const register: Register = on => {
         {plan.history.length > 0 ? (
           <Box flexDirection="column">
             <Text dimColor>{`변경 이력 (최근 ${Math.min(3, plan.history.length)} / ${plan.history.length})`}</Text>
-            {plan.history.slice(0, 3).map((h, i) => (
-              <Text key={`hist-${i}`} dimColor>{`· ${h}`}</Text>
+            {plan.history.slice(0, 3).map((entry, i) => (
+              <Text key={`hist-${i}`} dimColor>{`· ${entry}`}</Text>
             ))}
           </Box>
         ) : null}

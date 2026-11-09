@@ -2092,3 +2092,20 @@ test('progress T15 단계 보고가 빠져도 계획 파일의 진행 줄로 단
   const [plan] = parsePlans([{ slug: 'p', planText, testsText: '' }])
   expect(plan!.steps.map(step => step.mark)).toEqual(['done', 'blocked', undefined, 'done'])
 })
+
+
+test('history T15 변경 이력이 있는 계획도 칸이 그려진다', async ($, on) => {
+  const planText = [
+    '---', 'title: 조합 밸런스', 'status: in_progress', '---', '',
+    '## Suggested path', '', '1. 하나', '',
+    '## 변경 이력', '',
+    '- **2026-11-09 21:56 선택** — 답: 지금 보관 (추천)', '',
+    '## Links', '',
+  ].join('\n')
+  engine(on, { p: { planText, testsText: '' } })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /^· 2026-11-09 21:56 선택/)).toBe('· 2026-11-09 21:56 선택 — 답: 지금 보관 (추천)')
+  await ui.unmount()
+})
