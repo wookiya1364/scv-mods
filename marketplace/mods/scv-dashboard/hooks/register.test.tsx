@@ -57,7 +57,9 @@ import {
   firstClause,
   archivedAtOf,
   parsePlans,
+  pickerPlans,
 } from './model'
+import type { Plan } from '../types'
 
 const PANE = {
   plugin: 'scv-dashboard',
@@ -2108,4 +2110,21 @@ test('history T15 변경 이력이 있는 계획도 칸이 그려진다', async 
 
   expect(await text(ui, /^· 2026-11-09 21:56 선택/)).toBe('· 2026-11-09 21:56 선택 — 답: 지금 보관 (추천)')
   await ui.unmount()
+})
+
+test('picker T1 계획이 64개를 넘으면 목록은 앞의 64개만, 보이는 계획은 늘 남는다', async ($, on) => {
+  const archived = Object.fromEntries(
+    Array.from({ length: 70 }, (_, i) => [`2026${String(i).padStart(4, '0')}-a`, { ...plan({ title: `보관 ${i}`, status: 'archived', steps: ['a'] }), record: `archived_at: 2026-10-${String((i % 28) + 1).padStart(2, '0')}T00:00:00Z` }]),
+  )
+  engine(on, {}, null, { at: 1_000_000 }, archived)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  const picker = await ui.find({ type: 'Select', key: 'plan' })
+  expect((picker?.props.options as unknown[]).length).toBe(64)
+  await ui.unmount()
+
+  const plans = Array.from({ length: 70 }, (_, i) => ({ slug: `p${i}` }) as Plan)
+  expect(pickerPlans(plans, 'p3').map(one => one.slug)).toEqual(plans.slice(0, 64).map(one => one.slug))
+  expect(pickerPlans(plans, 'p69').map(one => one.slug)).toEqual([...plans.slice(0, 63).map(one => one.slug), 'p69'])
 })

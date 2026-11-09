@@ -164,6 +164,17 @@ const rank = (status: string) => {
 export const pickPlan = (plans: readonly Plan[], chosen: string | null): Plan | undefined =>
   plans.find(plan => plan.slug === chosen) ?? plans[0]
 
+// The engine draws a Select of 1 to 64 options, so the plan list keeps the first ones in order (plans in progress, then
+// the most recently archived), the plan on screen always among them.
+export const PICKER_MAX = 64
+
+export const pickerPlans = (plans: readonly Plan[], shown: string): Plan[] => {
+  const first = plans.slice(0, PICKER_MAX)
+  const own = plans.find(plan => plan.slug === shown)
+
+  return own && !first.includes(own) ? [...first.slice(0, PICKER_MAX - 1), own] : first
+}
+
 export const deriveStages = (plan: Plan): { stages: Stage[]; isEstimated: boolean } => {
   const isMarked = plan.steps.some(step => step.mark)
   const isFinished = plan.status === 'done' || plan.status === 'archived'

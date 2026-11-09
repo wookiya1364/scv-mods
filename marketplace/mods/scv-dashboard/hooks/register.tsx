@@ -67,6 +67,7 @@ import {
   usageLine,
   estimateFromDurations,
   stepDurationsFromSignals,
+  pickerPlans,
 } from './model'
 
 const PANE = 'scv-dashboard'
@@ -968,7 +969,7 @@ export const register: Register = on => {
             key="plan"
             label="계획"
             value={plan.slug}
-            options={plans.map(one => ({ value: one.slug, label: `${one.title} (${one.status})` }))}
+            options={pickerPlans(plans, plan.slug).map(one => ({ value: one.slug, label: `${one.title} (${one.status})` }))}
             onSelect={(value: string) => void update($, chosen, () => value)}
           />
         ) : null}
