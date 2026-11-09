@@ -59,6 +59,8 @@ import {
   archivedAtOf,
   nextWorkingOn,
   statusWords,
+  titleOf,
+  returnLine,
   suggestNext,
   summarizeAway,
   usageAlerts,
@@ -972,7 +974,8 @@ export const register: Register = on => {
         ) : null}
         {plan.isArchived ? <Text dimColor>진행 중인 계획이 없어 최근 끝난 계획을 보여 줍니다.</Text> : null}
         {plans.length > 1 && Select ? null : <Text bold>{plan.title}</Text>}
-        <Text dimColor>{`상태: ${statusWords(plan.status, stages)}`}</Text>
+        <Text dimColor>{`상태: ${statusWords(plan.status, stages, plan.pausedBy ? titleOf(plans, plan.pausedBy) : '')}`}</Text>
+        {returnLine(plan, plans) ? <Text dimColor>{returnLine(plan, plans)}</Text> : null}
         {card(
           <>
             <Text bold>{headline(stages, blocks, eta, formatDuration)}</Text>

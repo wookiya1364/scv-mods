@@ -25,7 +25,7 @@ import type {
   WorkEntry,
 } from '../types'
 
-const STATUS_ORDER = ['in_progress', 'testing', 'planned', 'done', 'archived']
+const STATUS_ORDER = ['in_progress', 'paused', 'testing', 'planned', 'done', 'archived']
 
 const MARKS: readonly [RegExp, StageState][] = [
   [/^\[x\]\s*|^✅\s*/i, 'done'],
@@ -103,7 +103,17 @@ export const parsePlan = (file: PlanFile): Plan => ({
   pipeline: parsePipeline(file.planText),
   isArchived: file.isArchived === true,
   archivedAt: file.archivedAt ?? '',
+  pausedBy: frontmatter(file.planText, 'paused_by') ?? '',
+  resumeAt: frontmatter(file.planText, 'resume_at') ?? '',
+  returnTo: frontmatter(file.planText, 'return_to') ?? '',
 })
+
+// A plan's title from its folder name; the folder name itself when that plan is not in the list.
+export const titleOf = (plans: readonly Plan[], slug: string) => plans.find(plan => plan.slug === slug)?.title ?? slug
+
+// The line under the status for a plan made for another plan's detour: where the work goes when it ends.
+export const returnLine = (plan: Plan, plans: readonly Plan[]) =>
+  plan.returnTo ? `끝나면 돌아갈 계획: ${titleOf(plans, plan.returnTo)}` : ''
 
 // Plans by status; archived ones the most recently archived first (a plan with no record date last), then by name.
 export const parsePlans = (files: readonly PlanFile[]): Plan[] =>
@@ -820,8 +830,10 @@ export const nodeIconSvg = (state: StageState, next: StageState | null, height =
 }
 
 // The plan's status in plain words, read together with its steps so the two never disagree.
-export const statusWords = (status: string, stages: readonly Stage[]) => {
+// A paused plan names the plan it waits for (its title, given by the caller) when there is one.
+export const statusWords = (status: string, stages: readonly Stage[], waitsFor = '') => {
   const isAllDone = stages.length > 0 && stages.every(stage => stage.state === 'done')
+  if (status === 'paused') return waitsFor ? `보류 · ${waitsFor} 끝나면 재개` : '보류'
   if (status === 'archived') return '보관됨'
   if (status === 'done') return '끝남'
   if (status === 'planned') return '시작 전'
@@ -841,6 +853,7 @@ export const nextAction = (slug: string, status: string, stages: readonly Stage[
   if (blocks.some(block => block.kind === 'waiting')) return { text: 'Claude가 묻고 있어요 — 대화창에서 답하기', command: null }
   if (blocks.some(block => block.kind === 'test')) return { text: '시험 실패 — 고쳐서 다시 시험하기', command: `/scv:work ${slug}` }
   if (status === 'archived' || status === 'done') return { text: '끝난 계획 — 할 일 없음', command: null }
+  if (status === 'paused') return { text: '보류 중 — 먼저 할 계획이 끝나면 이어서 함', command: null }
   if (status === 'planned') return { text: '시작하기', command: `/scv:work ${slug}` }
   if (isAllDone) return { text: '모든 단계 끝 — 보관하기', command: `/scv:work ${slug} --archive` }
 
