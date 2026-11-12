@@ -18,6 +18,9 @@ import {
   applyAgentEvent,
   applyBlocks,
   applySignal,
+  applyTurn,
+  isBackgroundStart,
+  turnStateOf,
   applyTaskEvent,
   barColor,
   buildAlertText,
@@ -111,9 +114,9 @@ const limits = atom({ plugin: 'scv-dashboard', key: 'limits' } as const, [] as U
 const mirror = atom({ plugin: 'scv-dashboard', key: 'mirror' } as const, null as Mirror | null)
 const viewers = atom({ plugin: 'scv-dashboard', key: 'viewers' } as const, {} as Viewers)
 
-const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기' }
-const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○' }
-const STATE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#8b949e' }
+const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기', yourTurn: '사용자 차례' }
+const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○', yourTurn: '◉' }
+const STATE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#8b949e', yourTurn: '#a371f7' }
 const RESULT_LABEL = { pass: '통과', fail: '실패', none: '결과 없음' } as const
 const RESULT_COLOR = { pass: '#3fb950', fail: '#f85149', none: '#8b949e' } as const
 
@@ -645,7 +648,8 @@ export const register: Register = on => {
       return next(e)
     }
     const at = await $.clock.now()
-    await update($, live, value => ({ ...value, isWorking: true, turnStartedAt: at }))
+    // A new turn is work again: what the turn before left in the background has woken it, or the person has spoken.
+    await update($, live, value => ({ ...value, isWorking: true, turnStartedAt: at, background: false }))
     await update($, stopped, () => null)
     await update($, permit, () => null)
 
@@ -659,7 +663,7 @@ export const register: Register = on => {
 
       return ended
     }
-    await update($, live, value => ({ ...value, isWorking: false, tool: null }))
+    await update($, live, value => ({ ...value, isWorking: false, tool: null, hasEnded: true }))
     await update($, permit, () => null)
     const end = classifyTurnEnd(e.reason, e.durationMs)
     if (end.kind === 'stopped') {
@@ -768,7 +772,9 @@ export const register: Register = on => {
     // The main conversation's tool is the 'now' line; a subagent's goes on that agent's own line.
     const isMain = isMainLoop(e)
     if (isMain) {
-      await update($, live, value => ({ ...value, tool: { name: e.tool, target: describeTool(e.tool, input), startedAt: at } }))
+      // Work this turn leaves running will wake the session by itself: the turn's end is then not the person's turn.
+      const leavesWork = isBackgroundStart(e.tool, input)
+      await update($, live, value => ({ ...value, tool: { name: e.tool, target: describeTool(e.tool, input), startedAt: at }, ...(leavesWork ? { background: true } : {}) }))
       await update($, tasks, list => applyTaskEvent(list, e.tool, input))
     } else {
       await update($, agents, list => applyAgentEvent(list, { kind: 'tool', id: e.agentId ?? '', tool: e.tool, target: describeTool(e.tool, input), at }))
@@ -900,8 +906,9 @@ export const register: Register = on => {
     const run = runFor(plan, allRuns)
     const rows = mergeTests(plan, run)
     const blocks = findBlocks(derived.stages, run, asked, asking, halted)
-    const stages = applyBlocks(derived.stages, blocks)
-    const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked')
+    const turn = turnStateOf({ isWorking: state.isWorking, hasEnded: state.hasEnded === true, blocks, agents: team.length, background: state.background === true })
+    const stages = applyTurn(applyBlocks(derived.stages, blocks), turn)
+    const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked' || stage.state === 'yourTurn')
     const focused = (await read($, focusStep)) ?? (here >= 0 ? here : null)
     const focusedStage = focused === null ? undefined : stages[focused]
     const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
@@ -924,9 +931,9 @@ export const register: Register = on => {
       durations.length > 0
         ? estimateFromDurations(durations, count.total - count.done)
         : estimateEta(await read($, history), plan.slug, count.total - count.done)
-    const action = nextAction(plan.slug, plan.status, stages, blocks)
+    const action = nextAction(plan.slug, plan.status, stages, blocks, turn)
     const percent = count.total ? Math.round((count.done / count.total) * 100) : 0
-    const current = stages.find(stage => stage.state === 'doing' || stage.state === 'blocked')
+    const current = stages.find(stage => stage.state === 'doing' || stage.state === 'blocked' || stage.state === 'yourTurn')
     const doneTasks = todo.filter(task => task.status === 'completed').length
     const doingTask = todo.find(task => task.status === 'in_progress')
     const away = sinceAt

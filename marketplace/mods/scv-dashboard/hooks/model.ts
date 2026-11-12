@@ -21,6 +21,7 @@ import type {
   Task,
   TestRow,
   TestRun,
+  TurnState,
   UsageLimit,
   WorkEntry,
 } from '../types'
@@ -199,7 +200,7 @@ export const deriveStages = (plan: Plan): { stages: Stage[]; isEstimated: boolea
 
 export const countStages = (stages: readonly Stage[]) => ({
   done: stages.filter(stage => stage.state === 'done').length,
-  doing: stages.filter(stage => stage.state === 'doing').length,
+  doing: stages.filter(stage => stage.state === 'doing' || stage.state === 'yourTurn').length,
   blocked: stages.filter(stage => stage.state === 'blocked').length,
   waiting: stages.filter(stage => stage.state === 'waiting').length,
   total: stages.length,
@@ -269,6 +270,28 @@ export const applyBlocks = (stages: readonly Stage[], blocks: readonly Block[]):
   blocks.some(block => block.kind !== 'stage')
     ? stages.map(stage => (stage.state === 'doing' ? { ...stage, state: 'blocked' } : stage))
     : [...stages]
+
+// ── whose move: Claude's, the person's, or background work's ──
+
+// A tool call that leaves work running after the turn and wakes the session when it is done:
+// a command sent to the background, a watch, or a wake-up the session set for itself.
+export const isBackgroundStart = (tool: string, input: Record<string, unknown>) =>
+  (tool === 'Bash' && input.run_in_background === true) || tool === 'Monitor' || (tool === 'ScheduleWakeup' && input.stop !== true)
+
+// The person's turn: this session saw its main turn end, nothing live holds the work (an error, a permission
+// prompt and an open question show red on their own), and nothing the turn started still runs.
+// Work that will wake the session by itself is not the person's turn.
+export const turnStateOf = (input: { isWorking: boolean; hasEnded: boolean; blocks: readonly Block[]; agents: number; background: boolean }): TurnState => {
+  if (input.isWorking || !input.hasEnded) return 'working'
+  if (input.blocks.some(block => block.kind === 'stopped' || block.kind === 'permit' || block.kind === 'waiting')) return 'working'
+  if (input.agents > 0 || input.background) return 'background'
+
+  return 'yourTurn'
+}
+
+// On the person's turn the step in progress says so; a blocked step and every other step stay as they are.
+export const applyTurn = (stages: readonly Stage[], turn: TurnState): Stage[] =>
+  turn === 'yourTurn' ? stages.map(stage => (stage.state === 'doing' ? { ...stage, state: 'yourTurn' } : stage)) : [...stages]
 
 // What a step builds, said as the plan's pipeline: the rows it names, else the rows its words mention.
 export const stageRole = (stage: Stage, pipeline: readonly PipelineStep[]): PipelineStep[] => {
@@ -855,14 +878,14 @@ export const parseDreams = (text: string | null): Dreams | undefined => {
   }
 }
 
-export const NODE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#6e7681' }
+export const NODE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#6e7681', yourTurn: '#a371f7' }
 
 // One step's node as a small picture: a traffic-light circle, and below it the line to the next step
 // (solid after a finished step, dashed after any other; none after the last).
 export const nodeIconSvg = (state: StageState, next: StageState | null, height = 44) => {
   const color = NODE_COLOR[state]
   const fill = state === 'waiting' ? 'none' : color
-  const ring = state === 'doing' || state === 'blocked' ? `<circle cx="11" cy="11" r="10" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.5"/>` : ''
+  const ring = state === 'doing' || state === 'blocked' || state === 'yourTurn' ? `<circle cx="11" cy="11" r="10" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.5"/>` : ''
   const line =
     next === null
       ? ''
@@ -888,7 +911,7 @@ export const statusWords = (status: string, stages: readonly Stage[], waitsFor =
 export type NextAction = { text: string; command: string | null }
 
 // What the person can do next, and the command for it when there is one.
-export const nextAction = (slug: string, status: string, stages: readonly Stage[], blocks: readonly Block[]): NextAction => {
+export const nextAction = (slug: string, status: string, stages: readonly Stage[], blocks: readonly Block[], turn: TurnState = 'working'): NextAction => {
   const isAllDone = stages.length > 0 && stages.every(stage => stage.state === 'done')
   if (blocks.some(block => block.kind === 'stopped')) return { text: '멈췄어요 — 대화창에서 다시 시키기', command: null }
   if (blocks.some(block => block.kind === 'permit')) return { text: 'Claude가 허락을 기다려요 — 대화창에서 허락하기', command: null }
@@ -898,17 +921,19 @@ export const nextAction = (slug: string, status: string, stages: readonly Stage[
   if (status === 'paused') return { text: '보류 중 — 먼저 할 계획이 끝나면 이어서 함', command: null }
   if (status === 'planned') return { text: '시작하기', command: `/scv:work ${slug}` }
   if (isAllDone) return { text: '모든 단계 끝 — 보관하기', command: `/scv:work ${slug} --archive` }
+  if (stages.some(stage => stage.state === 'yourTurn')) return { text: '사용자 차례 — 대화창에서 이어서 하라고 말해 주세요', command: null }
+  if (turn === 'background') return { text: '배경 작업을 기다리는 중 — 끝나면 스스로 이어집니다', command: null }
 
   return { text: '진행 중 — 기다리면 됩니다', command: null }
 }
 
 // The one line at the top: where the work stands, whether anything is stuck, and the time left.
 export const headline = (stages: readonly Stage[], blocks: readonly Block[], eta: ReturnType<typeof estimateEta>, format: (ms: number) => string) => {
-  const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked')
+  const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked' || stage.state === 'yourTurn')
   const done = stages.filter(stage => stage.state === 'done').length
   const where =
     here >= 0
-      ? `${here + 1}단계 ${stages[here]?.state === 'blocked' ? '막힘' : '진행 중'}`
+      ? `${here + 1}단계 ${stages[here]?.state === 'blocked' ? '막힘' : stages[here]?.state === 'yourTurn' ? '사용자 차례' : '진행 중'}`
       : stages.length > 0 && done === stages.length
         ? '모든 단계 끝'
         : '시작 전'
@@ -923,7 +948,9 @@ export const barColor = (stages: readonly Stage[], blocks: readonly Block[]) =>
     ? NODE_COLOR.blocked
     : stages.length > 0 && stages.every(stage => stage.state === 'done')
       ? NODE_COLOR.done
-      : NODE_COLOR.doing
+      : stages.some(stage => stage.state === 'yourTurn')
+        ? NODE_COLOR.yourTurn
+        : NODE_COLOR.doing
 
 // ── mirror: another session's pane fed by this one ──────────────────────────
 // A Remote Control viewer cannot draw a pane, so a session the viewer's own app runs (a 'viewer session') asks the

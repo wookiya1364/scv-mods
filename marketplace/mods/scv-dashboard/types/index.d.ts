@@ -1,4 +1,9 @@
-export type StageState = 'done' | 'doing' | 'blocked' | 'waiting'
+// yourTurn: the step in progress while Claude's turn has ended and the work waits for the person's next message.
+// It exists on screen only — a plan's progress lines and Claude's step signals never carry it.
+export type StageState = 'done' | 'doing' | 'blocked' | 'waiting' | 'yourTurn'
+
+// Whose move it is: Claude is working, the person's message is awaited, or work Claude started in the background is.
+export type TurnState = 'working' | 'yourTurn' | 'background'
 
 export type StepMark = { name: string; mark: StageState | undefined; refs: string[]; role?: string; note?: string }
 
@@ -78,10 +83,14 @@ export type Dreams = { date: string; items: string[]; reportPath: string | null 
 // catalog: the project's pure-function dictionary, read with the plans.
 export type Snapshot = { plans: PlanFile[]; dreamsText: string | null; reportHtml?: string | null; cwd: string; root: string; catalog?: Catalog }
 
+// hasEnded: this session saw its own main turn end (a new session knows nothing of the turn before it).
+// background: the turn that ended last started work that will wake the session by itself.
 export type Live = {
   isWorking: boolean
   turnStartedAt: number
   tool: { name: string; target: string; startedAt: number } | null
+  hasEnded?: boolean
+  background?: boolean
 }
 
 export type Expanded = { steps: boolean; tests: boolean; blocks: boolean; dreams: boolean }

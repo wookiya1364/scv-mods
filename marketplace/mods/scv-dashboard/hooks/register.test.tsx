@@ -58,6 +58,10 @@ import {
   archivedAtOf,
   parsePlans,
   pickerPlans,
+  applyTurn,
+  isBackgroundStart,
+  turnStateOf,
+  NODE_COLOR,
 } from './model'
 import type { Plan } from '../types'
 
@@ -80,7 +84,7 @@ const plan = (opts: { title: string; status: string; steps: string[]; tests?: st
   testsText: `# Tests\n\n## Test scenarios\n\n${(opts.tests ?? []).map((name, i) => `### T${i + 1}. ${name}\n`).join('\n')}\n## How to run\n\n\`\`\`bash\nnpm run verify-dashboard\n\`\`\`\n`,
 })
 
-const st = (name: string, state: 'done' | 'doing' | 'blocked' | 'waiting') => ({ name, state, refs: [] as string[] })
+const st = (name: string, state: 'done' | 'doing' | 'blocked' | 'waiting' | 'yourTurn') => ({ name, state, refs: [] as string[] })
 
 const ELEVEN = ['[x] a', '[x] b', '[x] c', '[x] d', '[x] e', '[~] f', 'g', 'h', 'i', 'j', 'k']
 
@@ -2127,4 +2131,194 @@ test('picker T1 계획이 64개를 넘으면 목록은 앞의 64개만, 보이�
   const plans = Array.from({ length: 70 }, (_, i) => ({ slug: `p${i}` }) as Plan)
   expect(pickerPlans(plans, 'p3').map(one => one.slug)).toEqual(plans.slice(0, 64).map(one => one.slug))
   expect(pickerPlans(plans, 'p69').map(one => one.slug)).toEqual([...plans.slice(0, 63).map(one => one.slug), 'p69'])
+})
+
+// ── your-turn: the step in progress says whose move it is (plan 20261112-wookiya1364-dashboard-your-turn) ──
+// Claude's turn has ended and the work waits for the person: that step is not 'in progress — just wait'.
+
+const ENDED = { isWorking: false, hasEnded: true, blocks: [], agents: 0, background: false } as const
+const YOUR_TURN = '다음: 사용자 차례 — 대화창에서 이어서 하라고 말해 주세요'
+const BACKGROUND = '다음: 배경 작업을 기다리는 중 — 끝나면 스스로 이어집니다'
+
+test('your-turn T1 차례가 끝났고 막는 것도 배경 작업도 없으면 사용자 차례', () => {
+  expect(turnStateOf(ENDED)).toBe('yourTurn')
+})
+
+test('your-turn T2 일하는 중 · 빨강 멈춤 · 배경 작업은 사용자 차례가 아니다', () => {
+  const block = (kind: 'waiting' | 'permit' | 'stopped') => [{ kind, title: '', detail: '' }]
+
+  expect(turnStateOf({ ...ENDED, isWorking: true })).toBe('working')
+  // 이 세션이 차례의 끝을 본 적이 없으면(막 열린 세션) 아는 것이 없다 — 지금처럼 둔다
+  expect(turnStateOf({ ...ENDED, hasEnded: false })).toBe('working')
+  expect(turnStateOf({ ...ENDED, blocks: block('waiting') })).toBe('working')
+  expect(turnStateOf({ ...ENDED, blocks: block('permit') })).toBe('working')
+  expect(turnStateOf({ ...ENDED, blocks: block('stopped') })).toBe('working')
+  expect(turnStateOf({ ...ENDED, agents: 1 })).toBe('background')
+  expect(turnStateOf({ ...ENDED, background: true })).toBe('background')
+
+  expect(isBackgroundStart('Bash', { command: 'x', run_in_background: true })).toBe(true)
+  expect(isBackgroundStart('Bash', { command: 'x' })).toBe(false)
+  expect(isBackgroundStart('ScheduleWakeup', { delaySeconds: 600 })).toBe(true)
+  expect(isBackgroundStart('ScheduleWakeup', { stop: true })).toBe(false)
+  expect(isBackgroundStart('Monitor', {})).toBe(true)
+  expect(isBackgroundStart('Read', { file_path: 'a' })).toBe(false)
+})
+
+test('your-turn T3 사용자 차례일 때만 하는 중인 단계 하나가 바뀐다', () => {
+  const stages = [st('a', 'done'), st('b', 'doing'), st('c', 'waiting'), st('d', 'waiting')]
+  const states = (turn: 'working' | 'yourTurn' | 'background') => applyTurn(stages, turn).map(stage => stage.state)
+
+  expect(states('yourTurn')).toEqual(['done', 'yourTurn', 'waiting', 'waiting'])
+  expect(states('background')).toEqual(['done', 'doing', 'waiting', 'waiting'])
+  expect(states('working')).toEqual(['done', 'doing', 'waiting', 'waiting'])
+  expect(applyTurn([st('a', 'done'), st('b', 'blocked'), st('c', 'waiting')], 'yourTurn').map(stage => stage.state)).toEqual(['done', 'blocked', 'waiting'])
+})
+
+test('your-turn T4 새 색은 지금 쓰는 색들과 다르고, 단계 점과 진행 막대에 쓰인다', () => {
+  expect([NODE_COLOR.done, NODE_COLOR.doing, NODE_COLOR.blocked, NODE_COLOR.waiting]).toEqual(['#3fb950', '#e3b341', '#f85149', '#6e7681'])
+  // 초록 · 노랑 · 빨강 · 회색 둘, 그리고 '일하는 중' 글의 파랑
+  expect(['#3fb950', '#e3b341', '#f85149', '#6e7681', '#8b949e', '#4f8cff']).not.toContain(NODE_COLOR.yourTurn)
+  expect(nodeIconSvg('yourTurn', 'waiting')).toContain(`fill="${NODE_COLOR.yourTurn}"`)
+  expect(barColor([st('a', 'done'), st('b', 'yourTurn')], [])).toBe(NODE_COLOR.yourTurn)
+  expect(barColor([st('a', 'done'), st('b', 'doing')], [])).toBe('#e3b341')
+  expect(barColor([st('a', 'yourTurn')], [{ kind: 'test', title: '', detail: '' }])).toBe('#f85149')
+})
+
+test('your-turn T5 윗줄과 다음 할 일이 사용자 차례와 배경 작업 기다림을 말한다', () => {
+  const doing = [st('a', 'done'), st('b', 'doing'), st('c', 'waiting')]
+  const yours = applyTurn(doing, 'yourTurn')
+
+  expect(headline(yours, [], { kind: 'unknown' }, String)).toBe('2단계 사용자 차례 · 막힘 없음 · 남은 시간 추정 불가')
+  expect(nextAction('s', 'in_progress', yours, [], 'yourTurn')).toEqual({ text: '사용자 차례 — 대화창에서 이어서 하라고 말해 주세요', command: null })
+  expect(headline(doing, [], { kind: 'unknown' }, String)).toBe('2단계 진행 중 · 막힘 없음 · 남은 시간 추정 불가')
+  expect(nextAction('s', 'in_progress', doing, [], 'background')).toEqual({ text: '배경 작업을 기다리는 중 — 끝나면 스스로 이어집니다', command: null })
+  expect(nextAction('s', 'in_progress', doing, [], 'working')).toEqual({ text: '진행 중 — 기다리면 됩니다', command: null })
+  expect(nextAction('s', 'in_progress', doing, [])).toEqual({ text: '진행 중 — 기다리면 됩니다', command: null })
+})
+
+test('your-turn T6 차례가 끝나면 사용자 차례, 다시 시작되면 진행 중으로 돌아온다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  turnEngine(on)
+  await start($)
+
+  // 막 열린 세션: 이 세션이 차례의 끝을 본 적이 없다 — 지금처럼 진행 중
+  const fresh = await drawnText($)
+  expect(fresh).toContain('2단계 진행 중')
+  expect(fresh).not.toContain('사용자 차례')
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const working = await drawnText($)
+  expect(working).toContain('2단계 진행 중')
+  expect(working).not.toContain('사용자 차례')
+  expect(working).not.toContain(NODE_COLOR.yourTurn)
+
+  await turnEnd($, 'answer', 5_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^다음: /)).toBe(YOUR_TURN)
+  expect(await text(ui, /^2단계 /)).toBe('2단계 사용자 차례 · 막힘 없음 · 남은 시간 추정 불가')
+  expect(await text(ui, /지금 여기$/)).toBe('사용자 차례  ◀ 지금 여기')
+  await ui.unmount()
+  expect(await drawnText($)).toContain(`"backgroundColor":"${NODE_COLOR.yourTurn}"`)
+
+  await $.turn.start({ text: '이어서 해', turnId: 't2' })
+  const again = await drawnText($)
+  expect(again).toContain('2단계 진행 중')
+  expect(again).not.toContain('사용자 차례')
+  expect(again).not.toContain(NODE_COLOR.yourTurn)
+})
+
+test('your-turn T6b 사용자가 멈춘 차례 뒤에도 사용자 차례', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b'] }) })
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'aborted', 5_000)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^다음: /)).toBe(YOUR_TURN)
+  await ui.unmount()
+})
+
+test('your-turn T7 빨강 멈춤과 배경 작업은 사용자 차례로 보이지 않는다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  turnEngine(on)
+  agentEngine(on)
+  const asked: string[] = []
+  on('tool.call', async (_, e) => {
+    if (e.tool === 'AskUserQuestion') asked.push(await drawnText($))
+
+    return { result: {} }
+  })
+  await start($)
+
+  // (가) 차례가 끝난 뒤 선택 창이 떠 있는 동안: 빨강 그대로
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'answer', 5_000)
+  await $.tool.call({ tool: 'AskUserQuestion', questions: [{ question: 'X 할까요?', header: 'h', multiSelect: false, options: [{ label: 'a', description: '' }, { label: 'b', description: '' }] }] })
+  expect(asked[0]).toContain('답을 기다리는 중')
+  expect(asked[0]).toContain('2단계 막힘')
+  expect(asked[0]).not.toContain('사용자 차례')
+
+  // (나) 오류로 끝난 차례: 빨강 멈춤
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await turnEnd($, 'error', 5_000)
+  const halted = await drawnText($)
+  expect(halted).toContain('멈춤 — 오류')
+  expect(halted).not.toContain('사용자 차례')
+
+  // (다) 배경으로 명령을 띄우고 끝난 차례: 노랑 그대로, 글만 배경 작업 기다림
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'sleep 600', run_in_background: true } as never)
+  await turnEnd($, 'answer', 5_000)
+  const waitingForWork = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(waitingForWork, /^다음: /)).toBe(BACKGROUND)
+  expect(await text(waitingForWork, /지금 여기$/)).toBe('진행 중  ◀ 지금 여기')
+  await waitingForWork.unmount()
+  expect(await drawnText($)).not.toContain('사용자 차례')
+
+  // 그 배경 작업이 세션을 깨워 차례가 돌고, 아무것도 남기지 않고 끝나면: 사용자 차례
+  await $.turn.start({ text: '<task-notification>done</task-notification>', turnId: 't1' })
+  await turnEnd($, 'answer', 5_000)
+  const woken = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(woken, /^다음: /)).toBe(YOUR_TURN)
+  await woken.unmount()
+
+  // (라) 보조 작업이 도는 채 끝난 차례: 배경 작업 기다림, 그 보조 작업이 끝나면 사용자 차례
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await spawn($, '둘러보기')
+  await turnEnd($, 'answer', 5_000)
+  const withAgent = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(withAgent, /^다음: /)).toBe(BACKGROUND)
+  await withAgent.unmount()
+  await $.turn.complete({ turnId: 'a1', answer: '', durationMs: 1, isAborted: false, reason: 'answer', agentId: 'ag-둘러보기' } as never)
+  const agentDone = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(agentDone, /^다음: /)).toBe(YOUR_TURN)
+  await agentDone.unmount()
+})
+
+test('your-turn T8 거울 세션도 받은 상태로 사용자 차례 · 배경 작업 기다림을 그린다', async ($, on) => {
+  const env = engine(on, {})
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  const hostPlan = { slug: 'p', isArchived: false, ...plan({ title: '작업 세션 계획', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) }
+  const send = (live: Record<string, unknown>, sentAt: number) =>
+    $.session.receive({
+      origin: { kind: 'peer' },
+      text: envelope(mirrorText({ kind: 'state', body: JSON.stringify({ snapshot: { plans: [hostPlan], dreamsText: null, cwd: '/host', root: '/host' }, live, sentAt }) })),
+    })
+
+  await send({ isWorking: false, turnStartedAt: 0, tool: null, hasEnded: true }, 1)
+  expect(await drawnText($)).toContain('2단계 사용자 차례')
+
+  await send({ isWorking: false, turnStartedAt: 0, tool: null, hasEnded: true, background: true }, 2)
+  const waitingForWork = await drawnText($)
+  expect(waitingForWork).toContain('배경 작업을 기다리는 중')
+  expect(waitingForWork).not.toContain('사용자 차례')
+
+  // 새 표시를 모르는 옛 버전의 작업 세션이 보낸 상태: 지금처럼 진행 중
+  await send({ isWorking: false, turnStartedAt: 0, tool: null }, 3)
+  const old = await drawnText($)
+  expect(old).toContain('2단계 진행 중')
+  expect(old).not.toContain('사용자 차례')
 })
