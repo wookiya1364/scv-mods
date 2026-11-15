@@ -796,6 +796,9 @@ export const formatReset = (iso: string, offsetMinutes: number, withDate: boolea
 const percentOf = (limit: UsageLimit) => `${Math.round(limit.percentUsed * 10) / 10}%`
 
 // '5시간 72% · 17:40 초기화 · 7일 31%': the 5-hour reset always, a longer window's when it is nearly used up.
+// The context window's fill as the card shows it; nothing before the first reply has a reading.
+export const contextLine = (percent: number | null): string | null => (percent === null ? null : `${Math.round(percent)}%`)
+
 export const usageLine = (limits: readonly UsageLimit[], offsetMinutes: number, nearlyAt = 90): string | null => {
   if (limits.length === 0) return null
   const ordered = [...limits].sort((a, b) => rankOf(a.kind) - rankOf(b.kind))

@@ -68,6 +68,7 @@ import {
   summarizeAway,
   usageAlerts,
   usageLine,
+  contextLine,
   estimateFromDurations,
   stepDurationsFromSignals,
   pickerPlans,
@@ -111,6 +112,8 @@ const stopped = atom({ plugin: 'scv-dashboard', key: 'stopped' } as const, null 
 const agents = atom({ plugin: 'scv-dashboard', key: 'agents' } as const, [] as AgentState[])
 const since = atom({ plugin: 'scv-dashboard', key: 'since' } as const, null as Since | null)
 const limits = atom({ plugin: 'scv-dashboard', key: 'limits' } as const, [] as UsageLimit[])
+// How full the context window is, 0 to 100, from the same free usage read; null before the first reply.
+const contextFill = atom({ plugin: 'scv-dashboard', key: 'contextFill' } as const, null as number | null)
 const mirror = atom({ plugin: 'scv-dashboard', key: 'mirror' } as const, null as Mirror | null)
 const viewers = atom({ plugin: 'scv-dashboard', key: 'viewers' } as const, {} as Viewers)
 
@@ -250,6 +253,7 @@ const checkUsage = async ($: Api, at: number) => {
   const usage = await $.session.usage().catch(() => undefined)
   const windows: UsageLimit[] = (usage?.rateLimits ?? []).map(limit => ({ kind: limit.kind, percentUsed: limit.percentUsed, ...(limit.resetsAt ? { resetsAt: limit.resetsAt } : {}) }))
   await update($, limits, () => windows)
+  await update($, contextFill, () => (typeof usage?.context?.percent === 'number' ? usage.context.percent : null))
   if (!windows.some(limit => limit.percentUsed >= 90)) return
   const kept = await $.store.get('usageAlerted').catch(() => undefined)
   const due = usageAlerts(windows, Array.isArray(kept) ? (kept as string[]) : [], offsetAt(at))
@@ -400,6 +404,7 @@ const mirrorState = async ($: Api) => ({
   agents: await read($, agents),
   since: await read($, since),
   limits: await read($, limits),
+  contextFill: await read($, contextFill),
   hostName: sessionName(await sessionFiles($), await $.session.id()),
   inView: (await planInView($))?.slug ?? null,
 })
@@ -435,6 +440,7 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, agents, () => state.agents ?? [])
   await update($, since, () => state.since ?? null)
   await update($, limits, () => state.limits ?? [])
+  await update($, contextFill, () => (typeof state.contextFill === 'number' ? state.contextFill : null))
   await update($, hostInView, () => (typeof state.inView === 'string' ? state.inView : null))
   const at = await $.clock.now()
   const name = typeof state.hostName === 'string' ? state.hostName : (mirrored.name ?? null)
@@ -945,6 +951,7 @@ export const register: Register = on => {
       : null
     const agentRows = agentLines(team, at, formatDuration)
     const usage = usageLine(await read($, limits), offsetAt(at))
+    const context = contextLine(await read($, contextFill))
 
     function dreamsPart() {
       return card(
@@ -1075,6 +1082,12 @@ export const register: Register = on => {
               <Box flexDirection="row" gap={1}>
                 <Text bold>사용 한도</Text>
                 <Text dimColor>{usage}</Text>
+              </Box>
+            ) : null}
+            {context ? (
+              <Box flexDirection="row" gap={1}>
+                <Text bold>컨텍스트</Text>
+                <Text dimColor>{context}</Text>
               </Box>
             ) : null}
           </>,

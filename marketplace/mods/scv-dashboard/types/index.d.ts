@@ -128,6 +128,7 @@ declare module 'claude-code' {
       agents: AgentState[]
       since: Since | null
       limits: UsageLimit[]
+      contextFill?: number | null
       mirror: Mirror | null
       viewers: Viewers
     }

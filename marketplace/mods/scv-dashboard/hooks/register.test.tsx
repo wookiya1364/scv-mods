@@ -41,6 +41,7 @@ import {
   suggestNext,
   usageAlerts,
   usageLine,
+  contextLine,
   isMirrorDue,
   isOwnAddress,
   isViewerOf,
@@ -1392,6 +1393,28 @@ test('prompt-usage T7 한도 정보가 없으면 줄이 없다', async ($, on) =
 
   expect(await drawnText($)).not.toContain('5시간')
   expect(await drawnText($)).not.toContain('사용 한도')
+})
+
+test('prompt-usage T9 컨텍스트 차오름을 사용 한도 아래 따로 한 줄로 보인다', async ($, on) => {
+  expect(contextLine(33.6)).toBe('34%')
+  expect(contextLine(null)).toBeNull()
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, tokens: 67000, percent: 33.6 }, rateLimits: LIMITS } }) as never)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^컨텍스트$/)).toBe('컨텍스트')
+  expect(await text(ui, /^34%$/)).toBe('34%')
+  expect(await text(ui, /^사용 한도$/)).toBe('사용 한도')
+  await ui.unmount()
+})
+
+test('prompt-usage T10 컨텍스트 값이 없으면 줄이 없다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000 }, rateLimits: LIMITS } }) as never)
+  await start($)
+
+  expect(await drawnText($)).not.toContain('컨텍스트')
 })
 
 test('prompt-usage T8 명령 복사 버튼은 그대로 있다', async ($, on) => {
