@@ -28,6 +28,8 @@ import {
   buildStepPrompt,
   checkSignal,
   mergeMarks,
+  activeSteps,
+  nextStarted,
   stepDurationsFromSignals,
   estimateFromDurations,
   buildAlertText,
@@ -767,8 +769,8 @@ test('step-signal T3 틀린 신호는 거절하고 이유를 돌려준다', asyn
 
   expect((await signal($, 1, 'done', undefined, 'nope')).deny).toContain('그런 진행 중 계획이 없습니다: nope')
   expect((await signal($, 9, 'done')).deny).toContain('단계는 1~5')
-  expect((await signal($, 4, 'blocked', '막힘')).deny).toContain('막힘은 지금 단계(2번)에만')
-  expect((await signal($, 4, 'doing')).deny).toContain('진행은 지금 단계(2번)에만')
+  expect((await signal($, 1, 'blocked', '막힘')).deny).toContain('1단계는 이미 끝났습니다')
+  expect((await signal($, 1, 'doing')).deny).toContain('1단계는 이미 끝났습니다')
   expect((await signal($, 2, 'blocked')).deny).toContain('이유(note)')
   expect((await signal($, 2, 'paused')).deny).toContain('doing · done · blocked')
   expect(store.get('signals:/work')).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 1_000_000 }])
@@ -2736,4 +2738,129 @@ test('mirror-no-reask T4 스스로 묻는 것은 상태를 못 받은 동안 주
   expect(isMirrorAskDue({ at: 0, from: 'a' }, 'a')).toBe(false)
   expect(isMirrorAskDue({ at: 0, from: 'a' }, 'b')).toBe(true)
   expect(isMirrorAskDue({ at: 1_000_000, from: 'a' }, 'b')).toBe(false)
+})
+
+// ── parallel-steps plan ──────────────────────────────────────────────────────
+
+const statesOf = (steps: string[], reported: { step: number; state: 'doing' | 'done' | 'blocked' }[], extra = '') => {
+  const file = plan({ title: 'p', status: 'in_progress', steps })
+  const parsed = parsePlan({ slug: 'a', ...file, planText: file.planText + extra })
+
+  return deriveStages(mergeMarks(parsed, reported.map(one => ({ plan: 'a', note: '', at: 0, ...one })))).stages.map(stage => stage.state)
+}
+
+test('parallel-steps T1 두 단계의 시작을 차례로 알리면 둘 다 진행 중이다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  await signal($, 1, 'done')
+  const second = await signal($, 2, 'doing')
+  const fourth = await signal($, 4, 'doing')
+  expect(second.deny).toBeUndefined()
+  expect(fourth.deny).toBeUndefined()
+  expect(String(fourth.result)).toContain('진행 중: 2 · 4단계')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^완료 \d/)).toBe('완료 1 · 진행 2 · 막힘 0 · 대기 2 — 단계를 누르면 자세히')
+  expect(String(await text(ui, /단계 진행 중 · 막힘/)).startsWith('2 · 4단계 진행 중')).toBe(true)
+  expect((await ui.findAll({ type: 'Text', text: /지금 여기/ })).length).toBe(2)
+  await ui.unmount()
+})
+
+test('parallel-steps T2 한 단계가 끝나도 다른 단계는 진행 중으로 남는다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  await signal($, 1, 'done')
+  await signal($, 2, 'doing')
+  await signal($, 4, 'doing')
+  const ended = await signal($, 2, 'done')
+  expect(String(ended.result)).toContain('2/5')
+  expect(String(ended.result)).toContain('진행 중: 4단계')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^완료 \d/)).toBe('완료 2 · 진행 1 · 막힘 0 · 대기 2 — 단계를 누르면 자세히')
+  await ui.unmount()
+
+  const reported = [
+    { step: 1, state: 'done' as const },
+    { step: 2, state: 'done' as const },
+    { step: 4, state: 'doing' as const },
+  ]
+  expect(statesOf(FIVE, reported)).toEqual(['done', 'done', 'waiting', 'doing', 'waiting'])
+  // 알린 진행이 없어지면 첫 단계 규칙이 돌아온다
+  expect(statesOf(FIVE, [...reported.slice(0, 2), { step: 4, state: 'done' }])).toEqual(['done', 'done', 'doing', 'done', 'waiting'])
+})
+
+test('parallel-steps T3 이미 끝난 단계에 시작 · 막힘을 보내면 거절한다', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  await signal($, 1, 'done')
+
+  expect((await signal($, 1, 'doing')).deny).toContain('1단계는 이미 끝났습니다')
+  expect((await signal($, 1, 'blocked', '이유')).deny).toContain('1단계는 이미 끝났습니다')
+  expect(store.get('signals:/work')).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 1_000_000 }])
+})
+
+test('parallel-steps T4 뒤 단계의 막힘도 받는다 — 진행 중인 다른 단계는 그대로', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  await start($)
+  await signal($, 1, 'done')
+  await signal($, 2, 'doing')
+  await signal($, 4, 'doing')
+  expect((await signal($, 4, 'blocked', '시험 실패')).deny).toBeUndefined()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(String(await text(ui, /단계 막힘 · /)).startsWith('4단계 막힘 · 2단계 진행 중')).toBe(true)
+  expect(await text(ui, /시험 실패/)).toBe('d — 시험 실패')
+  await ui.unmount()
+  expect(
+    statesOf(FIVE, [
+      { step: 1, state: 'done' },
+      { step: 2, state: 'doing' },
+      { step: 4, state: 'blocked' },
+    ]),
+  ).toEqual(['done', 'doing', 'waiting', 'blocked', 'waiting'])
+})
+
+test('parallel-steps T5 손으로 남은 표시는 뒤 단계를 열지 않는다 — 알린 단계만 연다', () => {
+  expect(statesOf(['[x] a', 'b', '[~] c'], [])).toEqual(['done', 'doing', 'waiting'])
+  expect(statesOf(['[x] a', 'b', 'c'], [{ step: 3, state: 'doing' }])).toEqual(['done', 'waiting', 'doing'])
+  expect(statesOf(['[x] a', 'b', 'c'], [], '\n## 변경 이력\n\n- **2026-11-16 진행** — 3단계 시작: 먼저 함\n')).toEqual(['done', 'waiting', 'doing'])
+})
+
+test('parallel-steps T6 맨 위 한 줄은 이어진 번호를 줄여 말한다', () => {
+  const line = (doing: number[], total = 14) =>
+    headline(
+      Array.from({ length: total }, (_, i) => st(`s${i + 1}`, doing.includes(i + 1) ? 'doing' : i + 1 < Math.min(...doing, total + 1) ? 'done' : 'waiting')),
+      [],
+      { kind: 'unknown' },
+      String,
+    )
+  expect(line([5]).startsWith('5단계 진행 중 · ')).toBe(true)
+  expect(line([5, 6]).startsWith('5 · 6단계 진행 중 · ')).toBe(true)
+  expect(line([6, 7, 8, 9, 10, 11, 12, 13]).startsWith('6~13단계 진행 중 · ')).toBe(true)
+  expect(line([2, 4, 5, 6]).startsWith('2 · 4~6단계 진행 중 · ')).toBe(true)
+  expect(headline([st('a', 'waiting'), st('b', 'waiting')], [], { kind: 'unknown' }, String).startsWith('시작 전 · ')).toBe(true)
+  expect(activeSteps([st('a', 'done'), st('b', 'doing'), st('c', 'waiting'), st('d', 'blocked'), st('e', 'doing')])).toEqual([
+    { state: 'blocked', steps: [4] },
+    { state: 'doing', steps: [2, 5] },
+  ])
+})
+
+test('parallel-steps T7 작업은 가장 늦게 시작해 아직 끝나지 않은 단계에 적힌다', () => {
+  const last = (list: { plan: string; step: number }[]) => list[list.length - 1]?.step
+  const first = nextStarted([], { plan: 'a', step: 2, state: 'doing' })
+  const second = nextStarted(first, { plan: 'a', step: 4, state: 'doing' })
+  const third = nextStarted(second, { plan: 'a', step: 4, state: 'done' })
+  const fourth = nextStarted(third, { plan: 'a', step: 2, state: 'blocked' })
+  expect([last(first), last(second), last(third), last(fourth)]).toEqual([2, 4, 2, undefined])
+  expect(nextStarted(second, { plan: 'a', step: 2, state: 'doing' })).toEqual([
+    { plan: 'a', step: 4 },
+    { plan: 'a', step: 2 },
+  ])
+})
+
+test('parallel-steps T8 사용자 차례 · 답 기다림은 진행 중인 단계 모두에 덧칠된다', () => {
+  const stages = [st('a', 'done'), st('b', 'doing'), st('c', 'waiting'), st('d', 'doing')]
+  expect(applyTurn(stages, 'yourTurn').map(stage => stage.state)).toEqual(['done', 'yourTurn', 'waiting', 'yourTurn'])
+  expect(applyBlocks(stages, [{ kind: 'waiting', title: '', detail: '' }]).map(stage => stage.state)).toEqual(['done', 'blocked', 'waiting', 'blocked'])
 })

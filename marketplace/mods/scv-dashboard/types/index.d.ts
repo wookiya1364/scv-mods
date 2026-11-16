@@ -5,7 +5,9 @@ export type StageState = 'done' | 'doing' | 'blocked' | 'waiting' | 'yourTurn'
 // Whose move it is: Claude is working, the person's message is awaited, or work Claude started in the background is.
 export type TurnState = 'working' | 'yourTurn' | 'background'
 
-export type StepMark = { name: string; mark: StageState | undefined; refs: string[]; role?: string; note?: string }
+// isReported: the mark came from a report of the step itself (a step signal, a progress line), not from a mark
+// left in the plan's step list — only a reported step past the first open one shows as in progress.
+export type StepMark = { name: string; mark: StageState | undefined; refs: string[]; role?: string; note?: string; isReported?: boolean }
 
 export type PipelineStep = { name: string; role: string; io: string; kind: string }
 
@@ -145,7 +147,7 @@ declare module 'claude-code' {
       stepLog: Record<string, WorkEntry[]>
       stepFunctions: Record<string, StepFunctions>
       showCalls: boolean
-      workingOn: { plan: string; step: number } | null
+      startedSteps: { plan: string; step: number }[]
       signals: StepSignal[]
       permit: Permit | null
       stopped: Stopped | null

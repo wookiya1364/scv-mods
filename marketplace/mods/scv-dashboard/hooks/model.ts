@@ -119,7 +119,7 @@ export const progressMarks = (planText: string): Map<number, 'doing' | 'done' | 
 const withProgress = (steps: StepMark[], planText: string): StepMark[] => {
   const marks = progressMarks(planText)
 
-  return steps.map((step, i) => (step.mark || !marks.has(i + 1) ? step : { ...step, mark: marks.get(i + 1) }))
+  return steps.map((step, i) => (step.mark || !marks.has(i + 1) ? step : { ...step, mark: marks.get(i + 1), isReported: true }))
 }
 
 export const parsePlan = (file: PlanFile): Plan => ({
@@ -187,12 +187,25 @@ export const deriveStages = (plan: Plan): { stages: Stage[]; isEstimated: boolea
 
   if (isFinished) return { stages: plan.steps.map(step => ({ name: step.name, refs: step.refs, ...(step.role ? { role: step.role } : {}), state: 'done' })), isEstimated: !isMarked }
 
-  // Work stands at one place: the first step not done. Only that step may be doing or blocked;
-  // a later step has not started, so whatever its mark says it is still waiting.
+  // A step reported as started or blocked (a step signal, a progress line) is so wherever it stands: steps worked on
+  // at the same time are all in progress. With no such report, work stands at one place — the first step not done —
+  // and only that step may be doing or blocked: a mark left by hand on a later step says nothing, it is still waiting.
   const current = plan.steps.findIndex(step => step.mark !== 'done')
+  const isReportedOpen = (step: StepMark) => step.isReported === true && (step.mark === 'doing' || step.mark === 'blocked')
+  const hasReportedOpen = plan.steps.some(isReportedOpen)
   const stages: Stage[] = plan.steps.map((step, i) => {
     const state: StageState =
-      step.mark === 'done' ? 'done' : i !== current ? 'waiting' : step.mark === 'blocked' ? 'blocked' : step.mark === 'doing' || isStarted ? 'doing' : 'waiting'
+      step.mark === 'done'
+        ? 'done'
+        : isReportedOpen(step)
+          ? (step.mark ?? 'doing')
+          : i !== current
+            ? 'waiting'
+            : step.mark === 'blocked'
+              ? 'blocked'
+              : step.mark === 'doing' || (isStarted && !hasReportedOpen)
+                ? 'doing'
+                : 'waiting'
 
     const stage: Stage = { name: step.name, refs: step.refs, ...(step.role ? { role: step.role } : {}), state }
 
@@ -612,7 +625,8 @@ export type SignalInput = { plan: string; step: number; state: string; note?: st
 
 export type SignalCheck = { isOk: true } | { isOk: false; reason: string }
 
-// Plan marks and signals as one: a step either side calls done is done; otherwise the latest signal speaks.
+// Plan marks and signals as one: a step either side calls done is done; otherwise the latest signal speaks,
+// and the step is marked as reported — which is what lets a step past the first open one show as in progress.
 export const mergeMarks = (plan: Plan, signals: readonly StepSignal[]): Plan => {
   const own = signals.filter(signal => signal.plan === plan.slug)
   if (own.length === 0) return plan
@@ -623,12 +637,13 @@ export const mergeMarks = (plan: Plan, signals: readonly StepSignal[]): Plan => 
       const signal = own.find(one => one.step === i + 1)
       if (!signal || step.mark === 'done') return step
 
-      return signal.note ? { ...step, mark: signal.state, note: signal.note } : { ...step, mark: signal.state }
+      return signal.note ? { ...step, mark: signal.state, note: signal.note, isReported: true } : { ...step, mark: signal.state, isReported: true }
     }),
   }
 }
 
-// A signal must name a plan in progress and a step it has; doing and blocked only at the step the work stands on.
+// A signal must name a plan in progress and a step it has; doing and blocked go to any step not yet done, so steps
+// worked on at the same time can each be reported — only a step already done takes neither.
 export const checkSignal = (input: SignalInput, plans: readonly Plan[], signals: readonly StepSignal[]): SignalCheck => {
   const open = plans.filter(plan => !plan.isArchived && plan.status !== 'done')
   const plan = open.find(one => one.slug === input.plan)
@@ -639,26 +654,38 @@ export const checkSignal = (input: SignalInput, plans: readonly Plan[], signals:
   if (!(SIGNAL_STATES as readonly string[]).includes(input.state)) return { isOk: false, reason: 'state 는 doing · done · blocked 중 하나입니다' }
   if (input.state === 'blocked' && !input.note?.trim()) return { isOk: false, reason: '막힘에는 이유(note)가 필요합니다' }
   if (input.state !== 'done') {
-    const current = mergeMarks(plan, signals).steps.findIndex(step => step.mark !== 'done') + 1
-    if (current === 0) return { isOk: false, reason: '모든 단계가 이미 끝났습니다' }
-    if (input.step !== current) {
-      return { isOk: false, reason: `${input.state === 'blocked' ? '막힘' : '진행'}은 지금 단계(${current}번)에만 보낼 수 있습니다` }
+    const steps = mergeMarks(plan, signals).steps
+    if (steps.every(step => step.mark === 'done')) return { isOk: false, reason: '모든 단계가 이미 끝났습니다' }
+    if (steps[input.step - 1]?.mark === 'done') {
+      return { isOk: false, reason: `${input.step}단계는 이미 끝났습니다 — ${input.state === 'blocked' ? '막힘' : '진행'}은 끝나지 않은 단계에만 보낼 수 있습니다` }
     }
   }
 
   return { isOk: true }
 }
 
-// The newest signal for a step replaces the one before it; a step still open keeps the time it started.
-// The step this session's work goes to: the one Claude last said it started here, until it says that step is done or
-// blocked. A plan file's own "in progress" mark is not enough — it can be left from another day.
-export const nextWorkingOn = (current: { plan: string; step: number } | null, signal: { plan: string; step: number; state: string }) =>
-  signal.state === 'doing'
-    ? { plan: signal.plan, step: signal.step }
-    : current?.plan === signal.plan && current.step === signal.step
-      ? null
-      : current
+// The steps this session said it started and has not yet said are done or blocked, oldest first: the session's work
+// goes to the last one. A step started again moves to the end; a plan file's own "in progress" mark is not enough —
+// it can be left from another day.
+export const nextStarted = (started: readonly { plan: string; step: number }[], signal: { plan: string; step: number; state: string }) => {
+  const others = started.filter(one => one.plan !== signal.plan || one.step !== signal.step)
 
+  return signal.state === 'doing' ? [...others, { plan: signal.plan, step: signal.step }] : others
+}
+
+const SIGNAL_WORD: Record<string, string> = { doing: '시작', done: '끝', blocked: '막힘' }
+
+// What a taken signal answers: the step and its new state, how many steps are done, and every step now in
+// progress — so a sender that named the wrong step sees it at once. stages: the plan's stages after the signal.
+export const signalAnswer = (signal: { plan: string; step: number; state: string }, stages: readonly Stage[] | undefined) => {
+  const said = `기록함: ${signal.plan} ${signal.step}단계 ${SIGNAL_WORD[signal.state] ?? signal.state}`
+  if (!stages) return said
+  const doing = stages.flatMap((stage, i) => (stage.state === 'doing' ? [i + 1] : []))
+
+  return `${said} — 진행 ${stages.filter(stage => stage.state === 'done').length}/${stages.length}${doing.length > 0 ? ` · 진행 중: ${stepRanges(doing)}단계` : ''}`
+}
+
+// The newest signal for a step replaces the one before it; a step still open keeps the time it started.
 export const applySignal = (signals: readonly StepSignal[], input: SignalInput, at: number): StepSignal[] => {
   const before = signals.find(signal => signal.plan === input.plan && signal.step === input.step)
   const startedAt = before && before.state !== 'done' ? (before.startedAt ?? before.at) : undefined
@@ -979,13 +1006,34 @@ export const nextAction = (slug: string, status: string, stages: readonly Stage[
   return { text: '진행 중 — 기다리면 됩니다', command: null }
 }
 
+// Step numbers in plain words: three or more in a row become a range ('2 · 4~6').
+export const stepRanges = (steps: readonly number[]): string => {
+  const runs = [...steps]
+    .sort((a, b) => a - b)
+    .reduce<number[][]>((found, step) => {
+      const last = found[found.length - 1]
+
+      return last && step === (last[last.length - 1] ?? step) + 1 ? [...found.slice(0, -1), [...last, step]] : [...found, [step]]
+    }, [])
+
+  return runs.flatMap(run => (run.length >= 3 ? [`${run[0]}~${run[run.length - 1]}`] : run.map(String))).join(' · ')
+}
+
+const ACTIVE_STATES = ['blocked', 'yourTurn', 'doing'] as const
+const ACTIVE_WORD: Record<(typeof ACTIVE_STATES)[number], string> = { blocked: '막힘', yourTurn: '사용자 차례', doing: '진행 중' }
+
+// The steps the work stands on, by state — blocked first, then the person's turn, then in progress — each with its
+// step numbers; a state no step is in is left out. Steps worked on at the same time are all here.
+export const activeSteps = (stages: readonly Stage[]): { state: (typeof ACTIVE_STATES)[number]; steps: number[] }[] =>
+  ACTIVE_STATES.map(state => ({ state, steps: stages.flatMap((stage, i) => (stage.state === state ? [i + 1] : [])) })).filter(group => group.steps.length > 0)
+
 // The one line at the top: where the work stands, whether anything is stuck, and the time left.
 export const headline = (stages: readonly Stage[], blocks: readonly Block[], eta: ReturnType<typeof estimateEta>, format: (ms: number) => string) => {
-  const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked' || stage.state === 'yourTurn')
+  const active = activeSteps(stages)
   const done = stages.filter(stage => stage.state === 'done').length
   const where =
-    here >= 0
-      ? `${here + 1}단계 ${stages[here]?.state === 'blocked' ? '막힘' : stages[here]?.state === 'yourTurn' ? '사용자 차례' : '진행 중'}`
+    active.length > 0
+      ? active.map(group => `${stepRanges(group.steps)}단계 ${ACTIVE_WORD[group.state]}`).join(' · ')
       : stages.length > 0 && done === stages.length
         ? '모든 단계 끝'
         : '시작 전'
