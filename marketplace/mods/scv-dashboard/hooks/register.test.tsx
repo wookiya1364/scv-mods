@@ -95,6 +95,9 @@ const DREAMS = JSON.stringify({
   report: 'scv/dreams/x.html',
 })
 
+// The output files of background jobs the now-view tests set up, and the ones the mod read.
+const JOB_OUTPUTS: { files: Record<string, { text: string; mtimeMs: number; size?: number }>; reads: string[] } = { files: {}, reads: [] }
+
 // record: an archived plan's ARCHIVED_AT.md
 type Files = Record<string, { planText: string; testsText: string; record?: string }>
 
@@ -153,6 +156,13 @@ const engine = (
     if (kept && catalog[kept] !== undefined) return { value: catalog[kept] }
     if (e.path.endsWith('scv/dreams/latest.json') && dreams) return { value: dreams }
     if (e.path.endsWith('scv/dreams/x.html') && dreams) return { value: '<h1>드림</h1>' }
+    // a background job's output file (now-view): which ones were read is kept, to see that only changed files are
+    const output = JOB_OUTPUTS.files[e.path]
+    if (output) {
+      JOB_OUTPUTS.reads.push(e.path)
+
+      return { value: output.text }
+    }
     return { deny: `ENOENT ${e.path}` }
   })
   on('store.get', (_, e) => ({ value: store.get(e.key) }))
@@ -2344,4 +2354,343 @@ test('your-turn T8 거울 세션도 받은 상태로 사용자 차례 · 배경 
   const old = await drawnText($)
   expect(old).toContain('2단계 진행 중')
   expect(old).not.toContain('사용자 차례')
+})
+
+// ── now view: 지금 하는 일 · 뒤에서 도는 일 · 최근 끝난 일 ─────────────────────────
+
+import { applyDone, applyJobEvent, findJob, jobEndOf, jobStartOf, nowBlock, nowLine, progressOf, tailOf } from './model'
+import type { DoneEntry, Job, JobBoard } from '../types'
+
+const NO_JOBS: JobBoard = { jobs: [], extra: 0 }
+const job = (over: Partial<Job> & { id: string; title: string }): Job => ({ kind: 'command', startedAt: 1_000_000, changedAt: 1_000_000, ...over })
+const BG_TEXT = (id: string, path: string) => `Command running in background with ID: ${id}. Output is being written to: ${path}. You will be notified when it completes.`
+const NOTICE = (id: string, status: string, summary: string) =>
+  `<task-notification>\n<task-id>${id}</task-id>\n<output-file>/tmp/tasks/${id}.output</output-file>\n<status>${status}</status>\n<summary>${summary}</summary>\n</task-notification>`
+
+// A plan with a step in progress, a turn engine, and tool calls that answer like a command sent to the background.
+const nowEngine = (on: On, isClockMocked = false) => {
+  JOB_OUTPUTS.files = {}
+  JOB_OUTPUTS.reads = []
+  const outputs = JOB_OUTPUTS.files
+  const reads = JOB_OUTPUTS.reads
+  const env = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) }, DREAMS, { at: 1_000_000 }, {}, isClockMocked)
+  turnEngine(on)
+  agentEngine(on)
+  on('fs.stat', (_, e) => {
+    const found = outputs[e.path]
+
+    return found ? ({ value: { kind: 'file', size: found.size ?? found.text.length, mtimeMs: found.mtimeMs, isLink: false } } as never) : { deny: `ENOENT ${e.path}` }
+  })
+  let serial = 0
+  on('tool.call', (_, e) => {
+    const input = e as unknown as Record<string, unknown>
+    if (e.tool === 'Bash' && input.run_in_background === true) {
+      serial += 1
+      const id = `bg${serial}`
+
+      return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: id }, text: BG_TEXT(id, `/tmp/tasks/${id}.output`) } as never
+    }
+    if (e.tool.endsWith('run_in_terminal')) return { result: {}, text: '{"tab_id":"c1","cwd":"/work"}' } as never
+
+    return { result: {} }
+  })
+
+  return { ...env, outputs, reads }
+}
+
+const spoken = ($: Engine, textTyped: string) => $.turn.start({ text: textTyped, turnId: 't1' })
+
+test('now-view T1 뒤의 일이 도는 중에 사용자가 말을 걸어도 사용자 차례가 아니다', async ($, on) => {
+  nowEngine(on)
+  await start($)
+  await spoken($, '측정 돌려 줘')
+  await $.tool.call({ tool: 'Bash', command: 'npm run measure', description: '측정 128판', run_in_background: true } as never)
+  await turnEnd($, 'answer', 5_000)
+  // 그 일이 도는 동안 사용자가 한마디 한다 — 새 턴이 시작되고, 아무것도 뒤로 보내지 않고 끝난다
+  await spoken($, '지금 뭐 해?')
+  await turnEnd($, 'answer', 2_000)
+  const drawn = await drawnText($)
+  expect(drawn).not.toContain('사용자 차례')
+  expect(drawn).toContain('배경 작업을 기다리는 중')
+  expect(drawn).toContain('측정 128판')
+})
+
+test('now-view T2 일이 끝나면 목록에서 빠지고, 남은 일이 없으면 사용자 차례다', async ($, on) => {
+  nowEngine(on)
+  on('prompt.submit', (_, e) => ({ text: e.text }))
+  await start($)
+  await spoken($, '측정 돌려 줘')
+  await $.tool.call({ tool: 'Bash', command: 'npm run measure', description: '측정 128판', run_in_background: true } as never)
+  await turnEnd($, 'answer', 5_000)
+  await spoken($, '지금 뭐 해?')
+  await turnEnd($, 'answer', 2_000)
+  // 끝 알림이 세션을 깨운다
+  await spoken($, NOTICE('bg1', 'completed', 'Background command "측정 128판" completed (exit code 0)'))
+  await turnEnd($, 'answer', 2_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^다음: /)).toBe(YOUR_TURN)
+  expect(await text(ui, /측정 128판 끝$/)).toMatch(/^\d{2}:\d{2} 측정 128판 끝$/)
+  expect(await text(ui, /^뒤에서 도는 일/)).toBeUndefined()
+  await ui.unmount()
+
+  // 실패로 끝난 일은 실패라고 적힌다; 알림이 도는 턴 안으로 들어와도(턴 시작 없이) 끝으로 친다
+  await spoken($, '다시 돌려')
+  await $.tool.call({ tool: 'Bash', command: 'npm run measure', description: '다시 재기', run_in_background: true } as never)
+  await $.prompt.submit({ text: NOTICE('bg2', 'failed', 'Background command "다시 재기" failed (exit code 1)'), wait: false, origin: { kind: 'task-notification' }, turnId: 't1' } as never)
+  await turnEnd($, 'answer', 2_000)
+  const again = await drawnText($)
+  expect(again).toContain('다시 재기 실패')
+  expect(again).toContain('사용자 차례')
+})
+
+test('now-view T3 뒤에서 도는 일이 일마다 한 줄 — 이름 · 걸린 시간 · 마지막 진행 줄', () => {
+  const board: JobBoard = {
+    jobs: [
+      job({ id: 'a', title: '시험 전체 돌리기', startedAt: 1_000_000 - 95_000, line: '[4/7] 코어 받아 오기 연습 …', done: 4, total: 7 }),
+      job({ id: 'b', title: '측정 128판', startedAt: 1_000_000 - 12_000 }),
+    ],
+    extra: 0,
+  }
+  const block = nowBlock({ now: { text: 'x', since: null }, board, done: [], at: 1_000_000, offsetMinutes: 0, formatDuration })
+  expect(block.jobs.map(row => row.text)).toEqual(['시험 전체 돌리기 · 1분 35초 · [4/7] 코어 받아 오기 연습 …', '측정 128판 · 12초'])
+  expect(Math.abs((block.jobs[0]?.ratio ?? 0) - 4 / 7) < 1e-9).toBe(true)
+  expect(block.jobs[1]?.ratio).toBeNull()
+  // 설명 글이 없는 명령은 명령의 앞 60자가 이름
+  const long = `npm run ${'x'.repeat(80)}`
+  const started = jobStartOf('Bash', { command: long, run_in_background: true }, { result: { backgroundTaskId: 'z' }, text: '' }, 5)
+  expect(started?.title).toBe(`${long.slice(0, 59)}…`)
+  expect(jobStartOf('Bash', { command: 'ls' }, { result: {}, text: '' }, 5)).toBeNull()
+  // 시간 제한으로 뒤로 넘어간 명령도 뒤의 일이다
+  expect(jobStartOf('Bash', { command: 'sleep 999', description: '오래 걸림' }, { result: { backgroundTaskId: 'k' }, text: BG_TEXT('k', '/tmp/k.output') }, 5)).toEqual(
+    job({ id: 'k', title: '오래 걸림', startedAt: 5, changedAt: 5, output: '/tmp/k.output' }),
+  )
+})
+
+test('now-view T4 진행 막대 — 한 것 / 전체 꼴을 읽는다', () => {
+  expect(progressOf('끝난 판: 10 / 64')).toEqual({ line: '끝난 판: 10 / 64', done: 10, total: 64 })
+  expect(progressOf('[4/7] 이름 … 통과 (257초)')).toMatchObject({ done: 4, total: 7 })
+  expect(progressOf('Progress 45%')).toMatchObject({ done: 45, total: 100 })
+  expect(progressOf('그냥 글')).toEqual({ line: '그냥 글' })
+  expect(progressOf('0 / 0')).toEqual({ line: '0 / 0' })
+  expect(progressOf('9 / 7')).toEqual({ line: '9 / 7' })
+  expect(progressOf('')).toEqual({ line: '' })
+  expect(progressOf('앞 줄 1/9\n\n마지막 줄 2/9\n\n')).toMatchObject({ line: '마지막 줄 2/9', done: 2, total: 9 })
+})
+
+test('now-view T5 지금 하는 일 — 앱의 할 일 목록에서 하는 중인 항목과 시작 시각', async ($, on) => {
+  const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
+  const items = [
+    { content: '코드 읽기', status: 'in_progress' },
+    { content: '시험 쓰기', status: 'pending' },
+    { content: '고치기', status: 'pending' },
+  ]
+  const first = applyTaskEvent([], PLAN_TOOL, { items }, 100)
+  expect(first.map(task => `${task.subject}:${task.status}`)).toEqual(['코드 읽기:in_progress', '시험 쓰기:pending', '고치기:pending'])
+  expect(first[0]?.at).toBe(100)
+  const second = applyTaskEvent(first, PLAN_TOOL, { advance: true }, 200)
+  expect(second.map(task => task.status)).toEqual(['completed', 'in_progress', 'pending'])
+  expect(second[1]?.at).toBe(200)
+  const third = applyTaskEvent(second, PLAN_TOOL, { done: [2], start: 3 }, 300)
+  expect(third.map(task => task.status)).toEqual(['completed', 'completed', 'in_progress'])
+  expect(third[2]?.at).toBe(300)
+  // 못 읽는 꼴은 지금 값을 그대로 둔다
+  expect(applyTaskEvent(third, PLAN_TOOL, { items: 'x' }, 400)).toEqual(third)
+  const working = { step: null, tool: null, jobs: [], extra: 0, isWorking: true, turnStartedAt: 50 }
+  expect(nowLine({ ...working, tasks: first })).toEqual({ text: '코드 읽기', since: 100 })
+  expect(nowLine({ ...working, tasks: second })).toEqual({ text: '시험 쓰기', since: 200 })
+  expect(nowLine({ ...working, tasks: third })).toEqual({ text: '고치기', since: 300 })
+
+  // 화면: 앱의 할 일 도구를 부르면 지금 하는 일과 끝난 일에 실린다
+  nowEngine(on)
+  await start($)
+  await spoken($, '고쳐 줘')
+  await $.tool.call({ tool: PLAN_TOOL, items } as never)
+  await $.tool.call({ tool: PLAN_TOOL, advance: true } as never)
+  const drawn = await drawnText($)
+  expect(drawn).toContain('시험 쓰기')
+  expect(drawn).toContain('코드 읽기 끝')
+  expect(drawn).toContain('할 일 1/3')
+})
+
+test('now-view T6 지금 하는 일 — 재료를 차례로 본다', () => {
+  const tasks = [{ id: '1', subject: '시험 쓰기', status: 'in_progress' as const, at: 7 }]
+  const step = { number: 3, name: '진행 줄을 읽는다' }
+  const tool = { name: 'Bash', target: '시험 전체 돌리기', startedAt: 9 }
+  const base = { tasks: [], step: null, tool: null, jobs: [] as Job[], extra: 0, isWorking: true, turnStartedAt: 5 }
+  expect(nowLine({ ...base, tasks })).toEqual({ text: '시험 쓰기', since: 7 })
+  expect(nowLine({ ...base, step })).toEqual({ text: '3단계 — 진행 줄을 읽는다', since: 5 })
+  expect(nowLine({ ...base, tool })).toEqual({ text: '시험 전체 돌리기', since: 9 })
+  expect(nowLine({ ...base, isWorking: false, jobs: [job({ id: 'a', title: '측정 128판', startedAt: 3 })] })).toEqual({ text: '뒤에서 도는 일을 기다리는 중 — 측정 128판', since: 3 })
+  expect(nowLine(base)).toEqual({ text: '결과를 읽거나 다음을 정하는 중', since: 5 })
+  // 함께 있으면 할 일 목록이 이긴다; 턴이 끝났고 도는 일이 있으면 기다림이 이긴다
+  expect(nowLine({ ...base, tasks, step, tool }).text).toBe('시험 쓰기')
+  expect(nowLine({ ...base, tasks, isWorking: false, jobs: [job({ id: 'a', title: '가' }), job({ id: 'b', title: '나' })] }).text).toBe('뒤에서 도는 일을 기다리는 중 — 가 외 1개')
+  expect(nowLine({ ...base, isWorking: false })).toEqual({ text: '사용자의 말을 기다리는 중', since: null })
+})
+
+test('now-view T7 최근 끝난 일 — 시각과 함께 최근 5개, 실패는 실패라고', () => {
+  const at = (minute: number) => Date.UTC(2026, 10, 16, 10, minute)
+  let done: DoneEntry[] = []
+  ;[46, 47, 56, 58, 59, 62, 65].forEach((minute, i) => {
+    done = applyDone(done, { at: at(minute), text: i === 5 ? '여섯째 실패' : `일 ${i + 1} 끝`, isOk: i !== 5 })
+  })
+  expect(done).toHaveLength(5)
+  const block = nowBlock({ now: { text: 'x', since: null }, board: NO_JOBS, done, at: at(70), offsetMinutes: 0, formatDuration })
+  expect(block.done).toEqual(['10:56 일 3 끝', '10:58 일 4 끝', '10:59 일 5 끝', '11:02 여섯째 실패', '11:05 일 7 끝'])
+  expect(block.done.filter(line => line.includes('실패'))).toHaveLength(1)
+  // 사람의 시계로 적는다(서울: +540분)
+  expect(nowBlock({ now: { text: 'x', since: at(46) }, board: NO_JOBS, done: [], at: at(70), offsetMinutes: 540, formatDuration }).now).toBe('x (19:46부터)')
+})
+
+test('now-view T8 터미널 탭에서 시작한 명령도 뒤에서 도는 일이다', async ($, on) => {
+  nowEngine(on)
+  await start($)
+  await spoken($, '검사 돌려')
+  await $.tool.call({ tool: 'mcp__terminal__run_in_terminal', command: 'bash remaining.sh', title: '남은 검사 7개' } as never)
+  await turnEnd($, 'answer', 3_000)
+  const running = await drawnText($)
+  expect(running).toContain('남은 검사 7개')
+  expect(running).toContain('터미널 탭')
+  expect(running).not.toContain('사용자 차례')
+  await spoken($, '멈춰')
+  await $.tool.call({ tool: 'mcp__terminal__stop_terminal_tab', tab_id: 'c1' } as never)
+  await turnEnd($, 'answer', 1_000)
+  const stopped = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(stopped, /^뒤에서 도는 일/)).toBeUndefined()
+  expect(await text(stopped, /남은 검사 7개 멈춤$/)).toBeDefined()
+  await stopped.unmount()
+})
+
+test('now-view T10 다른 기기에서 보는 화면에도 같은 세 가지가 보인다', async ($, on) => {
+  const env = engine(on, {})
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  const hostPlan = { slug: 'p', isArchived: false, ...plan({ title: '작업 세션 계획', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) }
+  const jobs: JobBoard = { jobs: [job({ id: 'bg1', title: '측정 128판', line: '끝난 판: 10 / 64', done: 10, total: 64 })], extra: 0 }
+  const doneLog: DoneEntry[] = [{ at: 1_000_000, text: '일 1 끝', isOk: true }, { at: 1_000_000, text: '일 2 실패', isOk: false }]
+  await $.session.receive({
+    origin: { kind: 'peer' },
+    text: envelope(
+      mirrorText({
+        kind: 'state',
+        body: JSON.stringify({
+          snapshot: { plans: [hostPlan], dreamsText: null, cwd: '/host', root: '/host' },
+          live: { isWorking: false, turnStartedAt: 0, tool: null, hasEnded: true },
+          jobs,
+          doneLog,
+          sentAt: 1,
+        }),
+      }),
+    ),
+  })
+  const drawn = await drawnText($)
+  expect(drawn).toContain('뒤에서 도는 일을 기다리는 중 — 측정 128판')
+  expect(drawn).toContain('끝난 판: 10 / 64')
+  expect(drawn).toContain('일 1 끝')
+  expect(drawn).toContain('일 2 실패')
+  expect(drawn).not.toContain('사용자 차례')
+})
+
+test('now-view T10b 거울로 보내는 글에 출력 파일 위치는 없다', async ($, on) => {
+  const env = nowEngine(on)
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_host' })
+  await start($)
+  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'hello', address: 'session_viewer' })) })
+  await spoken($, '측정 돌려 줘')
+  await $.tool.call({ tool: 'Bash', command: 'npm run measure', description: '측정 128판', run_in_background: true } as never)
+  await turnEnd($, 'answer', 5_000)
+  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'hello', address: 'session_viewer2' })) })
+  const wire = env.sent.map(one => one.text).join('\n')
+  expect(wire).toContain('측정 128판')
+  expect(wire).not.toContain('/tmp/tasks/')
+})
+
+test('now-view T11 진행 줄은 한 줄 · 120자, 제어 문자 없음', () => {
+  const long = progressOf('가'.repeat(300))
+  expect(long.line.length).toBe(120)
+  expect(long.line.endsWith('…')).toBe(true)
+  expect(progressOf('\u001b[32m통과\u001b[0m 3/9').line).toBe('통과 3/9')
+  expect(progressOf('\r 10/64\r 11/64')).toEqual({ line: '11/64', done: 11, total: 64 })
+  expect(/[\u0000-\u001f]/.test(progressOf('a\tb\u0007c\r\n').line)).toBe(false)
+})
+
+test('now-view T12 읽는 양 — 끝부분만 읽고, 도는 일은 여덟 개까지 기억한다', async ($, on) => {
+  // 끝부분만: 큰 글에서도 끝 4천 자만 남긴다
+  const big = `${'줄\n'.repeat(100_000)}끝난 판: 10 / 64\n`
+  expect(tailOf(big).length).toBeLessThanOrEqual(4000)
+  expect(progressOf(tailOf(big))).toMatchObject({ done: 10, total: 64 })
+  // 여덟이 모두 도는 중이면 아홉째는 세기만 한다
+  let board = NO_JOBS
+  for (let i = 1; i <= 9; i += 1) board = applyJobEvent(board, { kind: 'start', job: job({ id: `j${i}`, title: `일 ${i}` }) })
+  expect(board.jobs).toHaveLength(8)
+  expect(board.extra).toBe(1)
+  const block = nowBlock({ now: { text: 'x', since: null }, board, done: [], at: 1_000_000, offsetMinutes: 0, formatDuration })
+  expect(block.jobs.at(-1)?.text).toBe('외 1개')
+  // 모르는 이름표의 끝 알림은 세어 둔 것부터 줄인다
+  expect(applyJobEvent(board, { kind: 'end', id: 'unknown' }).extra).toBe(0)
+  // 같은 이름표로 두 번 시작해도 한 줄
+  expect(applyJobEvent(applyJobEvent(NO_JOBS, { kind: 'start', job: job({ id: 'a', title: '가' }) }), { kind: 'start', job: job({ id: 'a', title: '가' }) }).jobs).toHaveLength(1)
+
+  // 화면: 출력 파일이 바뀌었을 때만 읽고, 큰 파일은 통째로 읽지 않는다
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const env = nowEngine(on, true)
+  env.outputs['/tmp/tasks/bg1.output'] = { text: '끝난 판: 10 / 64\n', mtimeMs: 1 }
+  env.outputs['/tmp/tasks/bg2.output'] = { text: 'x', mtimeMs: 1, size: 9_000_000 }
+  env.proc.stdout = '끝난 판: 3 / 9\n'
+  await start($)
+  await spoken($, '둘 다 돌려')
+  await $.tool.call({ tool: 'Bash', command: 'a', description: '작은 출력', run_in_background: true } as never)
+  await $.tool.call({ tool: 'Bash', command: 'b', description: '큰 출력', run_in_background: true } as never)
+  await turnEnd($, 'answer', 1_000)
+  await clock.advance(3000)
+  const drawn = await drawnText($)
+  expect(drawn).toContain('끝난 판: 10 / 64')
+  expect(drawn).toContain('끝난 판: 3 / 9')
+  expect(env.reads).toEqual(['/tmp/tasks/bg1.output'])
+  expect(env.processes.some(argv => argv[0] === 'tail' && argv.at(-1) === '/tmp/tasks/bg2.output')).toBe(true)
+  // 바뀌지 않았으면 다시 읽지 않는다
+  await clock.advance(3000)
+  expect(env.reads).toHaveLength(1)
+})
+
+test('now-view T13 끝났는지 모르면 끝났다고 그리지 않는다', () => {
+  const quiet = job({ id: 'a', title: '조용한 일', output: '/tmp/a.output', startedAt: 0, changedAt: 0 })
+  const block = nowBlock({ now: { text: 'x', since: null }, board: { jobs: [quiet], extra: 0 }, done: [], at: 5 * 60_000 + 1, offsetMinutes: 0, formatDuration })
+  expect(block.jobs[0]?.isStale).toBe(true)
+  expect(block.jobs[0]?.text).toContain('끝난 듯')
+  expect(block.done).toEqual([])
+  // 출력 파일이 없는 일(터미널 탭)은 조용해도 끝난 듯이 아니다
+  const tab = nowBlock({ now: { text: 'x', since: null }, board: { jobs: [job({ id: 'tab:c1', title: '탭', kind: 'terminal', startedAt: 0, changedAt: 0 })], extra: 0 }, done: [], at: 10 * 60_000, offsetMinutes: 0, formatDuration })
+  expect(tab.jobs[0]?.isStale).toBe(false)
+  // 끝난 듯이어도 차례는 사용자에게 넘어가지 않는다
+  expect(turnStateOf({ isWorking: false, hasEnded: true, blocks: [], agents: 0, background: false, jobs: 1 })).toBe('background')
+})
+
+test('now-view T14 순수 단계 — 같은 입력 같은 출력, 입력을 바꾸지 않는다', () => {
+  const board: JobBoard = { jobs: [job({ id: 'a', title: '가' })], extra: 0 }
+  const frozen = JSON.stringify(board)
+  const done: DoneEntry[] = [{ at: 1, text: '일 끝', isOk: true }]
+  const doneFrozen = JSON.stringify(done)
+  const twice = <T,>(run: () => T) => expect(JSON.stringify(run())).toBe(JSON.stringify(run()))
+  twice(() => jobStartOf('Bash', { command: 'x', run_in_background: true }, { result: { backgroundTaskId: 'q' }, text: '' }, 1))
+  twice(() => jobEndOf({ text: NOTICE('a', 'completed', 'done (exit code 0)') }))
+  twice(() => applyJobEvent(board, { kind: 'progress', id: 'a', line: '1/2', done: 1, total: 2, at: 9 }))
+  twice(() => applyJobEvent(board, { kind: 'end', id: 'a' }))
+  twice(() => applyDone(done, { at: 2, text: '둘 끝', isOk: true }))
+  twice(() => progressOf('3 / 4'))
+  twice(() => nowLine({ tasks: [], step: null, tool: null, jobs: board.jobs, extra: 0, isWorking: false, turnStartedAt: 0 }))
+  twice(() => nowBlock({ now: { text: 'x', since: 1 }, board, done, at: 99, offsetMinutes: 0, formatDuration }))
+  expect(JSON.stringify(board)).toBe(frozen)
+  expect(JSON.stringify(done)).toBe(doneFrozen)
+  // 끝 알림 읽기
+  expect(jobEndOf({ text: NOTICE('a', 'completed', 'x completed (exit code 0)') })).toEqual({ id: 'a', how: 'done' })
+  expect(jobEndOf({ text: NOTICE('a', 'failed', 'x failed (exit code 2)') })).toEqual({ id: 'a', how: 'failed' })
+  expect(jobEndOf({ text: NOTICE('a', 'killed', 'x was stopped') })).toEqual({ id: 'a', how: 'stopped' })
+  expect(jobEndOf({ text: '<task-notification>done</task-notification>' })).toEqual({ id: null, how: 'done' })
+  expect(jobEndOf({ text: '그냥 한 말' })).toBeNull()
+  expect(jobEndOf({ tool: 'TaskStop', input: { task_id: 'a' } })).toEqual({ id: 'a', how: 'stopped' })
+  expect(jobEndOf({ tool: 'Read', input: {} })).toBeNull()
+  expect(findJob(board, null)?.id).toBe('a')
+  expect(findJob(board, 'nope')).toBeUndefined()
 })

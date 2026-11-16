@@ -5,7 +5,11 @@ import type {
   AgentState,
   Block,
   Catalog,
+  DoneEntry,
   Dreams,
+  Job,
+  JobBoard,
+  Live,
   MadeFunction,
   Permit,
   PipelineStep,
@@ -281,10 +285,11 @@ export const isBackgroundStart = (tool: string, input: Record<string, unknown>) 
 // The person's turn: this session saw its main turn end, nothing live holds the work (an error, a permission
 // prompt and an open question show red on their own), and nothing the turn started still runs.
 // Work that will wake the session by itself is not the person's turn.
-export const turnStateOf = (input: { isWorking: boolean; hasEnded: boolean; blocks: readonly Block[]; agents: number; background: boolean }): TurnState => {
+// jobs: how many jobs the session left running and has not heard the end of; they outlast a turn the person starts.
+export const turnStateOf = (input: { isWorking: boolean; hasEnded: boolean; blocks: readonly Block[]; agents: number; background: boolean; jobs?: number }): TurnState => {
   if (input.isWorking || !input.hasEnded) return 'working'
   if (input.blocks.some(block => block.kind === 'stopped' || block.kind === 'permit' || block.kind === 'waiting')) return 'working'
-  if (input.agents > 0 || input.background) return 'background'
+  if (input.agents > 0 || input.background || (input.jobs ?? 0) > 0) return 'background'
 
   return 'yourTurn'
 }
@@ -493,7 +498,51 @@ export const describeTool = (tool: string, input: Record<string, unknown>): stri
   return shorten(text('description') || text('pattern') || text('query') || text('url') || text('skill') || text('path'), 60)
 }
 
-export const applyTaskEvent = (tasks: readonly Task[], tool: string, input: Record<string, unknown>): Task[] => {
+// The desktop app's own task list tool: the whole list (items), the next step (advance), or steps by number (done, start).
+export const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
+
+const TASK_STATES = ['pending', 'in_progress', 'completed']
+
+// A task that became the one in progress carries the time; one that already was keeps its own.
+const stamped = (before: readonly Task[], after: Task[], at?: number): Task[] =>
+  after.map(task => {
+    if (task.status !== 'in_progress') return task
+    const was = before.find(one => one.id === task.id && one.subject === task.subject)
+    const since = was?.status === 'in_progress' ? was.at : at
+
+    return since === undefined ? task : { ...task, at: since }
+  })
+
+const applyPlanTool = (tasks: readonly Task[], input: Record<string, unknown>): Task[] | null => {
+  if (input.items !== undefined) {
+    if (!Array.isArray(input.items)) return null
+    const items = input.items as { content?: unknown; status?: unknown }[]
+    if (!items.every(item => typeof item?.content === 'string' && TASK_STATES.includes(String(item.status)))) return null
+
+    return items.map((item, i) => ({ id: String(i + 1), subject: String(item.content), status: item.status as Task['status'] }))
+  }
+  if (input.advance === true) {
+    const doing = tasks.findIndex(task => task.status === 'in_progress')
+    const next = tasks.findIndex((task, i) => i > doing && task.status === 'pending')
+
+    return tasks.map((task, i) => (i === doing ? { ...task, status: 'completed' as const } : i === next ? { ...task, status: 'in_progress' as const } : task))
+  }
+  const done = Array.isArray(input.done) ? (input.done as unknown[]).filter((n): n is number => typeof n === 'number') : []
+  const start = typeof input.start === 'number' ? input.start : null
+  if (done.length === 0 && start === null) return null
+
+  return tasks.map((task, i) =>
+    done.includes(i + 1) ? { ...task, status: 'completed' as const } : i + 1 === start ? { ...task, status: 'in_progress' as const } : task,
+  )
+}
+
+// at: the time of the call, kept on the task it puts in progress (the 'now' line says since when).
+export const applyTaskEvent = (tasks: readonly Task[], tool: string, input: Record<string, unknown>, at?: number): Task[] => {
+  if (tool === PLAN_TOOL) {
+    const next = applyPlanTool(tasks, input)
+
+    return next ? stamped(tasks, next, at) : [...tasks]
+  }
   if (tool === 'TodoWrite' && Array.isArray(input.todos)) {
     return (input.todos as { content: string; status: Task['status']; activeForm?: string }[]).map((todo, i) => ({
       id: String(i + 1),
@@ -1059,3 +1108,186 @@ export const sessionName = (files: string, sessionId: string) => {
 
 // How a viewer names the session it mirrors: its name and address together, or the address alone.
 export const hostLabel = (host: string, name?: string | null) => (name ? `${name} (${host})` : host)
+
+// ── now view: what is being done now, what runs in the background, what just finished ──
+
+const JOB_ROOM = 8
+const DONE_ROOM = 5
+const LINE_ROOM = 120
+const TAIL_ROOM = 4000
+const STALE_MS = 5 * 60_000
+
+const textOf = (input: Record<string, unknown>, key: string) => (typeof input[key] === 'string' ? (input[key] as string) : '')
+
+// The work a tool call left running, read from the call and what it answered: a command sent to the background (asked
+// for, or moved there by its time limit), a watch, or a command started in a terminal tab. null: nothing was left.
+export const jobStartOf = (tool: string, input: Record<string, unknown>, ran: { result?: unknown; text?: string }, at: number): Job | null => {
+  const result = (ran.result ?? {}) as Record<string, unknown>
+  const said = ran.text ?? ''
+  const output = (textOf(result, 'backgroundOutputPath') || (said.match(/written to:\s*(\S+)/)?.[1] ?? '')).replace(/[.,;]+$/, '')
+  const title = textOf(input, 'description') || textOf(input, 'title') || shorten(textOf(input, 'command'), 60)
+  const withOutput = (job: Job): Job => (output ? { ...job, output } : job)
+  if (tool === 'Bash') {
+    const id = textOf(result, 'backgroundTaskId') || (said.match(/running in background with ID:\s*([\w-]+)/)?.[1] ?? '')
+    if (!id && input.run_in_background !== true) return null
+
+    return withOutput({ id: id || `bash-${at}`, title: title || '명령', kind: 'command', startedAt: at, changedAt: at })
+  }
+  if (tool === 'Monitor') {
+    const id = said.match(/ID:\s*([\w-]+)/)?.[1]
+
+    return withOutput({ id: id ?? `watch-${at}`, title: title || '지켜보기', kind: 'watch', startedAt: at, changedAt: at })
+  }
+  if (tool.endsWith('run_in_terminal')) {
+    const tab = textOf(result, 'tab_id') || (said.match(/"tab_id"\s*:\s*"([^"]+)"/)?.[1] ?? '')
+
+    return { id: `tab:${tab || at}`, title: title || '터미널 명령', kind: 'terminal', startedAt: at, changedAt: at }
+  }
+
+  return null
+}
+
+export type JobEnd = { id: string | null; how: 'done' | 'failed' | 'stopped' }
+
+// Which job ended and how, read from a task notification's text, or from a call that stops a task or a terminal tab.
+// id null: the notice names no task. null: this is not an end.
+export const jobEndOf = (source: { text: string } | { tool: string; input: Record<string, unknown> }): JobEnd | null => {
+  if ('text' in source) {
+    if (!source.text.includes('<task-notification>')) return null
+    const status = source.text.match(/<status>([^<]*)<\/status>/)?.[1]?.trim() ?? 'completed'
+    const code = Number(source.text.match(/exit code (\d+)/)?.[1] ?? '0')
+    const how = /kill|stop|cancel/.test(status) ? 'stopped' : status === 'completed' && code === 0 ? 'done' : 'failed'
+
+    return { id: source.text.match(/<task-id>([^<]+)<\/task-id>/)?.[1]?.trim() ?? null, how }
+  }
+  const { tool, input } = source
+  if (tool === 'TaskStop' || tool === 'KillShell' || tool === 'KillBash') {
+    const id = textOf(input, 'task_id') || textOf(input, 'shell_id')
+
+    return id ? { id, how: 'stopped' } : null
+  }
+  if (tool.endsWith('stop_terminal_tab')) return textOf(input, 'tab_id') ? { id: `tab:${textOf(input, 'tab_id')}`, how: 'stopped' } : null
+
+  return null
+}
+
+// The job an end names: by its id; a notice that names none ends the command that has run longest.
+export const findJob = (board: JobBoard, id: string | null): Job | undefined =>
+  id === null ? board.jobs.find(job => job.kind !== 'terminal') : board.jobs.find(job => job.id === id)
+
+export type JobEvent =
+  | { kind: 'start'; job: Job }
+  | { kind: 'progress'; id: string; line: string; done?: number; total?: number; at: number }
+  | { kind: 'end'; id: string | null }
+
+// The board after a job started, said how far it is, or ended. Eight jobs are remembered; a ninth is only counted,
+// and an end that names none of the eight takes one off that count.
+export const applyJobEvent = (board: JobBoard, event: JobEvent): JobBoard => {
+  if (event.kind === 'start') {
+    if (board.jobs.some(job => job.id === event.job.id)) return { jobs: [...board.jobs], extra: board.extra }
+
+    return board.jobs.length >= JOB_ROOM ? { jobs: [...board.jobs], extra: board.extra + 1 } : { jobs: [...board.jobs, event.job], extra: board.extra }
+  }
+  if (event.kind === 'progress') {
+    return {
+      jobs: board.jobs.map(job => {
+        if (job.id !== event.id) return job
+        const { done: _done, total: _total, ...rest } = job
+
+        return { ...rest, line: event.line, changedAt: event.at, ...(event.done !== undefined && event.total !== undefined ? { done: event.done, total: event.total } : {}) }
+      }),
+      extra: board.extra,
+    }
+  }
+  const ended = findJob(board, event.id)
+  if (!ended) return { jobs: [...board.jobs], extra: Math.max(0, board.extra - 1) }
+
+  return { jobs: board.jobs.filter(job => job.id !== ended.id), extra: board.extra }
+}
+
+// The line a finished job leaves in 'recently finished'.
+export const doneLine = (job: Job, how: JobEnd['how'], at: number): DoneEntry => ({
+  at,
+  text: `${job.title} ${how === 'done' ? '끝' : how === 'failed' ? '실패' : '멈춤'}`,
+  isOk: how === 'done',
+})
+
+// The subjects of the tasks that became completed between two task lists.
+export const newlyDone = (before: readonly Task[], after: readonly Task[]): string[] =>
+  after.flatMap(task => (task.status === 'completed' && before.some(one => one.id === task.id && one.subject === task.subject && one.status !== 'completed') ? [task.subject] : []))
+
+export const applyDone = (done: readonly DoneEntry[], entry: DoneEntry): DoneEntry[] => [...done, entry].slice(-DONE_ROOM)
+
+// The end of an output, which is all the progress line needs.
+export const tailOf = (text: string) => text.slice(-TAIL_ROOM)
+
+// The last line of an output as a person would see it: what the terminal shows after carriage returns, no colour
+// codes or control characters, one line of at most 120 characters. done / total: read from '10 / 64', '[4/7]' or '45%'.
+export const progressOf = (tail: string): { line: string; done?: number; total?: number } => {
+  const lines = tail
+    .split('\n')
+    .map(raw => raw.replace(/\r+$/, '').split('\r').pop() ?? '')
+    // eslint-disable-next-line no-control-regex
+    .map(shown => shown.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim())
+    .filter(Boolean)
+  const line = shorten(lines.pop() ?? '', LINE_ROOM)
+  const ratio = line.match(/(\d+)\s*\/\s*(\d+)/)
+  const percent = ratio ? null : line.match(/(\d+(?:\.\d+)?)\s*%/)
+  const done = ratio ? Number(ratio[1]) : percent ? Number(percent[1]) : null
+  const total = ratio ? Number(ratio[2]) : percent ? 100 : null
+
+  return done !== null && total !== null && total > 0 && done <= total ? { line, done, total } : { line }
+}
+
+// What is being done now, in one plain line, and since when. While a turn runs: the task in progress, else the plan's
+// step in progress, else the tool that is running, else a default. After the turn: the jobs it left, else waiting.
+export const nowLine = (input: {
+  tasks: readonly Task[]
+  step: { number: number; name: string } | null
+  tool: Live['tool']
+  jobs: readonly Job[]
+  extra: number
+  isWorking: boolean
+  turnStartedAt: number
+}): { text: string; since: number | null } => {
+  if (!input.isWorking) {
+    const first = input.jobs[0]
+    const more = input.jobs.length - 1 + input.extra
+    if (first) return { text: `뒤에서 도는 일을 기다리는 중 — ${first.title}${more > 0 ? ` 외 ${more}개` : ''}`, since: first.startedAt }
+
+    return { text: '사용자의 말을 기다리는 중', since: null }
+  }
+  const task = input.tasks.find(one => one.status === 'in_progress')
+  if (task) return { text: task.subject, since: task.at ?? input.turnStartedAt }
+  if (input.step) return { text: `${input.step.number}단계 — ${input.step.name}`, since: input.turnStartedAt }
+  if (input.tool) return { text: input.tool.target || input.tool.name, since: input.tool.startedAt }
+
+  return { text: '결과를 읽거나 다음을 정하는 중', since: input.turnStartedAt }
+}
+
+// 'HH:MM' in the person's own clock.
+const clockOf = (at: number, offsetMinutes: number) => formatReset(new Date(at).toISOString(), offsetMinutes, false)
+
+// The three parts of the now view as lines: the now line with its start time, one row per running job (its name,
+// how long it has run, its last progress line; ratio for a bar; isStale when its output has not changed for five
+// minutes and nobody said it ended), and the recently finished with their times.
+export const nowBlock = (input: {
+  now: { text: string; since: number | null }
+  board: JobBoard
+  done: readonly DoneEntry[]
+  at: number
+  offsetMinutes: number
+  formatDuration: (ms: number) => string
+}): { now: string; jobs: { text: string; ratio: number | null; isStale: boolean }[]; done: string[] } => ({
+  now: `${input.now.text}${input.now.since ? ` (${clockOf(input.now.since, input.offsetMinutes)}부터)` : ''}`,
+  jobs: [
+    ...input.board.jobs.map(job => {
+      const isStale = job.output !== undefined && input.at - job.changedAt > STALE_MS
+      const parts = [job.title, input.formatDuration(input.at - job.startedAt), job.line, job.kind === 'terminal' ? '터미널 탭' : '', isStale ? '끝난 듯' : '']
+
+      return { text: parts.filter(Boolean).join(' · '), ratio: job.done !== undefined && job.total ? job.done / job.total : null, isStale }
+    }),
+    ...(input.board.extra > 0 ? [{ text: `외 ${input.board.extra}개`, ratio: null, isStale: false }] : []),
+  ],
+  done: input.done.map(entry => `${clockOf(entry.at, input.offsetMinutes)} ${entry.text}`),
+})
