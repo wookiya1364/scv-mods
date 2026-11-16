@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, Expanded, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
+import type { AgentState, DoneEntry, Expanded, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
 import type { MirrorAct } from './model'
 import {
   STEP_TOOL,
@@ -72,7 +72,19 @@ import {
   estimateFromDurations,
   stepDurationsFromSignals,
   pickerPlans,
+  applyDone,
+  applyJobEvent,
+  doneLine,
+  findJob,
+  jobEndOf,
+  jobStartOf,
+  newlyDone,
+  nowBlock,
+  nowLine,
+  progressOf,
+  tailOf,
 } from './model'
+import type { JobEnd } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -93,6 +105,10 @@ const chosenSlug = async ($: Api) => (await read($, chosen)) ?? (await read($, h
 const expanded = atom({ plugin: 'scv-dashboard', key: 'expanded' } as const, { steps: false, tests: false, blocks: true, dreams: false } as Expanded)
 const runs = atom({ plugin: 'scv-dashboard', key: 'runs' } as const, [])
 const waiting = atom({ plugin: 'scv-dashboard', key: 'waiting' } as const, null as string | null)
+// The work turns left running (a command in the background, a watch, a terminal tab's command) until its end is heard.
+const jobs = atom({ plugin: 'scv-dashboard', key: 'jobs' } as const, { jobs: [], extra: 0 } as JobBoard)
+// What finished lately: a job that ended, a task of the task list that was completed.
+const doneLog = atom({ plugin: 'scv-dashboard', key: 'doneLog' } as const, [] as DoneEntry[])
 const live = atom({ plugin: 'scv-dashboard', key: 'live' } as const, { isWorking: false, turnStartedAt: 0, tool: null } as Live)
 const tasks = atom({ plugin: 'scv-dashboard', key: 'tasks' } as const, [])
 const history = atom({ plugin: 'scv-dashboard', key: 'history' } as const, [])
@@ -374,6 +390,41 @@ const alert = async ($: Api, text: string) => {
 // Calls the mod makes itself (its phone notification) are not the work it watches.
 const OWN_TOOLS = new Set<string>([STEP_TOOL, 'PushNotification'])
 
+// Takes a job off the board when its end is heard, and writes the line it leaves in 'recently finished'.
+const endJob = async ($: Api, end: JobEnd | null) => {
+  if (!end) return
+  const board = await read($, jobs)
+  const ended = findJob(board, end.id)
+  await update($, jobs, value => applyJobEvent(value, { kind: 'end', id: end.id }))
+  if (!ended) return
+  const at = await $.clock.now()
+  await update($, doneLog, list => applyDone(list, doneLine(ended, end.how, at)))
+}
+
+// An output file up to this size is read whole and cut; a larger one is read by its end alone.
+const WHOLE_READ_BYTES = 256 * 1024
+// When each job's output file last changed, as this copy of the module saw it: an unchanged file is not read again.
+const outputSeen = new Map<string, number>()
+
+// Reads the last line of each running job's output, when the file changed since it was last read.
+const readJobTails = async ($: Api) => {
+  if (await read($, mirror)) return
+  for (const job of (await read($, jobs)).jobs) {
+    if (!job.output) continue
+    const stat = await $.fs.stat(job.output).catch(() => undefined)
+    if (!stat || outputSeen.get(job.id) === stat.mtimeMs) continue
+    outputSeen.set(job.id, stat.mtimeMs)
+    const tail =
+      stat.size <= WHOLE_READ_BYTES
+        ? tailOf((await readText($, job.output)) ?? '')
+        : ((await $.process.run(['tail', '-c', '4000', job.output]).catch(() => undefined))?.stdout ?? '')
+    const progress = progressOf(tail)
+    if (!progress.line) continue
+    const at = await $.clock.now()
+    await update($, jobs, board => applyJobEvent(board, { kind: 'progress', id: job.id, at, ...progress }))
+  }
+}
+
 const isOwnCall = (origin: { plugin: string }) => origin.plugin === 'scv-dashboard' || origin.plugin.startsWith('scv-dashboard@')
 
 const openPane = ($: Api) => $.ui.open({ id: PANE, title: TITLE })
@@ -394,6 +445,9 @@ const mirrorState = async ($: Api) => ({
   runs: await read($, runs),
   waiting: await read($, waiting),
   live: await read($, live),
+  // A viewer draws the same jobs; where an output file sits on this computer is not its business.
+  jobs: await read($, jobs).then(board => ({ jobs: board.jobs.map(({ output: _output, ...job }) => job), extra: board.extra })),
+  doneLog: await read($, doneLog),
   tasks: await read($, tasks),
   history: await read($, history),
   stepLog: await read($, stepLog),
@@ -430,6 +484,8 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, runs, () => state.runs ?? [])
   await update($, waiting, () => state.waiting ?? null)
   await update($, live, () => state.live ?? { isWorking: false, turnStartedAt: 0, tool: null })
+  await update($, jobs, () => (Array.isArray(state.jobs?.jobs) ? { jobs: state.jobs.jobs, extra: Number(state.jobs.extra) || 0 } : { jobs: [], extra: 0 }))
+  await update($, doneLog, () => (Array.isArray(state.doneLog) ? state.doneLog : []))
   await update($, tasks, () => state.tasks ?? [])
   await update($, history, () => state.history ?? [])
   await update($, stepLog, () => state.stepLog ?? {})
@@ -534,7 +590,7 @@ export const register: Register = on => {
     await $.command.register({ name: 'scv-mirror', description: "Draw another session's SCV pane here: /scv-mirror <address>, or /scv-mirror stop", argumentHint: '<address> | stop' })
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     await refresh($)
-    $.clock.every(REFRESH_MS, () => void refresh($).then(() => pushMirror($)).catch(() => undefined))
+    $.clock.every(REFRESH_MS, () => void refresh($).then(() => readJobTails($)).then(() => pushMirror($)).catch(() => undefined))
     void openPane($).catch(() => undefined)
 
     return started
@@ -549,6 +605,9 @@ export const register: Register = on => {
       return { drop: `이 세션은 ${mirrored.host} 의 SCV 칸만 보여 주는 거울입니다 — 대화는 작업 세션 창에서 하세요. 이 세션을 다시 쓰려면 /scv-mirror stop` }
     }
     const submitted = await next(e)
+    // A background task's notice delivered into a running turn starts no turn of its own, so its end is taken here;
+    // one that wakes an idle session is taken where its turn starts.
+    if (kind === 'task-notification' && (e as { turnId?: string }).turnId) await endJob($, jobEndOf({ text: e.text }))
     // The person's own message (not one a plugin sent) starts a new 'while you were away'.
     const origin = (e as { origin?: { kind?: string } }).origin
     if (origin?.kind !== 'plugin' && !e.isMeta) {
@@ -654,8 +713,10 @@ export const register: Register = on => {
       return next(e)
     }
     const at = await $.clock.now()
-    // A new turn is work again: what the turn before left in the background has woken it, or the person has spoken.
+    // A new turn is work again. The wake-up it may have set for itself is spent; the jobs it left stay on the board
+    // until their own end is heard — the person speaking does not end them.
     await update($, live, value => ({ ...value, isWorking: true, turnStartedAt: at, background: false }))
+    await endJob($, jobEndOf({ text: e.text }))
     await update($, stopped, () => null)
     await update($, permit, () => null)
 
@@ -778,10 +839,14 @@ export const register: Register = on => {
     // The main conversation's tool is the 'now' line; a subagent's goes on that agent's own line.
     const isMain = isMainLoop(e)
     if (isMain) {
-      // Work this turn leaves running will wake the session by itself: the turn's end is then not the person's turn.
-      const leavesWork = isBackgroundStart(e.tool, input)
+      // A wake-up the session sets for itself will start a turn by itself: the turn's end is then not the person's turn.
+      // The jobs a call leaves running (a command in the background, a watch) go on the board once the call has answered.
+      const leavesWork = e.tool === 'ScheduleWakeup' && isBackgroundStart(e.tool, input)
       await update($, live, value => ({ ...value, tool: { name: e.tool, target: describeTool(e.tool, input), startedAt: at }, ...(leavesWork ? { background: true } : {}) }))
-      await update($, tasks, list => applyTaskEvent(list, e.tool, input))
+      const before = await read($, tasks)
+      const listed = applyTaskEvent(before, e.tool, input, at)
+      await update($, tasks, () => listed)
+      for (const subject of newlyDone(before, listed)) await update($, doneLog, list => applyDone(list, { at, text: `${subject} 끝`, isOk: true }))
     } else {
       await update($, agents, list => applyAgentEvent(list, { kind: 'tool', id: e.agentId ?? '', tool: e.tool, target: describeTool(e.tool, input), at }))
     }
@@ -801,6 +866,11 @@ export const register: Register = on => {
 
     try {
       const ran = await next(e)
+      if (isMain && !ran.deny && !ran.isError) {
+        const started = jobStartOf(e.tool, input, { result: ran.result, text: ran.text }, at)
+        if (started) await update($, jobs, board => applyJobEvent(board, { kind: 'start', job: started }))
+        await endJob($, jobEndOf({ tool: e.tool, input }))
+      }
       if (e.tool === 'Bash' && typeof input.command === 'string') {
         const plans = parsePlans((await read($, snapshot)).plans)
         const howTo = plans.flatMap(plan => plan.howToRun)
@@ -846,6 +916,8 @@ export const register: Register = on => {
     const halted = await read($, stopped)
     const sinceAt = await read($, since)
     const team = await read($, agents)
+    const board = await read($, jobs)
+    const finished = await read($, doneLog)
     const allRuns = await read($, runs)
     const dreams = parseDreams(shot.dreamsText)
     const message = await read($, note)
@@ -884,6 +956,47 @@ export const register: Register = on => {
       </Box>
     )
 
+    // What is being done now, the jobs still running and what finished lately: drawn with a plan or without one.
+    const nowCard = (step: { number: number; name: string } | null) => {
+      const view = nowBlock({
+        now: nowLine({ tasks: todo, step, tool: state.tool, jobs: board.jobs, extra: board.extra, isWorking: state.isWorking, turnStartedAt: state.turnStartedAt }),
+        board,
+        done: finished,
+        at,
+        offsetMinutes: offsetAt(at),
+        formatDuration,
+      })
+
+      return card(
+        <Box flexDirection="column">
+          <Text bold>지금 하는 일</Text>
+          <Text>{view.now}</Text>
+          {view.jobs.length > 0 ? <Text dimColor>{`뒤에서 도는 일 ${board.jobs.length + board.extra}`}</Text> : null}
+          <Box flexDirection="column">
+            {view.jobs.map((row, i) => (
+              <Box key={`job-${i}`} flexDirection="column">
+                {row.isStale ? <Text dimColor>{`· ${row.text}`}</Text> : <Text>{`· ${row.text}`}</Text>}
+                {row.ratio !== null ? (
+                  <Box width="100%" height={1} backgroundColor="#21262d">
+                    <Box width={`${Math.round(row.ratio * 100)}%`} height={1} backgroundColor="#4f8cff" />
+                  </Box>
+                ) : null}
+              </Box>
+            ))}
+          </Box>
+          {view.done.length > 0 ? <Text dimColor>최근 끝난 일</Text> : null}
+          <Box flexDirection="column">
+            {view.done.map((line, i) => (
+              <Text key={`done-${i}`} dimColor>
+                {line}
+              </Text>
+            ))}
+          </Box>
+        </Box>,
+        '#4f8cff',
+      )
+    }
+
     // Until the host's first state comes, what this session holds is its own folder or an older state: not shown.
     if (mirrored && !mirrored.at) {
       return (
@@ -902,6 +1015,7 @@ export const register: Register = on => {
           <Text bold>SCV 대시보드</Text>
           <Text dimColor>이 폴더에 진행 중인 SCV 계획이 없습니다. /scv:promote 로 계획을 만들면 여기에 보입니다.</Text>
           <Text dimColor>{`확인한 곳: ${shot.cwd || '(작업 폴더 모름)'}/scv/promote`}</Text>
+          {nowCard(null)}
           {dreamsPart()}
         </Box>
       )
@@ -912,7 +1026,7 @@ export const register: Register = on => {
     const run = runFor(plan, allRuns)
     const rows = mergeTests(plan, run)
     const blocks = findBlocks(derived.stages, run, asked, asking, halted)
-    const turn = turnStateOf({ isWorking: state.isWorking, hasEnded: state.hasEnded === true, blocks, agents: team.length, background: state.background === true })
+    const turn = turnStateOf({ isWorking: state.isWorking, hasEnded: state.hasEnded === true, blocks, agents: team.length, background: state.background === true, jobs: board.jobs.length + board.extra })
     const stages = applyTurn(applyBlocks(derived.stages, blocks), turn)
     const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked' || stage.state === 'yourTurn')
     const focused = (await read($, focusStep)) ?? (here >= 0 ? here : null)
@@ -1024,6 +1138,8 @@ export const register: Register = on => {
           barColor(stages, blocks),
         )}
 
+        {nowCard(current && current.state === 'doing' ? { number: stages.indexOf(current) + 1, name: current.name } : null)}
+
         {away
           ? card(
               <>
@@ -1063,7 +1179,9 @@ export const register: Register = on => {
                   ? `멈춤 — ${halted.why === 'error' ? '오류' : '거절'}`
                   : state.isWorking
                     ? `일하는 중 · ${formatDuration(at - state.turnStartedAt)}`
-                    : '쉬는 중'}
+                    : turn === 'background'
+                      ? '뒤의 일을 기다리는 중'
+                      : '쉬는 중'}
               </Text>
             </Box>
             <Text>{current ? `단계: ${current.name}` : '진행 중인 단계 없음'}</Text>

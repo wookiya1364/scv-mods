@@ -74,7 +74,29 @@ export type Since = { at: number; slug: string; doneSteps: number[] }
 // One usage window as the session reports it: five_hour, seven_day or a gateway's spend_limit.
 export type UsageLimit = { kind: string; percentUsed: number; resetsAt?: string }
 
-export type Task = { id: string; subject: string; status: 'pending' | 'in_progress' | 'completed' }
+// at: when the task became the one in progress (absent for a task that never was, or a list read before 0.2.26).
+export type Task = { id: string; subject: string; status: 'pending' | 'in_progress' | 'completed'; at?: number }
+
+// Work a turn left running after it ended: a command sent to the background, a watch, or a command started in a
+// terminal tab. output: the file its output goes to (absent for a terminal tab); line, done, total: the last
+// progress line read from it; changedAt: when that file last changed (the start, until it does).
+export type Job = {
+  id: string
+  title: string
+  kind: 'command' | 'watch' | 'terminal'
+  startedAt: number
+  changedAt: number
+  output?: string
+  line?: string
+  done?: number
+  total?: number
+}
+
+// The jobs still running, at most eight remembered; extra: how many more started while eight were running.
+export type JobBoard = { jobs: Job[]; extra: number }
+
+// One line of 'recently finished': when, what, and whether it ended well.
+export type DoneEntry = { at: number; text: string; isOk: boolean }
 
 export type Dreams = { date: string; items: string[]; reportPath: string | null }
 
@@ -111,6 +133,8 @@ declare module 'claude-code' {
       'host-in-view': string | null
       expanded: Expanded
       runs: TestRun[]
+      jobs: JobBoard
+      doneLog: DoneEntry[]
       waiting: string | null
       live: Live
       tasks: Task[]
