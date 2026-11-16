@@ -40,6 +40,7 @@ import {
   isTestCommand,
   logWork,
   mergeMarks,
+  signalAnswer,
   mergeTests,
   nextAction,
   parseDreams,
@@ -60,7 +61,7 @@ import {
   usedNames,
   writtenCode,
   archivedAtOf,
-  nextWorkingOn,
+  nextStarted,
   statusWords,
   titleOf,
   returnLine,
@@ -120,8 +121,9 @@ const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as
 const stepFunctions = atom({ plugin: 'scv-dashboard', key: 'stepFunctions' } as const, {} as Record<string, StepFunctions>)
 // Whether a step's tool calls show under its functions (folded by default).
 const showCalls = atom({ plugin: 'scv-dashboard', key: 'showCalls' } as const, false)
-// The step this session said it started (scv_step doing) and has not yet said is done or blocked; its work goes there.
-const workingOn = atom({ plugin: 'scv-dashboard', key: 'workingOn' } as const, null as { plan: string; step: number } | null)
+// The steps this session said it started (scv_step doing) and has not yet said are done or blocked, oldest first;
+// its work goes to the last one. Steps worked on at the same time are all here.
+const startedSteps = atom({ plugin: 'scv-dashboard', key: 'startedSteps' } as const, [] as { plan: string; step: number }[])
 const signals = atom({ plugin: 'scv-dashboard', key: 'signals' } as const, [] as StepSignal[])
 const permit = atom({ plugin: 'scv-dashboard', key: 'permit' } as const, null as Permit | null)
 const stopped = atom({ plugin: 'scv-dashboard', key: 'stopped' } as const, null as Stopped | null)
@@ -339,15 +341,13 @@ const noteFunctions = async ($: Api, slug: string, step: number, code: string) =
   await $.store.set(functionsKey(shot.cwd), next).catch(() => undefined)
 }
 
-const STATE_WORD = { doing: '시작', done: '끝', blocked: '막힘' } as const
-
 // The mod's own tool is not among the tool names the types know, so its hooks match it by pattern.
 const STEP_TOOL_NAME = new RegExp(`^${STEP_TOOL}$`)
 
 const STEP_TOOL_SPEC = {
   name: 'scv_step',
   description:
-    "Report a step of an SCV plan's Suggested path so the SCV pane shows real progress: state doing (started), done (finished) or blocked (cannot go on — give the reason in note). Changes no file.",
+    "Report a step of an SCV plan's Suggested path so the SCV pane shows real progress: state doing (started), done (finished) or blocked (cannot go on — give the reason in note). Steps worked on at the same time are each reported doing; the answer names every step now in progress. Changes no file.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -824,13 +824,10 @@ export const register: Register = on => {
     const kept = applySignal(before, asked, await $.clock.now())
     await $.store.set(signalsKey(shot.cwd), kept).catch(() => undefined)
     await update($, signals, () => kept)
-    await update($, workingOn, current => nextWorkingOn(current, asked))
+    await update($, startedSteps, started => nextStarted(started, asked))
     const plan = plans.find(one => one.slug === asked.plan)
-    const count = plan ? countStages(deriveStages(mergeMarks(plan, kept)).stages) : undefined
 
-    return {
-      result: `기록함: ${asked.plan} ${asked.step}단계 ${STATE_WORD[asked.state as keyof typeof STATE_WORD]}${count ? ` — 진행 ${count.done}/${count.total}` : ''}`,
-    }
+    return { result: signalAnswer(asked, plan && deriveStages(mergeMarks(plan, kept)).stages) }
   }))
 
   on('tool.call', async ($, e, next) => {
@@ -852,7 +849,8 @@ export const register: Register = on => {
       await update($, agents, list => applyAgentEvent(list, { kind: 'tool', id: e.agentId ?? '', tool: e.tool, target: describeTool(e.tool, input), at }))
     }
     // Only work after this session said it started a step is that step's; a plan's leftover mark takes nothing.
-    const working = await read($, workingOn)
+    const started = await read($, startedSteps)
+    const working = started[started.length - 1]
     if (working) {
       const entry = { tool: e.tool, target: describeTool(e.tool, input), at }
       await update($, stepLog, log => logWork(log, `${working.plan}#${working.step - 1}`, entry))
@@ -1036,7 +1034,11 @@ export const register: Register = on => {
     const blocks = findBlocks(derived.stages, run, asked, asking, halted)
     const turn = turnStateOf({ isWorking: state.isWorking, hasEnded: state.hasEnded === true, blocks, agents: team.length, background: state.background === true, jobs: board.jobs.length + board.extra })
     const stages = applyTurn(applyBlocks(derived.stages, blocks), turn)
-    const here = stages.findIndex(stage => stage.state === 'doing' || stage.state === 'blocked' || stage.state === 'yourTurn')
+    // Steps worked on at the same time are all 'here'; the one opened by default is the step this session's work
+    // goes to (the last it said it started), else the first of them.
+    const isHere = (state: StageState | undefined) => state === 'doing' || state === 'blocked' || state === 'yourTurn'
+    const lastStarted = [...(await read($, startedSteps))].reverse().find(one => one.plan === plan.slug && isHere(stages[one.step - 1]?.state))
+    const here = lastStarted ? lastStarted.step - 1 : stages.findIndex(stage => isHere(stage.state))
     const focused = (await read($, focusStep)) ?? (here >= 0 ? here : null)
     const focusedStage = focused === null ? undefined : stages[focused]
     const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
@@ -1061,7 +1063,7 @@ export const register: Register = on => {
         : estimateEta(await read($, history), plan.slug, count.total - count.done)
     const action = nextAction(plan.slug, plan.status, stages, blocks, turn)
     const percent = count.total ? Math.round((count.done / count.total) * 100) : 0
-    const current = stages.find(stage => stage.state === 'doing' || stage.state === 'blocked' || stage.state === 'yourTurn')
+    const current = here >= 0 ? stages[here] : undefined
     const doneTasks = todo.filter(task => task.status === 'completed').length
     const doingTask = todo.find(task => task.status === 'in_progress')
     const away = sinceAt
@@ -1261,7 +1263,7 @@ export const register: Register = on => {
                       {`${i + 1}. ${stage.name}`}
                     </Button>
                     <Text color={STATE_COLOR[stage.state]}>
-                      {i === here ? `${STATE_LABEL[stage.state]}  ◀ 지금 여기` : STATE_LABEL[stage.state]}
+                      {isHere(stage.state) ? `${STATE_LABEL[stage.state]}  ◀ 지금 여기` : STATE_LABEL[stage.state]}
                     </Text>
                   </Box>
                 </Box>
