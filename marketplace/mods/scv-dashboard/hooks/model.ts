@@ -1066,6 +1066,23 @@ export const parseMirror = (text: string): MirrorMessage | null => {
 export const isMirrorDue = (last: { sent: string; at: number }, body: string, at: number, gap: number) =>
   body !== last.sent && (last.at === 0 || at - last.at >= gap)
 
+// Whether a viewer asks again by itself: only while no state has come yet and its own address is no longer the
+// one it gave (Remote Control written down late). It never asks again just because nothing came for a while —
+// each ask is a row in the working session's conversation.
+export const isMirrorAskDue = (mirrored: { at: number; from?: string }, ownAddress: string) => !mirrored.at && ownAddress !== mirrored.from
+
+const MIRROR_QUIET_MS = 10 * 60_000
+
+// The mirror line: whose pane this is and how long ago its state came; quiet for over ten minutes, it says so
+// (the working session rests, or the link is gone — the pane cannot tell which).
+export const mirrorLineText = (input: { host: string; name?: string | null; receivedAt: number; at: number; formatDuration: (ms: number) => string }) => {
+  const since = Math.max(0, input.at - input.receivedAt)
+  const heard = input.receivedAt ? `${input.formatDuration(since)} 전 받음` : '상태를 기다리는 중'
+  const quiet = input.receivedAt && since > MIRROR_QUIET_MS ? ' · 10분 넘게 소식 없음(쉬는 중이거나 끊김)' : ''
+
+  return `거울: ${hostLabel(input.host, input.name)} · ${heard}${quiet}`
+}
+
 // Whether an address the person typed is this session's own: its Remote Control id or its local id, `bridge:` or not.
 export const isOwnAddress = (asked: string, own: { address: string; localId: string }) => {
   const bare = asked.trim().replace(/^bridge:/, '')
