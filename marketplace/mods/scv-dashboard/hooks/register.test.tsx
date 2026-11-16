@@ -1626,7 +1626,8 @@ test('mirror-two-way T4 BYE 를 받은 시청자에게는 바뀌어도 보내지
   expect(env.sent).toHaveLength(1)
 })
 
-test('mirror-two-way T5 보기 세션은 소식이 없어도 10분 전에는 다시 요청하지 않는다', async ($, on) => {
+// 0.2.27: 스스로 다시 묻지 않는다 — 묻는 글마다 작업 세션의 대화에 '메시지 받음' 줄이 하나씩 생기기 때문이다.
+test('mirror-two-way T5 보기 세션은 소식이 없어도 스스로 다시 요청하지 않는다', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const env = engine(on, {}, DREAMS, undefined, {}, true)
   env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
@@ -1638,8 +1639,10 @@ test('mirror-two-way T5 보기 세션은 소식이 없어도 10분 전에는 다
   expect(env.sent).toHaveLength(1)
 
   await clock.advance(2 * 60_000)
-  expect(env.sent).toHaveLength(2)
-  expect(env.sent[1]?.text).toBe('SCV-MIRROR HELLO session_viewer')
+  expect(env.sent).toHaveLength(1)
+
+  await clock.advance(60 * 60_000)
+  expect(env.sent).toHaveLength(1)
 })
 
 test('mirror-late-address T1 원격 주소가 늦게 적히면, 상태를 기다리는 동안 새 주소로 저절로 다시 요청한다', async ($, on) => {
@@ -2693,4 +2696,44 @@ test('now-view T14 순수 단계 — 같은 입력 같은 출력, 입력을 바�
   expect(jobEndOf({ tool: 'Read', input: {} })).toBeNull()
   expect(findJob(board, null)?.id).toBe('a')
   expect(findJob(board, 'nope')).toBeUndefined()
+})
+
+// ── mirror-no-reask: 보는 세션은 스스로 다시 묻지 않고, 사람이 '다시 요청'을 누른다 ───────────
+
+import { isMirrorAskDue, mirrorLineText } from './model'
+
+test('mirror-no-reask T2 다시 요청 버튼은 누를 때 한 번 묻는다', async ($, on) => {
+  const env = engine(on, {})
+  env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  await start($)
+  await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  expect(env.sent).toHaveLength(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Button', key: 'mirror-ask' }))?.text).toBe('다시 요청')
+  await ui.press({ key: 'mirror-ask' })
+  expect(env.sent).toHaveLength(2)
+  expect(env.sent[1]?.text).toBe('SCV-MIRROR HELLO session_viewer')
+  expect(env.toasts.filter(toast => toast.includes('다시 요청했습니다'))).toHaveLength(1)
+  // 못 보냈으면 못 보냈다고 알린다
+  env.delivery.isDelivered = false
+  await ui.press({ key: 'mirror-ask' })
+  expect(env.toasts.some(toast => toast.includes('보내지 못했습니다'))).toBe(true)
+  await ui.unmount()
+})
+
+test('mirror-no-reask T3 10분 넘게 받지 못했으면 거울 줄이 그 사실을 말한다', () => {
+  const base = { host: 'session_host', name: '작업 세션', formatDuration }
+  expect(mirrorLineText({ ...base, receivedAt: 1_000_000, at: 1_030_000 })).toBe('거울: 작업 세션 (session_host) · 30초 전 받음')
+  expect(mirrorLineText({ ...base, receivedAt: 1_000_000, at: 1_000_000 + 11 * 60_000 })).toBe(
+    '거울: 작업 세션 (session_host) · 11분 0초 전 받음 · 10분 넘게 소식 없음(쉬는 중이거나 끊김)',
+  )
+  expect(mirrorLineText({ ...base, receivedAt: 0, at: 1_000_000 + 11 * 60_000 })).toBe('거울: 작업 세션 (session_host) · 상태를 기다리는 중')
+  expect(mirrorLineText({ host: 'session_host', receivedAt: 1_000_000, at: 1_001_000, formatDuration })).toBe('거울: session_host · 1초 전 받음')
+})
+
+test('mirror-no-reask T4 스스로 묻는 것은 상태를 못 받은 동안 주소가 달라졌을 때뿐이다', () => {
+  expect(isMirrorAskDue({ at: 1_000_000, from: 'a' }, 'a')).toBe(false)
+  expect(isMirrorAskDue({ at: 0, from: 'a' }, 'a')).toBe(false)
+  expect(isMirrorAskDue({ at: 0, from: 'a' }, 'b')).toBe(true)
+  expect(isMirrorAskDue({ at: 1_000_000, from: 'a' }, 'b')).toBe(false)
 })

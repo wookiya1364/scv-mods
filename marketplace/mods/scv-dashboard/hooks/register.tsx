@@ -83,6 +83,8 @@ import {
   nowLine,
   progressOf,
   tailOf,
+  isMirrorAskDue,
+  mirrorLineText,
 } from './model'
 import type { JobEnd } from './model'
 
@@ -92,8 +94,6 @@ const REFRESH_MS = 3000
 // A working session sends a changed state no sooner than this after its last send; an unchanged one is not sent.
 // Each send is a row in the viewer's app (the app draws one per delivery from another computer, consumed or not).
 const MIRROR_GAP_MS = 10_000
-// A viewer that heard nothing for this long asks again, in case the working session lost it.
-const MIRROR_ASK_MS = 10 * 60_000
 const MIRROR_MISSES = 3
 
 const snapshot = atom({ plugin: 'scv-dashboard', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '', root: '' } as Snapshot)
@@ -235,10 +235,11 @@ const refresh = async ($: Api) => {
   const mirrored = await read($, mirror)
   if (mirrored) {
     await update($, now, () => at)
-    if (at - Math.max(mirrored.at, mirrored.askedAt) > MIRROR_ASK_MS) await askMirror($, mirrored.host)
+    // A viewer does not ask again because nothing came for a while: each ask is a row in the working session's
+    // conversation, and a resting session has nothing to send. The person asks with the mirror line's button.
     // A session's Remote Control address is written down a little after it starts, so its first ask may carry the
     // local one, which another computer cannot reach. While nothing has come, a newer address asks again.
-    else if (!mirrored.at && (await ownAddress($)).address !== mirrored.from) await askMirror($, mirrored.host)
+    if (!mirrored.at && isMirrorAskDue(mirrored, (await ownAddress($)).address)) await askMirror($, mirrored.host)
 
     return
   }
@@ -922,10 +923,17 @@ export const register: Register = on => {
     const dreams = parseDreams(shot.dreamsText)
     const message = await read($, note)
     const mirrored = await read($, mirror)
+    // Asks the working session once more, when the person presses; what came of it is said in a toast.
+    const askAgain = async () => {
+      if (!mirrored) return
+      const { sent } = await askMirror($, mirrored.host)
+      $.ui.toast(sent.isDelivered ? 'SCV: 작업 세션에 다시 요청했습니다' : `SCV: 다시 요청을 보내지 못했습니다 — ${sent.reason}`)
+    }
     const mirrorLine = mirrored ? (
-      <Text color="#4f8cff">
-        {`거울: ${hostLabel(mirrored.host, mirrored.name)} · ${mirrored.at ? `${formatDuration(Math.max(0, at - mirrored.at))} 전 받음` : '상태를 기다리는 중'}`}
-      </Text>
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+        <Text color="#4f8cff">{mirrorLineText({ host: mirrored.host, name: mirrored.name, receivedAt: mirrored.at, at, formatDuration })}</Text>
+        <Button key="mirror-ask" label="다시 요청" onPress={() => void askAgain().catch(() => undefined)} />
+      </Box>
     ) : null
 
     const toggle = (key: keyof Expanded) => () => void update($, expanded, value => ({ ...value, [key]: !value[key] }))
