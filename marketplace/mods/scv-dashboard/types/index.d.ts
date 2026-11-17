@@ -36,7 +36,23 @@ export type Plan = {
 export type Stage = { name: string; state: StageState; refs: string[]; role?: string; note?: string }
 
 // What Claude reported about one step of a plan's Suggested path, kept in the mod's own store.
-export type StepSignal = { plan: string; step: number; state: 'doing' | 'done' | 'blocked'; note: string; at: number; startedAt?: number }
+// What a step reported as its proof when it was done: project files (pictures, results) and/or a command's output.
+export type EvidenceFile = { path: string; size: number; kind: 'image' | 'text' | 'other' }
+export type Evidence = { files: EvidenceFile[]; output?: string }
+
+// Where a running step's real progress can be seen: a log file in the project and/or a page to open.
+export type StepSource = { log?: string; url?: string }
+
+export type StepSignal = {
+  plan: string
+  step: number
+  state: 'doing' | 'done' | 'blocked'
+  note: string
+  at: number
+  startedAt?: number
+  evidence?: Evidence
+  source?: StepSource
+}
 
 export type WorkEntry = { tool: string; target: string; at: number }
 

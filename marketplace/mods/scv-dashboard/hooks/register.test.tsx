@@ -98,7 +98,7 @@ const DREAMS = JSON.stringify({
 })
 
 // The output files of background jobs the now-view tests set up, and the ones the mod read.
-const JOB_OUTPUTS: { files: Record<string, { text: string; mtimeMs: number; size?: number }>; reads: string[] } = { files: {}, reads: [] }
+const JOB_OUTPUTS: { files: Record<string, { text: string; mtimeMs: number; size?: number; base64?: string }>; reads: string[] } = { files: {}, reads: [] }
 
 // record: an archived plan's ARCHIVED_AT.md
 type Files = Record<string, { planText: string; testsText: string; record?: string }>
@@ -162,6 +162,8 @@ const engine = (
     const output = JOB_OUTPUTS.files[e.path]
     if (output) {
       JOB_OUTPUTS.reads.push(e.path)
+      // a picture sent as a step's evidence is read as bytes
+      if (output.base64 !== undefined && e.as === 'bytes') return { value: { base64: output.base64 } } as never
 
       return { value: output.text }
     }
@@ -727,8 +729,10 @@ const FIVE = ['a', 'b', 'c', 'd', 'e']
 
 const COMPOSE = { model: 'claude-test', promptModel: 'claude-test', surfaces: ['desktop'], tools: [], outputStyle: null, traits: [] } as const
 
+// A done signal carries proof since 0.2.29; these tests send a command's output.
+const DONE_OUTPUT = '시험 통과'
 const signal = ($: Engine, step: number, state: string, note?: string, slug = 'a') =>
-  $.tool.call({ tool: STEP_TOOL, plan: slug, step, state, ...(note ? { note } : {}) } as never) as Promise<{ deny?: string; result?: unknown }>
+  $.tool.call({ tool: STEP_TOOL, plan: slug, step, state, ...(note ? { note } : {}), ...(state === 'done' ? { output: DONE_OUTPUT } : {}) } as never) as Promise<{ deny?: string; result?: unknown }>
 
 test('step-signal T1 단계 끝 신호를 받으면 진행률이 1 오른다', async ($, on) => {
   engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
@@ -773,7 +777,7 @@ test('step-signal T3 틀린 신호는 거절하고 이유를 돌려준다', asyn
   expect((await signal($, 1, 'doing')).deny).toContain('1단계는 이미 끝났습니다')
   expect((await signal($, 2, 'blocked')).deny).toContain('이유(note)')
   expect((await signal($, 2, 'paused')).deny).toContain('doing · done · blocked')
-  expect(store.get('signals:/work')).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 1_000_000 }])
+  expect(store.get('signals:/work')).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 1_000_000, evidence: { files: [], output: DONE_OUTPUT } }])
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(await text(ui, /^1\/5$/)).toBe('1/5')
@@ -2566,7 +2570,7 @@ test('now-view T8 터미널 탭에서 시작한 명령도 뒤에서 도는 일�
   await stopped.unmount()
 })
 
-test('now-view T10 다른 기기에서 보는 화면에도 같은 세 가지가 보인다', async ($, on) => {
+test('now-view T10 다른 기기에서 보는 화면에도 뒤에서 도는 일과 끝난 일이 보인다', async ($, on) => {
   const env = engine(on, {})
   env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
   await start($)
@@ -2590,7 +2594,9 @@ test('now-view T10 다른 기기에서 보는 화면에도 같은 세 가지가 
     ),
   })
   const drawn = await drawnText($)
-  expect(drawn).toContain('뒤에서 도는 일을 기다리는 중 — 측정 128판')
+  // 0.2.29+ — '지금 하는 일' 한 줄은 그리지 않는다(단계 상세의 '지금 진행'이 맡는다). 뒤에서 도는 일과 그 진행은 그대로.
+  expect(drawn).not.toContain('지금 하는 일')
+  expect(drawn).toContain('측정 128판')
   expect(drawn).toContain('끝난 판: 10 / 64')
   expect(drawn).toContain('일 1 끝')
   expect(drawn).toContain('일 2 실패')
@@ -2797,7 +2803,7 @@ test('parallel-steps T3 이미 끝난 단계에 시작 · 막힘을 보내면 �
 
   expect((await signal($, 1, 'doing')).deny).toContain('1단계는 이미 끝났습니다')
   expect((await signal($, 1, 'blocked', '이유')).deny).toContain('1단계는 이미 끝났습니다')
-  expect(store.get('signals:/work')).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 1_000_000 }])
+  expect(store.get('signals:/work')).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 1_000_000, evidence: { files: [], output: DONE_OUTPUT } }])
 })
 
 test('parallel-steps T4 뒤 단계의 막힘도 받는다 — 진행 중인 다른 단계는 그대로', async ($, on) => {
@@ -2863,4 +2869,125 @@ test('parallel-steps T8 사용자 차례 · 답 기다림은 진행 중인 단�
   const stages = [st('a', 'done'), st('b', 'doing'), st('c', 'waiting'), st('d', 'doing')]
   expect(applyTurn(stages, 'yourTurn').map(stage => stage.state)).toEqual(['done', 'yourTurn', 'waiting', 'yourTurn'])
   expect(applyBlocks(stages, [{ kind: 'waiting', title: '', detail: '' }]).map(stage => stage.state)).toEqual(['done', 'blocked', 'waiting', 'blocked'])
+})
+
+// ── step evidence: '끝'에는 증거 · 누르면 증거와 실제 진행 (계획 20261117-wookiya1364-checks-not-comments 4단계) ─────────
+import { judgeEvidence, liveOf } from './model'
+
+type FakeFile = { text?: string; base64?: string; mtimeMs: number; size?: number; real?: string }
+
+// The project's files a step sends as evidence or as its log, answered by stat and read; the project root is /work.
+const evidenceFiles = (on: Parameters<TestBody>[1], files: Record<string, FakeFile>) => {
+  on('fs.stat', (_, e) => {
+    if (e.path === '/work') return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false, realPath: '/work' } } as never
+    const found = files[e.path]
+    if (!found) return { deny: `ENOENT ${e.path}` }
+
+    return { value: { kind: 'file', size: found.size ?? (found.text ?? found.base64 ?? '').length, mtimeMs: found.mtimeMs, isLink: false, realPath: found.real ?? e.path } } as never
+  })
+  for (const [path, found] of Object.entries(files)) {
+    JOB_OUTPUTS.files[path] = { text: found.text ?? '', mtimeMs: found.mtimeMs, base64: found.base64, size: found.size ?? (found.text ?? found.base64 ?? '').length }
+  }
+}
+
+const doneWith = ($: Engine, step: number, extra: Record<string, unknown>) =>
+  $.tool.call({ tool: STEP_TOOL, plan: 'a', step, state: 'done', ...extra } as never) as Promise<{ deny?: string; result?: unknown }>
+const doingWith = ($: Engine, step: number, extra: Record<string, unknown> = {}) =>
+  $.tool.call({ tool: STEP_TOOL, plan: 'a', step, state: 'doing', ...extra } as never) as Promise<{ deny?: string; result?: unknown }>
+const lastState = (store: Map<string, unknown>, step: number) =>
+  ((store.get('signals:/work') as { step: number; state: string }[] | undefined) ?? []).filter(one => one.step === step).pop()?.state
+
+test('step-evidence T11 증거 없는 끝은 거절하고 단계는 진행 중 그대로', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, {})
+  await start($)
+  await doingWith($, 2)
+  const answered = await doneWith($, 2, {})
+  expect(answered.deny).toContain('끝에는 증거가 필요합니다')
+  expect(lastState(store, 2)).toBe('doing')
+})
+
+test('step-evidence T12 단계 시작 전에 생긴 파일은 받지 않고, 시작 뒤 파일은 받는다', async ($, on) => {
+  const { store, clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, { '/work/old.png': { base64: 'AA', mtimeMs: 500_000 }, '/work/new.png': { base64: 'AA', mtimeMs: 1_500_000 } })
+  await start($)
+  await doingWith($, 2)
+  clock.at = 2_000_000
+  expect((await doneWith($, 2, { evidence: ['old.png'] })).deny).toContain('단계 시작 전에 생긴 파일입니다(옛 파일): old.png')
+  expect((await doneWith($, 2, { evidence: ['new.png'] })).deny).toBeUndefined()
+  expect(lastState(store, 2)).toBe('done')
+})
+
+test('step-evidence T13 프로젝트 밖 · 없는 파일은 이유를 달리해 거절한다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, { '/etc/passwd': { text: 'x', mtimeMs: 9_000_000 }, '/work/link.png': { base64: 'AA', mtimeMs: 9_000_000, real: '/tmp/elsewhere.png' } })
+  await start($)
+  await doingWith($, 1)
+  const outside = await doneWith($, 1, { evidence: ['/etc/passwd'] })
+  const linked = await doneWith($, 1, { evidence: ['link.png'] })
+  const missing = await doneWith($, 1, { evidence: ['missing.png'] })
+  expect(outside.deny).toContain('프로젝트 밖 파일은 증거로 받지 않습니다: /etc/passwd')
+  expect(linked.deny).toContain('프로젝트 밖 파일은 증거로 받지 않습니다: link.png')
+  expect(missing.deny).toContain('증거 파일이 없습니다: missing.png')
+  expect(outside.deny).not.toBe(missing.deny)
+})
+
+test('step-evidence T14 명령 출력 발췌도 증거다 — 빈 글은 아니다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, {})
+  await start($)
+  expect((await doneWith($, 1, { output: '   ' })).deny).toContain('끝에는 증거가 필요합니다')
+  expect((await doneWith($, 1, { output: '통과 21 · 실패 0' })).deny).toBeUndefined()
+  // 순수 판정: 출력은 끝부분 1200자만 남는다
+  const kept = judgeEvidence([], 'x'.repeat(2000), [], undefined)
+  expect(kept.isOk && kept.evidence.output?.length).toBe(1200)
+})
+
+test('step-evidence T15 끝난 단계를 누르면 그림 · 글 앞부분 · 출력이 보인다', async ($, on) => {
+  const { clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, { '/work/shot.png': { base64: 'iVBORw0KGgo=', mtimeMs: 1_200_000 }, '/work/result.txt': { text: '정확도 0.91 · 손실 0.12', mtimeMs: 1_200_000 } })
+  await start($)
+  await doingWith($, 1)
+  clock.at = 1_300_000
+  expect((await doneWith($, 1, { evidence: ['shot.png', 'result.txt'], output: '통과 21 · 실패 0' })).deny).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'step-1' })
+  const drawn = await drawnText($)
+  const pictures = (drawn.match(/data:image\/png;base64,iVBORw0KGgo=/g) ?? []).length
+  const textPart = (drawn.match(/정확도 0\.91 · 손실 0\.12/g) ?? []).length
+  const outputPart = (drawn.match(/통과 21 · 실패 0/g) ?? []).length
+  expect([pictures, textPart, outputPart]).toEqual([1, 1, 1])
+  expect(drawn).toContain('▸ shot.png 열기')
+  await ui.unmount()
+})
+
+test('step-evidence T16 진행 중 단계를 누르면 로그 최근 줄 · 진행률 · 주소 버튼이 보이고 주소는 읽지 않는다', async ($, on) => {
+  const { processes } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, { '/work/train.log': { text: 'load data\nepoch 1/10 loss 0.90\nepoch 3/10 loss 0.42\n', mtimeMs: 1_100_000 } })
+  await start($)
+  await doingWith($, 1, { log: 'train.log', url: 'https://example.test/run/7' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'step-1' })
+  await ui.press({ key: 'step-1' })
+  const drawn = await drawnText($)
+  expect(drawn).toContain('epoch 3/10 loss 0.42')
+  expect(drawn).toContain('"width":"30%"')
+  expect(drawn).toContain('▸ 진행 화면 열기 — https://example.test/run/7')
+  // 주소는 읽지 않는다: 모드는 웹을 읽는 길($.web)을 쓰지 않고, 여는 명령으로만 넘긴다
+  expect(processes.filter(argv => argv.includes('https://example.test/run/7'))).toEqual([])
+  await ui.press({ key: 'live-url' })
+  expect(processes.some(argv => argv.includes('https://example.test/run/7'))).toBe(true)
+  await ui.unmount()
+  // 순수: 진행 줄 읽기
+  expect(liveOf('a\nstep 45%\n').ratio).toBe(0.45)
+  expect(liveOf('no numbers here\n').ratio).toBeNull()
+})
+
+test('step-evidence T17 지금 하는 일 카드는 없다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, {})
+  await start($)
+  await doingWith($, 1)
+  const drawn = await drawnText($)
+  expect(drawn).not.toContain('지금 하는 일')
 })

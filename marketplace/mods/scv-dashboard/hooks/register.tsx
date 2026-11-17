@@ -1,8 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, DoneEntry, Expanded, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
-import type { MirrorAct } from './model'
+import type { AgentState, DoneEntry, Evidence, Expanded, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
+import type { FileFact, MirrorAct } from './model'
 import {
   STEP_TOOL,
   isMirrorDue,
@@ -26,6 +26,11 @@ import {
   buildAlertText,
   buildStepPrompt,
   checkSignal,
+  IMAGE_DRAW_BYTES,
+  imageSvg,
+  judgeEvidence,
+  lastSignalOf,
+  liveOf,
   classifyTurnEnd,
   countStages,
   nodeIconSvg,
@@ -323,6 +328,32 @@ const openReport = async ($: Api) => {
   await update($, note, () => `보고서를 열지 못했습니다: ${full}`)
 }
 
+// Opens a file or page the way the system opens it (a picture viewer, the browser); the note says when it could not.
+const openThing = async ($: Api, target: string) => {
+  for (const opener of ['xdg-open', 'open']) {
+    const opened = await $.process.run([opener, target]).catch(() => undefined)
+    if (opened?.exitCode === 0) return void update($, note, () => null)
+  }
+  await update($, note, () => `열지 못했습니다: ${target}`)
+}
+
+// The last part of a running step's log, read each time the pane is drawn (a large file by its end alone).
+const logTail = async ($: Api, full: string) => {
+  const stat = await $.fs.stat(full).catch(() => undefined)
+  if (!stat || stat.kind !== 'file') return null
+  return stat.size <= WHOLE_READ_BYTES
+    ? tailOf((await readText($, full)) ?? '')
+    : ((await $.process.run(['tail', '-c', '4000', full]).catch(() => undefined))?.stdout ?? '')
+}
+
+// A picture sent as evidence, drawn when small enough; null leaves it to the open button.
+const evidencePicture = async ($: Api, full: string, size: number) => {
+  if (size > IMAGE_DRAW_BYTES) return null
+  const bytes = (await $.fs.read(full, { as: 'bytes' }).catch(() => undefined)) as { base64?: string } | undefined
+
+  return bytes?.base64 ? imageSvg(bytes.base64, full) : null
+}
+
 // What a step's writing made and called, kept with the step: functions under a marker are made; known functions (the
 // dictionary's, and those the plan's other steps made) it names are used.
 const noteFunctions = async ($: Api, slug: string, step: number, code: string) => {
@@ -341,13 +372,27 @@ const noteFunctions = async ($: Api, slug: string, step: number, code: string) =
   await $.store.set(functionsKey(shot.cwd), next).catch(() => undefined)
 }
 
+// What the file system says of each path a step sent: found, inside the project (where it really lands), last change.
+const fileFacts = async ($: Api, cwd: string, paths: readonly string[]): Promise<FileFact[]> =>
+  Promise.all(
+    paths.map(async path => {
+      const full = path.startsWith('/') ? path : `${cwd}/${path}`
+      const stat = await $.fs.stat(full, { resolve: true }).catch(() => undefined)
+      const root = (await $.fs.stat(cwd, { resolve: true }).catch(() => undefined))?.realPath ?? cwd
+      const real = stat?.realPath ?? full
+      const isInside = real === root || real.startsWith(`${root}/`)
+
+      return { path, isFound: stat !== undefined && stat.kind === 'file', isInside, mtimeMs: stat?.mtimeMs ?? 0, size: stat?.size ?? 0 }
+    }),
+  )
+
 // The mod's own tool is not among the tool names the types know, so its hooks match it by pattern.
 const STEP_TOOL_NAME = new RegExp(`^${STEP_TOOL}$`)
 
 const STEP_TOOL_SPEC = {
   name: 'scv_step',
   description:
-    "Report a step of an SCV plan's Suggested path so the SCV pane shows real progress: state doing (started), done (finished) or blocked (cannot go on — give the reason in note). Steps worked on at the same time are each reported doing; the answer names every step now in progress. Changes no file.",
+    "Report a step of an SCV plan's Suggested path so the SCV pane shows real progress: state doing (started), done (finished) or blocked (cannot go on — give the reason in note). done needs proof: evidence (project files this step made or changed — a screenshot, a result file) and/or output (an excerpt of a command's output, e.g. the test result); a done without it, or with a file outside the project or older than the step's start, is refused. doing may name log (a project file the running work writes) and url (a page that shows its progress) — the pane shows the log's last lines and a button for the page. Steps worked on at the same time are each reported doing; the answer names every step now in progress. Changes no file.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -355,6 +400,10 @@ const STEP_TOOL_SPEC = {
       step: { type: 'integer', minimum: 1, description: "The step's number in the plan's Suggested path, starting at 1" },
       state: { type: 'string', enum: ['doing', 'done', 'blocked'] },
       note: { type: 'string', description: 'One line; the reason when state is blocked' },
+      evidence: { type: 'array', items: { type: 'string' }, description: 'done: project files this step made or changed (screenshot, result file), relative to the project or absolute' },
+      output: { type: 'string', description: "done: an excerpt of a command's output that shows the result (e.g. the test summary)" },
+      log: { type: 'string', description: 'doing: a project file the running work writes, read for its last lines and progress' },
+      url: { type: 'string', description: 'doing: a page that shows the progress (opened by a button, never read)' },
     },
     required: ['plan', 'step', 'state'],
     additionalProperties: false,
@@ -812,6 +861,12 @@ export const register: Register = on => {
       state: typeof input.state === 'string' ? input.state : '',
       ...(typeof input.note === 'string' ? { note: input.note } : {}),
     }
+    const paths = Array.isArray(input.evidence) ? input.evidence.filter((one): one is string => typeof one === 'string' && one.trim() !== '') : []
+    const output = typeof input.output === 'string' ? input.output : undefined
+    const source = {
+      ...(typeof input.log === 'string' && input.log.trim() ? { log: input.log.trim() } : {}),
+      ...(typeof input.url === 'string' && /^https?:\/\//.test(input.url.trim()) ? { url: input.url.trim() } : {}),
+    }
     const shot = await read($, snapshot)
     const plans = parsePlans(shot.plans)
     // The store is the record: a signal sent right after another (or from another session) builds on it,
@@ -820,8 +875,16 @@ export const register: Register = on => {
     const before = Array.isArray(stored) ? (stored as StepSignal[]) : await read($, signals)
     const checked = checkSignal(asked, plans, before)
     if (!checked.isOk) return { deny: checked.reason }
+    let proof: Evidence | undefined
+    if (asked.state === 'done') {
+      const open = lastSignalOf(before, asked.plan, asked.step)
+      const startedAt = open && open.state !== 'done' ? (open.startedAt ?? open.at) : undefined
+      const judged = judgeEvidence(paths, output, await fileFacts($, shot.cwd, paths), startedAt)
+      if (!judged.isOk) return { deny: judged.reason }
+      proof = judged.evidence
+    }
 
-    const kept = applySignal(before, asked, await $.clock.now())
+    const kept = applySignal(before, { ...asked, ...(proof ? { evidence: proof } : {}), ...(asked.state === 'doing' ? { source } : {}) }, await $.clock.now())
     await $.store.set(signalsKey(shot.cwd), kept).catch(() => undefined)
     await update($, signals, () => kept)
     await update($, startedSteps, started => nextStarted(started, asked))
@@ -962,7 +1025,7 @@ export const register: Register = on => {
       </Box>
     )
 
-    // What is being done now, the jobs still running and what finished lately: drawn with a plan or without one.
+    // The jobs still running (with their progress) and what finished lately; a step's own live view is in its detail.
     const nowCard = (step: { number: number; name: string } | null) => {
       const view = nowBlock({
         now: nowLine({ tasks: todo, step, tool: state.tool, jobs: board.jobs, extra: board.extra, isWorking: state.isWorking, turnStartedAt: state.turnStartedAt }),
@@ -972,12 +1035,12 @@ export const register: Register = on => {
         offsetMinutes: offsetAt(at),
         formatDuration,
       })
+      // Only what is useful stays: the jobs left running (with their progress) and what finished lately.
+      if (view.jobs.length === 0 && view.done.length === 0) return null
 
       return card(
         <Box flexDirection="column">
-          <Text bold>지금 하는 일</Text>
-          <Text>{view.now}</Text>
-          {view.jobs.length > 0 ? <Text dimColor>{`뒤에서 도는 일 ${board.jobs.length + board.extra}`}</Text> : null}
+          {view.jobs.length > 0 ? <Text bold>{`뒤에서 도는 일 ${board.jobs.length + board.extra}`}</Text> : null}
           <Box flexDirection="column">
             {view.jobs.map((row, i) => (
               <Box key={`job-${i}`} flexDirection="column">
@@ -1053,6 +1116,13 @@ export const register: Register = on => {
     })
     const builds = focusedStage ? stageFunctions(focusedStage, plan.pipeline, catalog, earlier.flatMap(one => one.made).concat(did?.made ?? [])) : []
     const callsOpen = await read($, showCalls)
+    const focusedSignal = focused === null ? undefined : lastSignalOf(await read($, signals), plan.slug, focused + 1)
+    const fullOf = (path: string) => (path.startsWith('/') ? path : `${shot.cwd}/${path}`)
+    const proof = focusedStage?.state === 'done' ? focusedSignal?.evidence : undefined
+    const pictures = proof ? await Promise.all(proof.files.map(file => (file.kind === 'image' ? evidencePicture($, fullOf(file.path), file.size) : Promise.resolve(null)))) : []
+    const texts = proof ? await Promise.all(proof.files.map(file => (file.kind === 'text' ? readText($, fullOf(file.path)).then(t => (t ?? '').slice(0, 600)) : Promise.resolve('')))) : []
+    const liveSource = focusedStage && isHere(focusedStage.state) && focusedSignal?.state !== 'done' ? focusedSignal?.source : undefined
+    const liveView = liveSource?.log ? liveOf((await logTail($, fullOf(liveSource.log))) ?? '') : null
     const done = doneFunctions(did, builds.map(line => line.name), catalog, earlier)
     const count = countStages(stages)
     // Step times from Claude's signals survive a new session; the times seen in this session are the fallback.
@@ -1148,7 +1218,6 @@ export const register: Register = on => {
           barColor(stages, blocks),
         )}
 
-        {nowCard(current && current.state === 'doing' ? { number: stages.indexOf(current) + 1, name: current.name } : null)}
 
         {away
           ? card(
@@ -1240,6 +1309,7 @@ export const register: Register = on => {
             )
           : null}
 
+        {nowCard(current && current.state === 'doing' ? { number: stages.indexOf(current) + 1, name: current.name } : null)}
         {card(
           <>
             <Box flexDirection="row" justifyContent="space-between">
@@ -1293,6 +1363,51 @@ export const register: Register = on => {
                     </Box>
                   </Box>
                 )}
+                {focusedStage.state === 'done' ? (
+                  <Box flexDirection="column" marginTop={1}>
+                    <Text bold>증거</Text>
+                    {proof && (proof.files.length > 0 || proof.output) ? (
+                      <Box flexDirection="column">
+                        {proof.files.map((file, i) => (
+                          <Box flexDirection="column">
+                            {Svg && pictures[i] ? <Svg source={pictures[i] as string} alt={`증거 그림 ${file.path}`} width={320} height={200} /> : null}
+                            {file.kind === 'text' && texts[i] ? <Text dimColor>{texts[i]}</Text> : null}
+                            <Button key={`evidence-${i}`} plain onPress={() => void openThing($, fullOf(file.path))}>
+                              {`▸ ${file.path} 열기`}
+                            </Button>
+                          </Box>
+                        ))}
+                        {proof.output ? <Text dimColor>{proof.output}</Text> : null}
+                      </Box>
+                    ) : (
+                      <Text color="#f85149">증거 없음 — 이 단계는 끝 보고에 증거가 붙지 않았습니다</Text>
+                    )}
+                  </Box>
+                ) : null}
+                {focusedStage && isHere(focusedStage.state) ? (
+                  <Box flexDirection="column" marginTop={1}>
+                    <Text bold>지금 진행</Text>
+                    {liveView && liveView.lines.length > 0 ? (
+                      <Box flexDirection="column">
+                        {liveView.ratio !== null ? (
+                          <Box width="100%" height={1} backgroundColor="#21262d">
+                            <Box width={`${Math.round(liveView.ratio * 100)}%`} height={1} backgroundColor="#4f8cff" />
+                          </Box>
+                        ) : null}
+                        {liveView.lines.map(line => (
+                          <Text dimColor>{line}</Text>
+                        ))}
+                      </Box>
+                    ) : (
+                      <Text dimColor>{liveSource?.log ? `로그가 아직 비어 있음 — ${liveSource.log}` : '진행 출처 없음 — 단계 시작 때 로그 파일이나 주소를 알리지 않았습니다'}</Text>
+                    )}
+                    {liveSource?.url ? (
+                      <Button key="live-url" plain onPress={() => void openThing($, liveSource.url as string)}>
+                        {`▸ 진행 화면 열기 — ${liveSource.url}`}
+                      </Button>
+                    ) : null}
+                  </Box>
+                ) : null}
                 <Box marginTop={1}>
                   <Text bold>이 단계에서 한 일</Text>
                 </Box>
