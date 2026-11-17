@@ -7,6 +7,8 @@ import type {
   Catalog,
   DoneEntry,
   Dreams,
+  Evidence,
+  EvidenceFile,
   Job,
   JobBoard,
   Live,
@@ -21,6 +23,7 @@ import type {
   StepFunctions,
   StepMark,
   StepSignal,
+  StepSource,
   Stopped,
   Task,
   TestRow,
@@ -621,7 +624,7 @@ export const STEP_TOOL = 'mcp__scv-dashboard__scv_step'
 
 const SIGNAL_STATES = ['doing', 'done', 'blocked'] as const
 
-export type SignalInput = { plan: string; step: number; state: string; note?: string }
+export type SignalInput = { plan: string; step: number; state: string; note?: string; evidence?: Evidence; source?: StepSource }
 
 export type SignalCheck = { isOk: true } | { isOk: false; reason: string }
 
@@ -699,8 +702,75 @@ export const applySignal = (signals: readonly StepSignal[], input: SignalInput, 
       note: input.note?.trim() ?? '',
       at,
       ...(startedAt !== undefined ? { startedAt } : {}),
+      ...(input.state === 'done' && input.evidence ? { evidence: input.evidence } : {}),
+      ...(input.state === 'doing' && input.source && (input.source.log || input.source.url) ? { source: input.source } : {}),
     },
   ].slice(-300)
+}
+
+// What the file system says of one path a step sent as evidence or as its log: found, inside the project, when it last changed.
+export type FileFact = { path: string; isFound: boolean; isInside: boolean; mtimeMs: number; size: number }
+
+export type EvidenceCheck = { isOk: true; evidence: Evidence } | { isOk: false; reason: string }
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i
+const TEXT_EXT = /\.(txt|log|md|json|csv|tsv|html?|xml|ya?ml|out)$/i
+
+// The kind a piece of evidence is drawn as, by its name: a picture, text, or a file to open.
+export const evidenceKind = (path: string): EvidenceFile['kind'] => (IMAGE_EXT.test(path) ? 'image' : TEXT_EXT.test(path) ? 'text' : 'other')
+
+// A command output is kept to this many characters: enough to see the result, not the whole log.
+const OUTPUT_ROOM = 1200
+
+// Whether a step's "done" carries real proof: project files made or changed after the step began, or a command's output.
+// No proof, a missing file, a file outside the project, or one older than the step's start is refused with what to send.
+export const judgeEvidence = (paths: readonly string[], output: string | undefined, facts: readonly FileFact[], startedAt?: number): EvidenceCheck => {
+  const text = (output ?? '').trim()
+  if (paths.length === 0 && !text) {
+    return { isOk: false, reason: '끝에는 증거가 필요합니다 — evidence 에 이 단계가 만든 프로젝트 안 파일(화면 · 결과), 또는 output 에 명령 출력 발췌를 함께 보내세요' }
+  }
+  const files: EvidenceFile[] = []
+  for (const path of paths) {
+    const fact = facts.find(one => one.path === path)
+    if (!fact || !fact.isFound) return { isOk: false, reason: `증거 파일이 없습니다: ${path}` }
+    if (!fact.isInside) return { isOk: false, reason: `프로젝트 밖 파일은 증거로 받지 않습니다: ${path}` }
+    if (startedAt !== undefined && fact.mtimeMs < startedAt) {
+      return { isOk: false, reason: `단계 시작 전에 생긴 파일입니다(옛 파일): ${path} — 이 단계에서 만들거나 바꾼 결과를 보내세요` }
+    }
+    files.push({ path, size: fact.size, kind: evidenceKind(path) })
+  }
+
+  return { isOk: true, evidence: { files, ...(text ? { output: text.slice(-OUTPUT_ROOM) } : {}) } }
+}
+
+// A running step's live view: the last lines of its log as a person would see them, and how far along it is when a
+// line says so ('3/10', '45%').
+export const liveOf = (tail: string, lineCount = 5): { lines: string[]; ratio: number | null; line: string } => {
+  const lines = tail
+    .split('\n')
+    .map(raw => raw.replace(/\r+$/, '').split('\r').pop() ?? '')
+    // eslint-disable-next-line no-control-regex
+    .map(shown => shown.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim())
+    .filter(Boolean)
+  const progress = progressOf(tail)
+  const ratio = progress.done !== undefined && progress.total ? Math.min(1, progress.done / progress.total) : null
+
+  return { lines: lines.slice(-lineCount).map(line => shorten(line, LINE_ROOM)), ratio, line: progress.line }
+}
+
+// The newest signal a plan's step sent: where its evidence or its live source is.
+export const lastSignalOf = (signals: readonly StepSignal[], plan: string, step: number): StepSignal | undefined =>
+  [...signals].reverse().find(signal => signal.plan === plan && signal.step === step)
+
+// A picture small enough to draw inside the pane (an SVG holds at most 131072 characters); a larger one is opened.
+export const IMAGE_DRAW_BYTES = 90 * 1024
+
+// The SVG that draws a picture sent as evidence, from its bytes.
+export const imageSvg = (base64: string, path: string, width = 320, height = 200) => {
+  const ext = (path.match(/\.([a-z]+)$/i)?.[1] ?? 'png').toLowerCase()
+  const mime = ext === 'jpg' ? 'jpeg' : ext === 'svg' ? 'svg+xml' : ext
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><image href="data:image/${mime};base64,${base64}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet"/></svg>`
 }
 
 // Steps reported done within this of each other were reported together; the gap says nothing of the work.
@@ -735,6 +805,8 @@ export const buildStepPrompt = (plans: readonly Plan[], tool = STEP_TOOL): strin
   return [
     `SCV step signal (scv-dashboard mod): while you implement one of this project's SCV plans, report each step of its Suggested path with the ${tool} tool`,
     '— state "doing" when you start a step, "done" when you finish it, "blocked" with a one-line reason in note when you cannot go on.',
+    'A "done" needs proof: evidence (project files this step made or changed — a screenshot, a result file) and/or output (the command output excerpt that shows the result); without it the tool refuses.',
+    'A "doing" for long-running work names log (the project file it writes) and url (a page showing its progress) so the pane shows its real progress.',
     "Steps are numbered as in the plan's Suggested path, starting at 1. It only updates the SCV pane and changes no file.",
     'If the tool is listed as deferred, load it with ToolSearch first.',
     `Open plans (scv/promote): ${open.map(plan => `${plan.slug} (${plan.steps.length} steps)`).join(', ')}.`,
