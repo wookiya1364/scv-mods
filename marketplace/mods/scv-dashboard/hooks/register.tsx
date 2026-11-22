@@ -56,6 +56,7 @@ import {
   planPromptFill,
   recordStepTimes,
   runFor,
+  definedFromCatalog,
   extractMarked,
   parseCatalog,
   recordFunctions,
@@ -200,7 +201,8 @@ const readSources = async ($: Api, cwd: string): Promise<Omit<Snapshot, 'root'>>
 const readCatalog = async ($: Api, dir: string) => {
   const entries = await $.fs.list(dir).catch(() => [])
   const texts: string[] = []
-  for (const entry of entries.filter(one => one.kind === 'file' && one.name.endsWith('.md'))) {
+  // effects.md · notes.md (a dictionary that is the source, core 0.98.0+) are not pure-function kinds.
+  for (const entry of entries.filter(one => one.kind === 'file' && one.name.endsWith('.md') && one.name !== 'effects.md' && one.name !== 'notes.md')) {
     const text = await readText($, `${dir}/${entry.name}`)
     if (text) texts.push(text)
   }
@@ -357,9 +359,10 @@ const evidencePicture = async ($: Api, full: string, size: number) => {
 // What a step's writing made and called, kept with the step: functions under a marker are made; known functions (the
 // dictionary's, and those the plan's other steps made) it names are used.
 const noteFunctions = async ($: Api, slug: string, step: number, code: string) => {
-  const made = extractMarked(code)
-  if (made.length === 0 && !code.trim()) return
+  const marked = extractMarked(code)
+  if (marked.length === 0 && !code.trim()) return
   const shot = await read($, snapshot)
+  const made = marked.length > 0 ? marked : definedFromCatalog(code, shot.catalog ?? {})
   const log = await read($, stepFunctions)
   const earlier = Object.entries(log)
     .filter(([key]) => key.startsWith(`${slug}#`) && key !== `${slug}#${step}`)

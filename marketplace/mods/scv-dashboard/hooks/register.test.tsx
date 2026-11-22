@@ -52,6 +52,7 @@ import {
   sessionName,
   mirrorText,
   parseMirror,
+  definedFromCatalog,
   extractMarked,
   parseCatalog,
   usedNames,
@@ -2990,4 +2991,11 @@ test('step-evidence T17 지금 하는 일 카드는 없다', async ($, on) => {
   await doingWith($, 1)
   const drawn = await drawnText($)
   expect(drawn).not.toContain('지금 하는 일')
+})
+
+test('a dictionary that is the source: the functions a step writes are the dictionary names it declares (core 0.98.0+)', () => {
+  const catalog = { grade: { role: '등급', kind: '고르기' }, add: { role: '더한다', kind: '세기' }, cnt: { role: '센다', kind: '세기' } }
+  expect(definedFromCatalog('pub fn grade(g: u8) -> u8 {\n  g\n}', catalog)).toEqual([{ name: 'grade', tier: 'pure', role: '등급', kind: '고르기' }])
+  expect(definedFromCatalog('export const add = (a, b) => a + b\ncnt() {\n}', catalog).map(one => one.name)).toEqual(['add', 'cnt'])
+  expect(definedFromCatalog('return grade(3)', catalog)).toEqual([])
 })
