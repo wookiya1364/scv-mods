@@ -414,6 +414,16 @@ export const extractMarked = (text: string): MadeFunction[] => {
   return made
 }
 
+// A project whose dictionary is the source (core 0.98.0+, no comments in code): the functions a piece of writing defines
+// are the dictionary's names it declares — "fn name", "function name", "def name", "const name =", "name() {".
+export const definedFromCatalog = (text: string, catalog: Catalog): MadeFunction[] =>
+  Object.entries(catalog)
+    .filter(([name]) => {
+      const n = name.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')
+      return new RegExp(`(^|\\n)[^\\n]*\\b(fn|function|def|const|let|var|func)\\s+${n}\\b|(^|\\n)\\s*${n}\\s*\\(\\)\\s*\\{`).test(text)
+    })
+    .map(([name, entry]) => ({ name, tier: 'pure' as const, role: entry.role, kind: entry.kind }))
+
 const wordPattern = (name: string) => new RegExp(`(^|[^A-Za-z0-9_])${name.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}($|[^A-Za-z0-9_])`)
 
 // The known functions a piece of writing calls: each known name standing as a whole word, other than those it defines.
