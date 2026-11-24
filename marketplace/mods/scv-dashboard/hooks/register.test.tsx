@@ -3304,8 +3304,9 @@ test('gear-match T6 · T7 치면 입력창 위에 한 줄, 맞는 것이 없으�
   expect(await bandText($)).not.toContain('저장해 둔 방법')
   await boxIs($, '릴리스 전에 시험 다 돌려줘')
   const shown = await bandText($)
-  expect(shown).toContain('저장해 둔 방법이 있음: 릴리스 전에 CI 명령을 다 돌리고')
-  expect(shown).toContain('안 씀')
+  expect(shown).toContain('저장해 둔 방법이 있음: 릴리스 전에 CI 명령을 다 돌리고 실패가 없을 때만 통과를 알림')
+  expect(shown).toContain('"사용함"')
+  expect(shown).toContain('"사용안함"')
   await boxIs($, '화면 색을 바꿔 줘')
   expect(await bandText($)).not.toContain('저장해 둔 방법')
   await boxIs($, '')
@@ -3332,7 +3333,7 @@ test('gear-match T8 맞는 기어가 뜬 채로 보내면 글 끝에 한 줄이 
   expect(await bandText($)).not.toContain('저장해 둔 방법')
 })
 
-test('gear-match T9 안 씀을 누르면 붙이지 않는다', async ($, on) => {
+test('gear-match T9 사용안함을 누르면 붙이지 않는다', async ($, on) => {
   const kit = engine(on, {})
   withProject(kit, { index: WORDY })
   const went: string[] = []
@@ -3408,5 +3409,36 @@ test('gear-list T15 역할 문장이 길면 접힌 줄은 줄이고, 펼치면 �
   await ui.press({ key: 'gear-open-long-one' })
   expect(await drawnText($)).toContain(long)
   await ui.unmount()
+})
+
+test('gear-match T17 사용함을 누르면 입력창의 글이 그 기어의 한 줄과 함께 바로 가고, 입력창이 비워진다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { index: WORDY })
+  const { fills } = promptEngine(on, '릴리스 전에 시험 다 돌려줘')
+  const went: string[] = []
+  on('prompt.submit', (_, e) => {
+    went.push(e.text)
+    return { text: e.text }
+  })
+  await start($)
+  await boxIs($, '릴리스 전에 시험 다 돌려줘')
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+  await band.press({ key: 'gear-hint-use' })
+
+  expect(went).toHaveLength(1)
+  expect(went[0]?.startsWith('릴리스 전에 시험 다 돌려줘\n\n[SCV 기어]')).toBe(true)
+  expect(went[0]?.match(/\[SCV 기어\]/g)).toHaveLength(1)
+  expect(fills).toEqual([{ text: '', mode: 'replace' }])
+  expect(kit.store.get('scv-dashboard:gear-recent:/work')).toEqual(['release-check'])
+  expect(await bandText($)).not.toContain('저장해 둔 방법')
+  await band.unmount()
+})
+
+test('gear-match T18 설명이 길어도 자르지 않고, 한 줄이 이미 붙은 글에는 또 붙이지 않는다', async () => {
+  const long = '아주 긴 역할 문장입니다 '.repeat(8).trim()
+  const gear = parseGears(`long-one\tgear\teffect\tnone\tx\t${long}\t낱말 둘`)[0]!
+  expect(hintLine(gear)).toBe(`저장해 둔 방법이 있음: ${long}`)
+  const once = submitWithGear('해 줘', gear, false)
+  expect(submitWithGear(once, gear, false)).toBe(once)
 })
 

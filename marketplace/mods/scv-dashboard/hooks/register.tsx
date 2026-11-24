@@ -961,14 +961,28 @@ export const register: Register = on => {
     }
     drawnHint.name = gear.name
     const { Box, Text, Button } = $.ui.resolve(e)
+    // 사용함: what is in the box goes now, with the gear's line at its end. Sent without a press it goes the same
+    // way (the line is added where the text is sent); 사용안함 turns the gear down for this text.
+    const useNow = async () => {
+      const box = await $.prompt.read().catch(() => ({ text: '', cursor: 0 }))
+      if (box.text.trim() === '') return
+      await noteGearUse($, gear.name)
+      drawnHint.name = null
+      await update($, gearHint, () => null)
+      await $.prompt.fill({ text: '', mode: 'replace' }).catch(() => undefined)
+      await $.prompt.submit({ text: submitWithGear(box.text, gear, false), asUser: true }).catch(() => undefined)
+    }
 
     return (
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center" paddingX={1}>
-        <Box flexDirection="column" flexShrink={1}>
-          <Text>{hintLine(gear)}</Text>
-          <Text dimColor>그대로 보내면 이 방법으로 합니다</Text>
+      <Box flexDirection="column" paddingX={1}>
+        <Text>{hintLine(gear)}</Text>
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <Text dimColor>그대로 보내도 이 방법으로 합니다</Text>
+          <Box flexDirection="row" gap={1}>
+            <Button key="gear-hint-use" label="사용함" onPress={() => void useNow().catch(() => undefined)} />
+            <Button key="gear-hint-dismiss" label="사용안함" onPress={() => void update($, gearDismissed, () => gear.name)} />
+          </Box>
         </Box>
-        <Button key="gear-hint-dismiss" label="안 씀" onPress={() => void update($, gearDismissed, () => gear.name)} />
       </Box>
     )
   })

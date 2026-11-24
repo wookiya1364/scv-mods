@@ -1615,15 +1615,18 @@ export const gearMatch = (text: string, gears: readonly Gear[]): GearMatch | nul
   return scored[0] ?? null
 }
 
-// The line drawn above the prompt box while a gear fits what is being typed.
-export const hintLine = (gear: Gear) => `저장해 둔 방법이 있음: ${cutLine(gear.does || gear.name, 60)}`
+// The line drawn above the prompt box while a gear fits what is being typed: the gear's whole role line, never cut
+// (the band wraps it) — a cut line hid what the gear does (seen in the app, 2026-11-24).
+export const hintLine = (gear: Gear) => `저장해 둔 방법이 있음: ${gear.does || gear.name}`
 
 // What is sent: the person's own text, with one line at its end that names the gear when one fits and was not
 // turned down. The gear's name goes in only when it has the shape of one.
+const GEAR_LINE_HEAD = '[SCV 기어] 이 요청에 맞는 저장해 둔 방법이 있음:'
+
 export const submitWithGear = (text: string, gear: Gear | null, isDismissed: boolean): string =>
-  !gear || isDismissed || !GEAR_NAME.test(gear.name)
+  !gear || isDismissed || !GEAR_NAME.test(gear.name) || text.includes(GEAR_LINE_HEAD)
     ? text
-    : `${text}\n\n[SCV 기어] 이 요청에 맞는 저장해 둔 방법이 있음: ${gear.name} — 이 기어로 해 주세요(/scv:gear run ${gear.name}). 값은 위 요청에서 읽고, 없는 값은 물어 주세요.`
+    : `${text}\n\n${GEAR_LINE_HEAD} ${gear.name} — 이 기어로 해 주세요(/scv:gear run ${gear.name}). 값은 위 요청에서 읽고, 없는 값은 물어 주세요.`
 
 const CATALOG_MAX = 5
 
