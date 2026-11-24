@@ -100,14 +100,22 @@ import {
   gearRows,
   gearRunArgv,
   hintLine,
+  lastTurns,
+  lightDue,
+  lightMessages,
+  lightNote,
   paneSections,
+  parseLight,
+  recordTail,
+  resumeBrief,
+  DEFAULT_LIGHT,
   parseAskMode,
   parseGears,
   pluginRoot,
   submitWithGear,
   usedGear,
 } from './model'
-import type { AskMode, JobEnd } from './model'
+import type { AskMode, JobEnd, LightSettings } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -152,6 +160,57 @@ const recentKey = (project: string) => `scv-dashboard:gear-recent:${project}`
 // The gear whose line this session really drew above the prompt box: only then is a sent text given its line
 // (a surface that draws no such band must not have its text changed by a hint nobody saw).
 const drawnHint = { name: null as string | null }
+
+// A long conversation made light: the switch and its mark (kept across sessions), what the last pass came to, and
+// the pass under way (pending: this mod asked for it; kind: how it was answered; lastAt: when the last one ended).
+const light = atom({ plugin: 'scv-dashboard', key: 'light' } as const, DEFAULT_LIGHT as LightSettings)
+const lightSaid = atom({ plugin: 'scv-dashboard', key: 'lightSaid' } as const, null as string | null)
+const LIGHT_KEY = 'scv-dashboard:light'
+const lightRun = { pending: false, kind: 'summary' as 'records' | 'summary', lastAt: 0 }
+// What the summarizer is told when the records cannot stand in (no conversation record in this project).
+const LIGHT_INSTRUCTIONS =
+  '진행 중인 SCV 계획과 그 단계, 사용자가 정한 것, 아직 남은 일, 바꾼 파일과 돌린 명령의 결과, 기록 파일(scv/conversations)의 자리를 남겨라. 사용자의 요청 문장은 그대로 남겨라.'
+
+// The newest conversation record of the project (SCV writes one per conversation, a turn at a time), or null.
+const newestRecord = async ($: Api, cwd: string) => {
+  const dir = `${cwd ? `${cwd}/` : ''}scv/conversations`
+  const files = (await $.fs.list(dir).catch(() => []))
+    .filter(one => one.kind === 'file' && one.name.endsWith('.md'))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const first = files[0]
+  if (!first) return null
+  const text = await readText($, `${dir}/${first.name}`)
+
+  return text ? { path: `${dir}/${first.name}`, text } : null
+}
+
+// When a turn ends: at or over the mark the conversation is made light. The mod runs the compact command as the
+// person would (a compaction this mod raised itself would skip its own hook), and the session.compact hook below
+// answers it from SCV's own record — no model. With no record the engine's summary runs. Never while a turn runs.
+const maybeLighten = async ($: Api) => {
+  if (lightRun.pending || (await read($, mirror))) return
+  const percentNow = async () => {
+    const usage = await $.session.usage().catch(() => undefined)
+
+    return typeof usage?.context?.percent === 'number' ? usage.context.percent : null
+  }
+  const before = await percentNow()
+  const at = await $.clock.now()
+  if (!lightDue(await read($, light), before, (await read($, live)).isWorking, lightRun.lastAt, at)) return
+  lightRun.pending = true
+  lightRun.kind = 'summary'
+  const ran = await $.command
+    .run({ command: 'compact', args: LIGHT_INSTRUCTIONS })
+    .then(() => true)
+    .catch(() => false)
+  const stood = ran || (await $.session.compact({ instructions: LIGHT_INSTRUCTIONS }).then(done => 'messages' in done && !!done.messages).catch(() => false))
+  const endedAt = await $.clock.now()
+  lightRun.pending = false
+  lightRun.lastAt = endedAt
+  const after = stood ? await percentNow() : null
+  await update($, lightSaid, () => lightNote({ kind: stood ? lightRun.kind : 'skipped', before, after, ms: endedAt - at }))
+  await refresh($).catch(() => undefined)
+}
 
 // One more use of a gear: to the front of the lately-used list, kept per project across sessions.
 const noteGearUse = async ($: Api, name: string) => {
@@ -717,6 +776,8 @@ export const register: Register = on => {
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     const more = await $.store.get(MORE_KEY).catch(() => undefined)
     await update($, expanded, value => ({ ...value, more: more === true }))
+    const keptLight = await $.store.get(LIGHT_KEY).catch(() => undefined)
+    await update($, light, () => parseLight(keptLight))
     const lately = await $.store.get(recentKey(project)).catch(() => undefined)
     if (Array.isArray(lately)) await update($, gearRecent, () => lately.filter((one): one is string => typeof one === 'string'))
     await refresh($)
@@ -898,8 +959,33 @@ export const register: Register = on => {
       const count = plan ? countStages(deriveStages(plan).stages) : undefined
       await alert($, buildAlertText(['끝났어요', formatDuration(e.durationMs), plan && count ? `${plan.title} ${count.done}/${count.total}` : null]))
     }
+    // The turn is over: a conversation grown past the mark is made light now, apart from this hook's answer.
+    void maybeLighten($).catch(() => {
+      lightRun.pending = false
+    })
 
     return ended
+  })
+
+  // The pass this mod asked for, on the main conversation: SCV's own record stands in for the older part — the
+  // record's end, the plans in progress and the last turns as plain text. No model runs. Without a record, or for
+  // a compaction this mod did not ask for (the person's /compact, the engine's own), the engine goes on as it would.
+  on('session.compact', async ($, e, next) => {
+    if (!lightRun.pending || e.trigger === 'auto' || e.trigger === 'precompute' || e.agentId) return next(e)
+    const shot = await read($, snapshot)
+    const record = await newestRecord($, shot.cwd).catch(() => null)
+    const tail = recordTail(record?.text)
+    if (!record || tail === '') return next(e)
+    const plans = parsePlans(shot.plans)
+      .filter(plan => !plan.isArchived)
+      .map(plan => {
+        const count = countStages(deriveStages(plan).stages)
+
+        return { title: plan.title, status: plan.status, done: count.done, total: count.total }
+      })
+    lightRun.kind = 'records'
+
+    return { messages: lightMessages(resumeBrief({ recordPath: record.path, tail, plans }), lastTurns(e.messages)) }
   })
 
   // A permission prompt about to be shown: the work waits on the person. A settings hook that answered
@@ -1273,6 +1359,12 @@ export const register: Register = on => {
       await $.store.set(MORE_KEY, value.more === true).catch(() => undefined)
     }
 
+    const lightState = await read($, light)
+    const lightLine = await read($, lightSaid)
+    const switchLight = async () => {
+      const next = await update($, light, one => ({ ...one, isOn: !one.isOn }))
+      await $.store.set(LIGHT_KEY, next).catch(() => undefined)
+    }
     // A row only for a value this session has; with neither there is no card (nothing to say yet).
     const limitsCard = () =>
       usage || context
@@ -1290,6 +1382,15 @@ export const register: Register = on => {
                   <Text dimColor>{usage}</Text>
                 </Box>
               ) : null}
+              {context ? (
+                <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+                  <Text dimColor>{lightState.isOn ? `대화가 길어지면(${lightState.percent}%) 자동으로 가볍게 함` : '대화가 길어져도 그대로 둠'}</Text>
+                  <Box flexDirection="row">
+                    {mirrored ? [] : [<Button key="light-toggle" label={lightState.isOn ? '끄기' : '켜기'} onPress={() => void switchLight().catch(() => undefined)} />]}
+                  </Box>
+                </Box>
+              ) : null}
+              {lightLine ? <Text dimColor>{lightLine}</Text> : null}
             </Box>,
             '#4f8cff',
           )

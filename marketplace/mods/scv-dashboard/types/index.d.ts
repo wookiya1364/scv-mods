@@ -175,6 +175,8 @@ declare module 'claude-code' {
       note: string | null
       paneNote: string | null
       gearResult: Record<string, string[]>
+      light: { isOn: boolean; percent: number }
+      lightSaid: string | null
       gearHint: string | null
       gearDismissed: string | null
       gearOpen: string | null
