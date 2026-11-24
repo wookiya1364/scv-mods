@@ -175,6 +175,11 @@ declare module 'claude-code' {
       note: string | null
       paneNote: string | null
       gearResult: Record<string, string[]>
+      gearHint: string | null
+      gearDismissed: string | null
+      gearOpen: string | null
+      gearsAll: boolean
+      gearRecent: string[]
       focusStep: number | null
       stepLog: Record<string, WorkEntry[]>
       stepFunctions: Record<string, StepFunctions>
