@@ -135,6 +135,8 @@ const engine = (
   // the cards under '더 보기' are open here, as every test written before the fold expects; a fold test closes them
   store.set('scv-dashboard:more', true)
   on('env.get', (_, e) => ({ value: env[e.name] }) as never)
+  // the prompt box changing with no edit of the person's (a fill, a clear): nothing beneath the mod answers it
+  on('prompt.change', (_, e) => ({ text: e.text }) as never)
   const sent: { to: string; text: string }[] = []
   const delivery = { isDelivered: true }
   on('command.register', () => ({ value: { command: 'scv-dashboard' } }))
@@ -3043,7 +3045,7 @@ test('pane T14 계획이 없어도 컨텍스트 · 사용 한도 · 묻기 방�
   expect(drawn).toContain('사용 한도')
   expect(drawn).toContain('5시간 72%')
   expect(drawn).toContain('묻기 방식')
-  expect(drawn).toContain('기어 3')
+  expect(drawn).toContain('저장해 둔 일(기어) 3')
   expect(drawn).toContain('진행 중인 SCV 계획이 없습니다')
 })
 
@@ -3059,8 +3061,8 @@ test('pane T15 위 칸의 순서와 더 보기 — 접으면 안 보이고, 누�
   expect(folded).not.toContain('시험 펼치기')
   expect(folded).not.toContain('예상 완료 시간')
   expect(folded.indexOf('묻기 방식')).toBeGreaterThan(-1)
-  expect(folded.indexOf('묻기 방식')).toBeLessThan(folded.indexOf('기어 3'))
-  expect(folded.indexOf('기어 3')).toBeLessThan(folded.indexOf('단계 흐름'))
+  expect(folded.indexOf('묻기 방식')).toBeLessThan(folded.indexOf('저장해 둔 일(기어) 3'))
+  expect(folded.indexOf('저장해 둔 일(기어) 3')).toBeLessThan(folded.indexOf('단계 흐름'))
   await ui.press({ key: 'more-toggle' })
   const opened = await drawnText($)
   expect(opened).toContain('시험 펼치기')
@@ -3128,21 +3130,31 @@ test('pane T18b 본체 설치를 못 찾으면 명령을 돌리지 않고 입력
   await ui.unmount()
 })
 
-test('pane T19 기어 목록 — 기어만(톱니 제외), 값 · 하는 일 · 인자. 목록이 없으면 안내 한 줄', async ($, on) => {
+test('pane T19 기어 목록 — 기어만(톱니 제외), 접힌 줄은 역할 문장, 펼치면 이름 · 값 · 정할 값', async ($, on) => {
   expect(parseGears(GEAR_INDEX).map(one => one.name)).toEqual(['group-subjects', 'make-list', 'release-ci'])
-  expect(parseGears(GEAR_INDEX)[2]).toEqual({ name: 'release-ci', mark: 'effect', takes: 'none', gives: 'verdict', does: '릴리스 전 CI 를 다 돌림', args: ['repo=core', 'os=mac', 'jobs=4'] })
+  expect(parseGears(GEAR_INDEX)[2]).toEqual({ name: 'release-ci', mark: 'effect', takes: 'none', gives: 'verdict', does: '릴리스 전 CI 를 다 돌림', args: ['repo=core', 'os=mac', 'jobs=4'], words: ['릴리스'] })
   expect(parseGears(null)).toEqual([])
   const kit = engine(on, {})
   withProject(kit)
   await start($)
-  const drawn = await drawnText($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const folded = await drawnText($)
 
-  expect(drawn).toContain('release-ci')
-  expect(drawn).toContain('없음 → verdict')
-  expect(drawn).toContain('릴리스 전 CI 를 다 돌림')
-  expect(drawn).toContain('인자 repo=core · os=mac · jobs=4')
-  expect(drawn).not.toContain('ci-gate')
-  expect(drawn).not.toContain('ci-run')
+  expect(folded).toContain('릴리스 전 CI 를 다 돌림')
+  expect(folded).toContain('하려는 일을 그냥 말해도')
+  expect(folded).not.toContain('없음 → verdict')
+  expect(folded).not.toContain('repo=core')
+  expect(folded).not.toContain('ci-gate')
+  expect(folded).not.toContain('ci-run')
+  await ui.press({ key: 'gear-open-release-ci' })
+  const opened = await drawnText($)
+  expect(opened).toContain('이름 release-ci')
+  expect(opened).toContain('없음 → verdict')
+  expect(opened).toContain('정할 값 repo=core · os=mac · jobs=4')
+  expect(opened).toContain('이럴 때: 릴리스')
+  await ui.press({ key: 'gear-open-release-ci' })
+  expect(await drawnText($)).not.toContain('정할 값')
+  await ui.unmount()
 })
 
 test('pane T19b 기어 목록 파일이 없는 프로젝트는 안내 한 줄이고 창이 깨지지 않는다', async ($, on) => {
@@ -3151,7 +3163,7 @@ test('pane T19b 기어 목록 파일이 없는 프로젝트는 안내 한 줄이
   await start($)
   const drawn = await drawnText($)
 
-  expect(drawn).toContain('기어 0')
+  expect(drawn).toContain('저장해 둔 일(기어) 0')
   expect(drawn).toContain('이 프로젝트에 기어가 없습니다')
 })
 
@@ -3169,7 +3181,9 @@ test('pane T20 쓰기 — 부작용 있는 기어는 쓰기만, 누르면 입력
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
   expect(await has(ui, 'gear-use-release-ci')).toBe(true)
+  await ui.press({ key: 'gear-open-release-ci' })
   expect(await has(ui, 'gear-run-release-ci')).toBe(false)
+  await ui.press({ key: 'gear-open-make-list' })
   expect(await has(ui, 'gear-run-make-list')).toBe(true)
   await ui.press({ key: 'gear-use-release-ci' })
   expect(fills).toEqual([{ text: '/scv:gear run release-ci', mode: 'replace' }])
@@ -3188,6 +3202,7 @@ test('pane T21 바로 실행 — 본체 기어 실행기를 30초 제한으로 �
   kit.proc.stdout = '하나\n둘\n'
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'gear-open-make-list' })
   await ui.press({ key: 'gear-run-make-list' })
   const ran = kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))
 
@@ -3207,6 +3222,7 @@ test('pane T21b 표시 칸이 없는 예전 목록 파일이면 바로 실행이
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
+  await ui.press({ key: 'gear-open-make-list' })
   expect(await has(ui, 'gear-run-make-list')).toBe(false)
   expect(await has(ui, 'gear-use-make-list')).toBe(true)
   // the session asked SCV once to write the index again (a newer core fills the mark in)
@@ -3220,6 +3236,7 @@ test('pane T22 입력 칸에 적은 글은 표준 입력으로만 가고 명령�
   kit.proc.stdout = 'feat 1\n'
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'gear-open-group-subjects' })
   await ui.input({ key: 'gear-input-group-subjects', text: 'feat: a; rm -rf "x" count=9' })
   const ran = kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))
 
@@ -3250,3 +3267,146 @@ test('pane T23b 설치 폴더 찾기와 칸 목록 — 순수부', async () => {
   expect(paneSections({ plan: true, blocks: true, project: true })).toEqual(['limits', 'askMode', 'gears', 'blocks', 'steps', 'more'])
   expect(paneSections({ plan: true, blocks: false, project: false })).toEqual(['limits', 'steps', 'more'])
 })
+
+// ── pane 0.3.1: a gear for what is being typed · one line per gear ───────────────
+import { gearCatalog, gearMatch, hintLine, submitWithGear, usedGear, wordsOf } from './model'
+
+const WORDY = [
+  'commit-groups\tgear\tpure\tsubjects\tgroups\t커밋 제목을 종류별로 묶음\t커밋 제목 묶음',
+  'release-check\tgear\teffect\tnone\tverdict\t릴리스 전에 CI 명령을 다 돌리고 실패가 없을 때만 통과를 알림\t릴리스 CI 시험 검사\trepo=core; os=mac',
+].join('\n')
+const TEN = Array.from({ length: 10 }, (_, i) => `gear-${String.fromCharCode(97 + i)}\tgear\teffect\tnone\tlines\t${String.fromCharCode(97 + i)} 일을 함\t낱말${i} 일감${i}`).join('\n')
+const BAND = { plugin: 'scv-dashboard', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 4, bodyColumns: 60 } } as const
+const bandText = async ($: Engine) => JSON.stringify(await $.ui.render({ ...BAND, surface: 'desktop' } as never))
+// the box changed with no edit of the person's (the engine's own noun for it is not in the test's types)
+const boxIs = ($: Engine, text: string) =>
+  ($.prompt as unknown as { change: (box: unknown) => Promise<unknown> }).change({ text, cursor: text.length, origin: { kind: 'app' } })
+
+test('gear-match T1~T5 낱말이 둘 이상 겹칠 때만, 조사가 붙어도, 가장 많이 겹친 것 하나', async () => {
+  const gears = parseGears(WORDY)
+  expect(wordsOf('릴리스 전에, 시험(다) 돌려줘!')).toEqual(['릴리스', '전에', '시험', '돌려줘'])
+  expect(gearMatch('릴리스 전에 시험 다 돌려줘', gears)?.gear.name).toBe('release-check')
+  expect(gearMatch('릴리스 전에 시험 다 돌려줘', gears)?.hits).toEqual(['릴리스', '시험'])
+  expect(gearMatch('릴리스를 하기 전에 검사를 해줘', gears)?.gear.name).toBe('release-check')
+  expect(gearMatch('시험 삼아 화면 색을 바꿔 봐', gears)).toBe(null)
+  expect(gearMatch('안녕', gears)).toBe(null)
+  expect(gearMatch('', gears)).toBe(null)
+  expect(gearMatch('/scv:gear run release-check 릴리스 시험', gears)).toBe(null)
+  expect(gearMatch('릴리스', gears)).toBe(null)
+  const two = parseGears(['a-small\tgear\tpure\tnone\tx\t작은 것\t릴리스 시험', 'b-big\tgear\tpure\tnone\tx\t큰 것\t릴리스 시험 리눅스 검사'].join('\n'))
+  expect(gearMatch('릴리스 전에 리눅스에서 시험하고 검사해', two)?.gear.name).toBe('b-big')
+})
+
+test('gear-match T6 · T7 치면 입력창 위에 한 줄, 맞는 것이 없으면 아무것도', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { index: WORDY })
+  await start($)
+  expect(await bandText($)).not.toContain('저장해 둔 방법')
+  await boxIs($, '릴리스 전에 시험 다 돌려줘')
+  const shown = await bandText($)
+  expect(shown).toContain('저장해 둔 방법이 있음: 릴리스 전에 CI 명령을 다 돌리고')
+  expect(shown).toContain('안 씀')
+  await boxIs($, '화면 색을 바꿔 줘')
+  expect(await bandText($)).not.toContain('저장해 둔 방법')
+  await boxIs($, '')
+  expect(await bandText($)).not.toContain('저장해 둔 방법')
+})
+
+test('gear-match T8 맞는 기어가 뜬 채로 보내면 글 끝에 한 줄이 붙고, 그 기어가 최근 맨 앞에 온다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { index: WORDY })
+  const went: string[] = []
+  on('prompt.submit', (_, e) => {
+    went.push(e.text)
+    return { text: e.text }
+  })
+  await start($)
+  await boxIs($, '릴리스 전에 시험 다 돌려줘')
+  await bandText($)
+  await $.prompt.submit(typed('릴리스 전에 시험 다 돌려줘'))
+
+  expect(went).toHaveLength(1)
+  expect(went[0]?.startsWith('릴리스 전에 시험 다 돌려줘\n\n[SCV 기어]')).toBe(true)
+  expect(went[0]).toContain('/scv:gear run release-check')
+  expect(kit.store.get('scv-dashboard:gear-recent:/work')).toEqual(['release-check'])
+  expect(await bandText($)).not.toContain('저장해 둔 방법')
+})
+
+test('gear-match T9 안 씀을 누르면 붙이지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { index: WORDY })
+  const went: string[] = []
+  on('prompt.submit', (_, e) => {
+    went.push(e.text)
+    return { text: e.text }
+  })
+  await start($)
+  await boxIs($, '릴리스 전에 시험 다 돌려줘')
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+  await band.press({ key: 'gear-hint-dismiss' })
+  expect(await bandText($)).not.toContain('저장해 둔 방법')
+  await $.prompt.submit(typed('릴리스 전에 시험 다 돌려줘'))
+
+  expect(went).toEqual(['릴리스 전에 시험 다 돌려줘'])
+  await band.unmount()
+})
+
+test('gear-match T10 맞는 것이 없거나, 한 줄을 그린 적이 없거나, 명령이면 글이 그대로 간다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { index: WORDY })
+  const went: string[] = []
+  on('prompt.submit', (_, e) => {
+    went.push(e.text)
+    return { text: e.text }
+  })
+  await start($)
+  await $.prompt.submit(typed('화면 색을 바꿔 줘'))
+  // the text fits a gear, but no line was drawn above the box (a surface without that band): nothing is added
+  await $.prompt.submit(typed('릴리스 전에 시험 다 돌려줘'))
+  expect(submitWithGear('/scv:status', null, false)).toBe('/scv:status')
+  expect(submitWithGear('x', parseGears(WORDY)[0] ?? null, true)).toBe('x')
+
+  expect(went).toEqual(['화면 색을 바꿔 줘', '릴리스 전에 시험 다 돌려줘'])
+})
+
+test('gear-list T13 · T14 기어 10개는 5줄과 모두 보기, 최근 쓴 것이 앞에', async ($, on) => {
+  const gears = parseGears(TEN)
+  expect(gearCatalog(gears, [], false).shown.map(one => one.name)).toEqual(['gear-a', 'gear-b', 'gear-c', 'gear-d', 'gear-e'])
+  expect(gearCatalog(gears, ['gear-h', 'gone'], false).shown[0]?.name).toBe('gear-h')
+  expect(gearCatalog(gears, [], false).hidden).toBe(5)
+  expect(gearCatalog(gears, [], true).shown).toHaveLength(10)
+  expect(usedGear(['a', 'b'], 'b')).toEqual(['b', 'a'])
+  const kit = engine(on, {})
+  withProject(kit, { index: TEN })
+  promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const uses = async () => (await Promise.all('abcdefghij'.split('').map(c => has(ui, `gear-use-gear-${c}`)))).filter(Boolean).length
+
+  expect(await uses()).toBe(5)
+  expect((await ui.find({ type: 'Button', key: 'gears-all' }))?.text).toBe('10개 모두 보기')
+  await ui.press({ key: 'gears-all' })
+  expect(await uses()).toBe(10)
+  await ui.press({ key: 'gear-use-gear-h' })
+  const drawn = await drawnText($)
+  expect(drawn.indexOf('h 일을 함')).toBeLessThan(drawn.indexOf('a 일을 함'))
+  await ui.unmount()
+})
+
+test('gear-list T15 역할 문장이 길면 접힌 줄은 줄이고, 펼치면 전문', async ($, on) => {
+  const long = '아주 긴 역할 문장입니다 '.repeat(6).trim()
+  const rows = gearRows(parseGears(`long-one\tgear\teffect\tnone\tx\t${long}\t`), true, true)
+  expect(rows[0]?.title.length).toBeLessThanOrEqual(34)
+  expect(rows[0]?.title.endsWith('…')).toBe(true)
+  expect(rows[0]?.does).toBe(long)
+  expect(hintLine(parseGears(WORDY)[1]!)).toBe('저장해 둔 방법이 있음: 릴리스 전에 CI 명령을 다 돌리고 실패가 없을 때만 통과를 알림')
+  const kit = engine(on, {})
+  withProject(kit, { index: `long-one\tgear\teffect\tnone\tx\t${long}\t` })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await drawnText($)).not.toContain(long)
+  await ui.press({ key: 'gear-open-long-one' })
+  expect(await drawnText($)).toContain(long)
+  await ui.unmount()
+})
+

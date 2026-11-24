@@ -1467,7 +1467,7 @@ export const askModeView = (mode: AskMode) => {
   return { ...ASK_MODE_TEXT[mode], next, nextLabel: `${ASK_MODE_TEXT[next].name}로 바꾸기` }
 }
 
-export type Gear = { name: string; mark: string; takes: string; gives: string; does: string; args: string[] }
+export type Gear = { name: string; mark: string; takes: string; gives: string; does: string; args: string[]; words: string[] }
 
 // The gears of a project's gear index (a tab-separated line each: name · kind · mark · in · out · does · words · arguments).
 // Teeth are left out. The mark is the strongest one in the gear's whole flow (core 0.102.0+; '-' in an older index).
@@ -1486,7 +1486,13 @@ export const parseGears = (indexText: string | null | undefined): Gear[] =>
         .split(';')
         .map(one => one.trim())
         .filter(Boolean),
+      words: (cols[6] ?? '').split(/\s+/).filter(Boolean),
     }))
+
+const GEAR_TITLE_MAX = 34
+
+// A line cut to at most max characters, the cut marked with an ellipsis.
+export const cutLine = (text: string, max: number) => (text.length > max ? `${text.slice(0, Math.max(1, max - 1)).trimEnd()}…` : text)
 
 const VALUE_WORD: Record<string, string> = { none: '없음', '*': '아무 값' }
 const MARK_WORD: Record<string, string> = {
@@ -1498,6 +1504,10 @@ const MARK_WORD: Record<string, string> = {
 
 export type GearRow = {
   name: string
+  // what the folded line says: the gear's role in plain words, cut short (its name when it has no role line)
+  title: string
+  // the words a request for this work would use, as the gear's own file lists them
+  words: string
   flow: string
   does: string
   argsLine: string | null
@@ -1515,6 +1525,8 @@ export const gearRows = (gears: readonly Gear[], hasCore: boolean, hasField: boo
 
     return {
       name: gear.name,
+      title: cutLine(gear.does || gear.name, GEAR_TITLE_MAX),
+      words: [...new Set(gear.words)].join(' · '),
       flow: `${VALUE_WORD[gear.takes] ?? gear.takes} → ${VALUE_WORD[gear.gives] ?? gear.gives}`,
       does: gear.does,
       argsLine: gear.args.length > 0 ? `인자 ${gear.args.join(' · ')}` : null,
@@ -1569,3 +1581,62 @@ export const paneSections = (has: { plan: boolean; blocks: boolean; project: boo
   ...(has.plan && has.blocks ? (['blocks'] as const) : []),
   ...(has.plan ? (['steps', 'more'] as const) : []),
 ]
+
+// ── a gear for what the person is typing (pane 0.3.1) ────────────────────────
+
+// The words of a text: lower case, split at anything that is not a letter or a digit, two characters or more.
+export const wordsOf = (text: string): string[] =>
+  text
+    .toLowerCase()
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter(word => word.length >= 2)
+
+export type GearMatch = { gear: Gear; hits: string[] }
+
+const MATCH_MIN_HITS = 2
+const MATCH_MIN_CHARS = 6
+
+// The gear that fits what the person typed: the one whose own words (and name parts) the text hits most, when it
+// hits two or more. A typed word hits a gear word when one starts with the other, so '릴리스를' hits '릴리스' and a
+// half-typed word hits too. Commands (a leading '/') and very short texts fit nothing; a tie goes to the first by name.
+export const gearMatch = (text: string, gears: readonly Gear[]): GearMatch | null => {
+  const typed = text.trim()
+  if (typed.startsWith('/') || typed.length < MATCH_MIN_CHARS) return null
+  const tokens = wordsOf(typed)
+  const scored = gears
+    .map(gear => {
+      const own = [...new Set(wordsOf([...gear.words, ...gear.name.split('-')].join(' ')))]
+
+      return { gear, hits: own.filter(word => tokens.some(token => token.startsWith(word) || word.startsWith(token))) }
+    })
+    .filter(one => one.hits.length >= MATCH_MIN_HITS)
+    .sort((a, b) => b.hits.length - a.hits.length || a.gear.name.localeCompare(b.gear.name))
+
+  return scored[0] ?? null
+}
+
+// The line drawn above the prompt box while a gear fits what is being typed.
+export const hintLine = (gear: Gear) => `저장해 둔 방법이 있음: ${cutLine(gear.does || gear.name, 60)}`
+
+// What is sent: the person's own text, with one line at its end that names the gear when one fits and was not
+// turned down. The gear's name goes in only when it has the shape of one.
+export const submitWithGear = (text: string, gear: Gear | null, isDismissed: boolean): string =>
+  !gear || isDismissed || !GEAR_NAME.test(gear.name)
+    ? text
+    : `${text}\n\n[SCV 기어] 이 요청에 맞는 저장해 둔 방법이 있음: ${gear.name} — 이 기어로 해 주세요(/scv:gear run ${gear.name}). 값은 위 요청에서 읽고, 없는 값은 물어 주세요.`
+
+const CATALOG_MAX = 5
+
+// The gears a pane lists: those used lately first (newest first), then the rest by name; five unless all are asked for.
+export const gearCatalog = (gears: readonly Gear[], recent: readonly string[], isAll: boolean, max = CATALOG_MAX) => {
+  const byName = [...gears].sort((a, b) => a.name.localeCompare(b.name))
+  const used = recent.flatMap(name => byName.filter(gear => gear.name === name))
+  const ordered = [...new Set([...used, ...byName])]
+  const shown = isAll ? ordered : ordered.slice(0, max)
+
+  return { shown, hidden: ordered.length - shown.length, total: ordered.length }
+}
+
+// The lately-used list with one more use at its front (no repeats, the ten newest kept).
+export const usedGear = (recent: readonly string[], name: string) => [name, ...recent.filter(one => one !== name)].slice(0, 10)
+

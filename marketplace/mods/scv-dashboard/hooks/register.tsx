@@ -93,14 +93,19 @@ import {
   isMirrorAskDue,
   mirrorLineText,
   askModeView,
+  gearCatalog,
   gearCommand,
+  gearMatch,
   gearResultView,
   gearRows,
   gearRunArgv,
+  hintLine,
   paneSections,
   parseAskMode,
   parseGears,
   pluginRoot,
+  submitWithGear,
+  usedGear,
 } from './model'
 import type { AskMode, JobEnd } from './model'
 
@@ -136,6 +141,33 @@ const gearResult = atom({ plugin: 'scv-dashboard', key: 'gearResult' } as const,
 // The fold of the cards under '더 보기' is kept across sessions, by this key in the mod's store.
 const MORE_KEY = 'scv-dashboard:more'
 const GEAR_RUN_MS = 30_000
+// The gear that fits what is being typed (its name), and the one the person turned down for this text.
+const gearHint = atom({ plugin: 'scv-dashboard', key: 'gearHint' } as const, null as string | null)
+const gearDismissed = atom({ plugin: 'scv-dashboard', key: 'gearDismissed' } as const, null as string | null)
+// The gear card: which gear's line is open, whether all are listed, and the gears used lately (newest first).
+const gearOpen = atom({ plugin: 'scv-dashboard', key: 'gearOpen' } as const, null as string | null)
+const gearsAll = atom({ plugin: 'scv-dashboard', key: 'gearsAll' } as const, false)
+const gearRecent = atom({ plugin: 'scv-dashboard', key: 'gearRecent' } as const, [] as string[])
+const recentKey = (project: string) => `scv-dashboard:gear-recent:${project}`
+// The gear whose line this session really drew above the prompt box: only then is a sent text given its line
+// (a surface that draws no such band must not have its text changed by a hint nobody saw).
+const drawnHint = { name: null as string | null }
+
+// One more use of a gear: to the front of the lately-used list, kept per project across sessions.
+const noteGearUse = async ($: Api, name: string) => {
+  const list = await update($, gearRecent, recent => usedGear(recent, name))
+  const project = (await read($, snapshot)).cwd
+  await $.store.set(recentKey(project), list).catch(() => undefined)
+}
+
+// The gear that fits the prompt box's text as it stands, if one does. An emptied box forgets a turned-down gear.
+const fitGear = async ($: Api, text: string) => {
+  if (await read($, mirror)) return
+  const fit = gearMatch(text, parseGears((await read($, snapshot)).gearsText))
+  if (text.trim() === '' && (await read($, gearDismissed)) !== null) await update($, gearDismissed, () => null)
+  const name = fit?.gear.name ?? null
+  if ((await read($, gearHint)) !== name) await update($, gearHint, () => name)
+}
 const focusStep = atom({ plugin: 'scv-dashboard', key: 'focusStep' } as const, null as number | null)
 const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
 // The functions each step made and called, by `<plan>#<step index>`; kept per project like the step signals.
@@ -685,6 +717,8 @@ export const register: Register = on => {
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     const more = await $.store.get(MORE_KEY).catch(() => undefined)
     await update($, expanded, value => ({ ...value, more: more === true }))
+    const lately = await $.store.get(recentKey(project)).catch(() => undefined)
+    if (Array.isArray(lately)) await update($, gearRecent, () => lately.filter((one): one is string => typeof one === 'string'))
     await refresh($)
     // A gear index written before core 0.102.0 has no mark on its gear lines ('-'): have SCV write it again, once.
     const first = await read($, snapshot)
@@ -706,7 +740,21 @@ export const register: Register = on => {
     if (mirrored && !e.command && !e.isMeta && (kind === 'composer' || kind === 'bridge')) {
       return { drop: `이 세션은 ${mirrored.host} 의 SCV 칸만 보여 주는 거울입니다 — 대화는 작업 세션 창에서 하세요. 이 세션을 다시 쓰려면 /scv-mirror stop` }
     }
-    const submitted = await next(e)
+    // A gear that fits what the person typed, and whose line was drawn above the prompt box and not turned down:
+    // the text goes on with one line at its end naming that gear. Anything else goes on as it is.
+    let sending = e
+    if (!mirrored && !e.command && !e.isMeta && kind === 'composer') {
+      const fit = gearMatch(e.text, parseGears((await read($, snapshot)).gearsText))
+      const refused = await read($, gearDismissed)
+      if (fit && drawnHint.name === fit.gear.name && refused !== fit.gear.name) {
+        sending = { ...e, text: submitWithGear(e.text, fit.gear, false) }
+        await noteGearUse($, fit.gear.name)
+      }
+      drawnHint.name = null
+      await update($, gearHint, () => null)
+      await update($, gearDismissed, () => null)
+    }
+    const submitted = await next(sending)
     // A background task's notice delivered into a running turn starts no turn of its own, so its end is taken here;
     // one that wakes an idle session is taken where its turn starts.
     if (kind === 'task-notification' && (e as { turnId?: string }).turnId) await endJob($, jobEndOf({ text: e.text }))
@@ -886,6 +934,45 @@ export const register: Register = on => {
   on('tool.check', { tool: 'SendMessage' }, ($, e, next) => (isOwnCall(next.origin) ? { decision: 'allow' as const } : next(e)))
 
   // Claude's instructions carry the step signal only while a plan is in progress.
+  // While the person types (a burst of keys, a paste): the box the editor shows after the edit is what is matched.
+  on('prompt.edit', async ($, e, next) => {
+    const box = await next(e)
+    await fitGear($, box.text).catch(() => undefined)
+
+    return box
+  })
+
+  // A change no edit carried (a recalled entry, a clear, a plugin's fill).
+  on('prompt.change', async ($, e, next) => {
+    const changed = await next(e)
+    await fitGear($, e.text).catch(() => undefined)
+
+    return changed
+  })
+
+  // The line above the prompt box: the fitting gear's role in plain words, and a way to turn it down.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const name = await read($, gearHint)
+    const gear = name ? parseGears((await read($, snapshot)).gearsText).find(one => one.name === name) : undefined
+    if (!gear || (await read($, gearDismissed)) === gear.name) {
+      drawnHint.name = null
+
+      return next(e)
+    }
+    drawnHint.name = gear.name
+    const { Box, Text, Button } = $.ui.resolve(e)
+
+    return (
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" paddingX={1}>
+        <Box flexDirection="column" flexShrink={1}>
+          <Text>{hintLine(gear)}</Text>
+          <Text dimColor>그대로 보내면 이 방법으로 합니다</Text>
+        </Box>
+        <Button key="gear-hint-dismiss" label="안 씀" onPress={() => void update($, gearDismissed, () => gear.name)} />
+      </Box>
+    )
+  })
+
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     const text = buildStepPrompt(parsePlans((await read($, snapshot)).plans))
@@ -1122,7 +1209,9 @@ export const register: Register = on => {
     const context = contextLine(await read($, contextFill))
     const Input = 'Input' in elements ? elements.Input : undefined
     const askView = askModeView(parseAskMode(shot.settingsText))
-    const gearList = gearRows(parseGears(shot.gearsText), Boolean(shot.core) && !mirrored, Boolean(Input))
+    const openGear = await read($, gearOpen)
+    const gearView = gearCatalog(parseGears(shot.gearsText), await read($, gearRecent), await read($, gearsAll))
+    const gearList = gearRows(gearView.shown, Boolean(shot.core) && !mirrored, Boolean(Input))
     const gearOut = await read($, gearResult)
     const paneMessage = await read($, paneNote)
     const projectDir = shot.cwd || undefined
@@ -1148,6 +1237,7 @@ export const register: Register = on => {
     const useGear = async (name: string) => {
       const command = gearCommand(name)
       if (!command) return
+      await noteGearUse($, name)
       const filled = await fillPrompt($, command)
       await update($, paneNote, () => (filled ? `입력창에 넣음: ${command} — 보내면 필요한 값을 물어봄` : `입력창에 못 넣음 — ${command}`))
     }
@@ -1156,6 +1246,7 @@ export const register: Register = on => {
     const runGear = async (name: string, input: string) => {
       const argv = shot.core ? gearRunArgv(shot.core, name) : null
       if (!argv) return
+      await noteGearUse($, name)
       await update($, gearResult, all => ({ ...all, [name]: ['돌리는 중…'] }))
       const ran = await $.process
         .run(argv, { ...(projectDir ? { cwd: projectDir } : {}), stdin: input, timeoutMs: GEAR_RUN_MS })
@@ -1206,40 +1297,60 @@ export const register: Register = on => {
         </>,
       )
 
+    // One line per gear — what it does, in plain words — and a press opens that gear alone: its name, the values to
+    // set, the words a request for it would use. More than five: the lately-used ones first, the rest on a press.
     const gearsCard = () =>
       card(
         <Box flexDirection="column">
-          <Text bold>{`기어 ${gearList.length}`}</Text>
-          {gearList.length === 0 ? <Text dimColor>이 프로젝트에 기어가 없습니다 — 되풀이하는 일을 기어로 만들어 달라고 하면 여기에 보입니다.</Text> : null}
+          <Text bold>{`저장해 둔 일(기어) ${gearView.total}`}</Text>
+          {gearView.total === 0 ? (
+            <Text dimColor>이 프로젝트에 기어가 없습니다 — 되풀이하는 일을 기어로 만들어 달라고 하면 여기에 보입니다.</Text>
+          ) : (
+            <Text dimColor>하려는 일을 그냥 말해도 맞는 것을 씁니다</Text>
+          )}
           {(shot.gearWaits ?? 0) > 0 ? <Text color="#e3b341">{`확인 기다림 ${shot.gearWaits} — 밖으로 나가는 단계 앞에서 멈춘 기어 실행이 있습니다`}</Text> : null}
-          {gearList.map(row => (
-            <Box key={`gear-${row.name}`} flexDirection="column" marginTop={1}>
-              <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-                <Box flexDirection="row" gap={1}>
-                  <Text bold>{row.name}</Text>
-                  <Text dimColor>{row.flow}</Text>
+          {gearList.map(row => {
+            const isOpen = openGear === row.name
+
+            return (
+              <Box key={`gear-${row.name}`} flexDirection="column">
+                <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+                  <Box flexDirection="row" flexShrink={1}>
+                    <Button key={`gear-open-${row.name}`} plain onPress={() => void update($, gearOpen, value => (value === row.name ? null : row.name))}>
+                      {`${isOpen ? '▾' : '▸'} ${row.title}`}
+                    </Button>
+                  </Box>
+                  <Box flexDirection="row">
+                    {mirrored ? [] : [<Button key={`gear-use-${row.name}`} label="쓰기" onPress={() => void useGear(row.name).catch(() => undefined)} />]}
+                  </Box>
                 </Box>
-                <Box flexDirection="row" gap={1}>
-                  {row.direct === 'run' ? <Button key={`gear-run-${row.name}`} label="바로 실행" onPress={() => void runGear(row.name, '').catch(() => undefined)} /> : null}
-                  {mirrored ? null : <Button key={`gear-use-${row.name}`} label="쓰기" onPress={() => void useGear(row.name).catch(() => undefined)} />}
-                </Box>
+                {isOpen ? (
+                  <Box flexDirection="column" paddingLeft={2} marginBottom={1}>
+                    {row.does && row.does !== row.title ? [<Text key="does">{row.does}</Text>] : []}
+                    <Text dimColor>{`이름 ${row.name} · 받는 값 → 돌려주는 값: ${row.flow}`}</Text>
+                    <Text dimColor>{row.argsLine ? row.argsLine.replace(/^인자 /, '정할 값 ') : '정할 값 없음'}</Text>
+                    {row.words ? [<Text key="words" dimColor>{`이럴 때: ${row.words}`}</Text>] : []}
+                    {row.markLine ? [<Text key="mark" dimColor>{row.markLine}</Text>] : []}
+                    {row.direct === 'run' ? [<Button key={`gear-run-${row.name}`} label="바로 실행" onPress={() => void runGear(row.name, '').catch(() => undefined)} />] : []}
+                    {row.direct === 'input' && Input
+                      ? [
+                          <Input
+                            key={`gear-input-${row.name}`}
+                            placeholder="넣을 값을 적고 바로 실행"
+                            submitLabel="바로 실행"
+                            onSubmit={(value: string) => void runGear(row.name, value).catch(() => undefined)}
+                          />,
+                        ]
+                      : []}
+                    {(gearOut[row.name] ?? []).map((line, i) => (
+                      <Text key={`gear-out-${row.name}-${i}`} dimColor>{`│ ${line}`}</Text>
+                    ))}
+                  </Box>
+                ) : null}
               </Box>
-              {row.does ? <Text>{row.does}</Text> : null}
-              {row.argsLine ? <Text dimColor>{row.argsLine}</Text> : null}
-              {row.markLine ? <Text dimColor>{row.markLine}</Text> : null}
-              {row.direct === 'input' && Input ? (
-                <Input
-                  key={`gear-input-${row.name}`}
-                  placeholder="넣을 값을 적고 바로 실행"
-                  submitLabel="바로 실행"
-                  onSubmit={(value: string) => void runGear(row.name, value).catch(() => undefined)}
-                />
-              ) : null}
-              {(gearOut[row.name] ?? []).map((line, i) => (
-                <Text key={`gear-out-${row.name}-${i}`} dimColor>{`│ ${line}`}</Text>
-              ))}
-            </Box>
-          ))}
+            )
+          })}
+          {gearView.hidden > 0 ? [<Button key="gears-all" label={`${gearView.total}개 모두 보기`} onPress={() => void update($, gearsAll, () => true)} />] : []}
           {paneMessage ? <Text dimColor>{paneMessage}</Text> : null}
         </Box>,
       )
