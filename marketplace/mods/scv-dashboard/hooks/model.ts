@@ -1438,3 +1438,134 @@ export const nowBlock = (input: {
   ],
   done: input.done.map(entry => `${clockOf(entry.at, input.offsetMinutes)} ${entry.text}`),
 })
+
+// ── ask mode · gears (pane 0.3.0) ────────────────────────────────────────────
+
+export type AskMode = 'all' | 'ends'
+
+// The project's ask mode from its settings text: 'ends' only when the file says so, else 'all' (the default).
+export const parseAskMode = (settingsText: string | null | undefined): AskMode => {
+  if (!settingsText) return 'all'
+  try {
+    const value = (JSON.parse(settingsText) as Record<string, unknown>)?.SCV_ASK_MODE
+
+    return typeof value === 'string' && value.trim().toLowerCase() === 'ends' ? 'ends' : 'all'
+  } catch {
+    return 'all'
+  }
+}
+
+const ASK_MODE_TEXT: Record<AskMode, { name: string; meaning: string }> = {
+  all: { name: '전부 묻기', meaning: '결정이 나올 때마다 선택 창으로 물음' },
+  ends: { name: '처음 · 끝에만 묻기', meaning: '처음(요구 · 계획) · 끝(검증) · 되돌릴 수 없는 일만 물음. 나머지는 추천대로 하고 끝 보고에 적음' },
+}
+
+// What the ask-mode card says and what a press switches to.
+export const askModeView = (mode: AskMode) => {
+  const next: AskMode = mode === 'all' ? 'ends' : 'all'
+
+  return { ...ASK_MODE_TEXT[mode], next, nextLabel: `${ASK_MODE_TEXT[next].name}로 바꾸기` }
+}
+
+export type Gear = { name: string; mark: string; takes: string; gives: string; does: string; args: string[] }
+
+// The gears of a project's gear index (a tab-separated line each: name · kind · mark · in · out · does · words · arguments).
+// Teeth are left out. The mark is the strongest one in the gear's whole flow (core 0.102.0+; '-' in an older index).
+export const parseGears = (indexText: string | null | undefined): Gear[] =>
+  (indexText ?? '')
+    .split('\n')
+    .map(line => line.split('\t'))
+    .filter(cols => cols[1] === 'gear' && Boolean(cols[0]))
+    .map(cols => ({
+      name: cols[0] ?? '',
+      mark: cols[2] ?? '-',
+      takes: cols[3] ?? '*',
+      gives: cols[4] ?? '*',
+      does: cols[5] ?? '',
+      args: (cols[7] ?? '')
+        .split(';')
+        .map(one => one.trim())
+        .filter(Boolean),
+    }))
+
+const VALUE_WORD: Record<string, string> = { none: '없음', '*': '아무 값' }
+const MARK_WORD: Record<string, string> = {
+  pure: '밖으로 영향 없음',
+  effect: '이 컴퓨터에 영향 있음',
+  outward: '밖으로 나감 — 돌리기 전에 확인',
+  judge: 'Claude 가 판단하는 단계 있음',
+}
+
+export type GearRow = {
+  name: string
+  flow: string
+  does: string
+  argsLine: string | null
+  markLine: string | null
+  // run: a press runs it here; input: it needs a value typed first; null: only through the prompt box
+  direct: 'run' | 'input' | null
+}
+
+// One line per gear with what a press may do: a gear whose whole flow is pure runs in the pane (with a value typed
+// first when it takes one, where the surface draws a field), every other gear goes through the prompt box.
+export const gearRows = (gears: readonly Gear[], hasCore: boolean, hasField: boolean): GearRow[] =>
+  gears.map(gear => {
+    const takesValue = gear.takes !== 'none'
+    const canRun = hasCore && gear.mark === 'pure' && (!takesValue || hasField)
+
+    return {
+      name: gear.name,
+      flow: `${VALUE_WORD[gear.takes] ?? gear.takes} → ${VALUE_WORD[gear.gives] ?? gear.gives}`,
+      does: gear.does,
+      argsLine: gear.args.length > 0 ? `인자 ${gear.args.join(' · ')}` : null,
+      markLine: MARK_WORD[gear.mark] ?? null,
+      direct: canRun ? (takesValue ? 'input' : 'run') : null,
+    }
+  })
+
+const GEAR_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/
+
+// The command the prompt box gets: the gear alone, so Claude asks for the values it needs (core 0.102.0+).
+export const gearCommand = (name: string) => (GEAR_NAME.test(name) ? `/scv:gear run ${name}` : null)
+
+// The command a direct run starts: the name is one word of its own, and what the person typed never joins it.
+export const gearRunArgv = (core: string, name: string) => (GEAR_NAME.test(name) ? ['bash', `${core}/scripts/gear.sh`, 'run', name] : null)
+
+// What a direct run printed, cut to a few lines; a failed one says its exit code and its error lines.
+export const gearResultView = (exitCode: number, stdout: string, stderr: string, max = 12): string[] => {
+  const linesOf = (text: string) => text.split('\n').filter(line => line.trim() !== '')
+  if (exitCode !== 0) return [`실패 — 종료 코드 ${exitCode}`, ...linesOf(stderr || stdout).slice(0, max)]
+  const lines = linesOf(stdout)
+  if (lines.length === 0) return ['끝남 — 출력 없음']
+
+  return lines.length > max ? [...lines.slice(0, max), `… 외 ${lines.length - max}줄`] : lines
+}
+
+// Where the SCV plugin is installed, from Claude's own list of installed plugins: the install made for this
+// project when there is one, else the person's own. null when the list has none (then presses fall back to the prompt box).
+export const pluginRoot = (installedText: string | null | undefined, project: string): string | null => {
+  if (!installedText) return null
+  try {
+    const plugins = (JSON.parse(installedText) as { plugins?: Record<string, unknown> }).plugins ?? {}
+    const entries = Object.entries(plugins)
+      .filter(([key]) => key === 'scv' || key.startsWith('scv@'))
+      .flatMap(([, list]) => (Array.isArray(list) ? (list as { scope?: string; installPath?: string; projectPath?: string }[]) : []))
+      .filter(one => typeof one.installPath === 'string' && one.installPath !== '')
+    const own = entries.find(one => one.projectPath && one.projectPath === project)
+
+    return (own ?? entries.find(one => one.scope === 'user') ?? entries[0])?.installPath ?? null
+  } catch {
+    return null
+  }
+}
+
+export type PaneSection = 'limits' | 'askMode' | 'gears' | 'blocks' | 'steps' | 'more'
+
+// The cards always shown, top to bottom; the rest sits under 'more'. Blocked work shows only when there is some,
+// the steps only with a plan, and ask mode · gears only where this session reads the project itself.
+export const paneSections = (has: { plan: boolean; blocks: boolean; project: boolean }): PaneSection[] => [
+  'limits',
+  ...(has.project ? (['askMode', 'gears'] as const) : []),
+  ...(has.plan && has.blocks ? (['blocks'] as const) : []),
+  ...(has.plan ? (['steps', 'more'] as const) : []),
+]

@@ -124,6 +124,17 @@ const engine = (
   const notify = { isSent: true }
   const processes: string[][] = []
   const proc = { stdout: '' }
+  // what the pane's own commands were started with (working folder · standard input · time limit) and how they end
+  const runs: { argv: string[]; cwd?: string; stdin?: string; timeoutMs?: number }[] = []
+  const procEnd = { exitCode: 0, stderr: '' }
+  // more files this project holds, by the end of their path (settings, gear index, a gear run's state, the installed list)
+  const extra: Record<string, string> = {}
+  // folders listed for the gear-run state, by the end of their path
+  const extraDirs: Record<string, string[]> = {}
+  const env: Record<string, string | undefined> = { HOME: '/home/u' }
+  // the cards under '더 보기' are open here, as every test written before the fold expects; a fold test closes them
+  store.set('scv-dashboard:more', true)
+  on('env.get', (_, e) => ({ value: env[e.name] }) as never)
   const sent: { to: string; text: string }[] = []
   const delivery = { isDelivered: true }
   on('command.register', () => ({ value: { command: 'scv-dashboard' } }))
@@ -147,7 +158,7 @@ const engine = (
           ? Object.keys(e.path.endsWith('scv/archive') ? archived : files).map(dir)
           : e.path.endsWith('scv/core/catalog/pure')
             ? Object.keys(catalog).map(name => ({ ...dir(name), kind: 'file' as const }))
-            : [],
+            : (Object.entries(extraDirs).find(([end]) => e.path.endsWith(end))?.[1] ?? []).map(dir),
   }))
   on('fs.read', (_, e) => {
     const [, where, slug, file] = e.path.match(/scv\/(promote|archive)\/([^/]+)\/(PLAN|TESTS)\.md$/) ?? []
@@ -157,6 +168,8 @@ const engine = (
     if (recorded && archived[recorded]?.record) return { value: archived[recorded]!.record! }
     const kept = e.path.match(/scv\/core\/catalog\/pure\/([^/]+)$/)?.[1]
     if (kept && catalog[kept] !== undefined) return { value: catalog[kept] }
+    const more = Object.entries(extra).find(([end]) => e.path.endsWith(end))?.[1]
+    if (more !== undefined) return { value: more }
     if (e.path.endsWith('scv/dreams/latest.json') && dreams) return { value: dreams }
     if (e.path.endsWith('scv/dreams/x.html') && dreams) return { value: '<h1>드림</h1>' }
     // a background job's output file (now-view): which ones were read is kept, to see that only changed files are
@@ -189,7 +202,8 @@ const engine = (
   })
   on('process.run', (_, e) => {
     processes.push([...e.argv])
-    return { value: { exitCode: 0, stdout: proc.stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    runs.push({ argv: [...e.argv], cwd: e.init?.cwd, stdin: e.init?.stdin, timeoutMs: e.init?.timeoutMs })
+    return { value: { exitCode: procEnd.exitCode, stdout: proc.stdout, stderr: procEnd.stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('session.id', () => ({ value: 'local-id' }))
   on('session.send', (_, e) => {
@@ -199,7 +213,7 @@ const engine = (
   })
   on('session.receive', (_, e) => ({ text: e.text }))
 
-  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent, delivery }
+  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent, delivery, runs, procEnd, extra, extraDirs, env }
 }
 
 const start = ($: Engine) =>
@@ -2998,4 +3012,241 @@ test('a dictionary that is the source: the functions a step writes are the dicti
   expect(definedFromCatalog('pub fn grade(g: u8) -> u8 {\n  g\n}', catalog)).toEqual([{ name: 'grade', tier: 'pure', role: '등급', kind: '고르기' }])
   expect(definedFromCatalog('export const add = (a, b) => a + b\ncnt() {\n}', catalog).map(one => one.name)).toEqual(['add', 'cnt'])
   expect(definedFromCatalog('return grade(3)', catalog)).toEqual([])
+})
+
+// ── pane 0.3.0: cards on top · the fold · ask mode · gears ──────────────────────
+import { askModeView, gearCommand, gearResultView, gearRows, gearRunArgv, paneSections, parseAskMode, parseGears, pluginRoot } from './model'
+
+const CORE_DIR = '/home/u/.claude/plugins/cache/scv-claude-code/scv/0.102.0'
+const INSTALLED = JSON.stringify({ plugins: { 'scv@scv-claude-code': [{ scope: 'user', installPath: CORE_DIR }], 'other@x': [{ scope: 'user', installPath: '/x' }] } })
+const GEAR_INDEX = [
+  'ci-gate\ttooth\tpure\tresults\tverdict\t결과를 판정\t',
+  'ci-run\ttooth\teffect\tnone\tresults\tCI 명령을 돌림\t\trepo=core; os=mac',
+  'group-subjects\tgear\tpure\tsubjects\tgroups\t제목을 종류별로 묶음\t',
+  'make-list\tgear\tpure\tnone\tlines\t목록을 만듦\t',
+  'release-ci\tgear\teffect\tnone\tverdict\t릴리스 전 CI 를 다 돌림\t릴리스\trepo=core; os=mac; jobs=4',
+].join('\n')
+const withProject = (kit: { extra: Record<string, string> }, opts: { settings?: string; index?: string | null; isInstalled?: boolean } = {}) => {
+  kit.extra['scv/scv_settings.json'] = opts.settings ?? '{"SCV_LANG":"korean"}'
+  if (opts.index !== null) kit.extra['scv/gears/INDEX.tsv'] = opts.index ?? GEAR_INDEX
+  if (opts.isInstalled !== false) kit.extra['.claude/plugins/installed_plugins.json'] = INSTALLED
+}
+const has = async (ui: { find: (q: { type: 'Button'; key: string }) => Promise<unknown> }, key: string) => Boolean(await ui.find({ type: 'Button', key }))
+
+test('pane T14 계획이 없어도 컨텍스트 · 사용 한도 · 묻기 방식 · 기어가 나온다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  on('session.usage', () => ({ value: { rateLimits: LIMITS } }) as never)
+  await start($)
+  const drawn = await drawnText($)
+
+  expect(drawn).toContain('사용 한도')
+  expect(drawn).toContain('5시간 72%')
+  expect(drawn).toContain('묻기 방식')
+  expect(drawn).toContain('기어 3')
+  expect(drawn).toContain('진행 중인 SCV 계획이 없습니다')
+})
+
+test('pane T15 위 칸의 순서와 더 보기 — 접으면 안 보이고, 누르면 보이고, 다시 그려도 남는다', async ($, on) => {
+  const kit = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE, tests: ['T1 하나'] }) })
+  withProject(kit)
+  kit.store.delete('scv-dashboard:more')
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const folded = await drawnText($)
+
+  // the fold's own label names the folded cards, so a line only those cards draw is looked for
+  expect(folded).not.toContain('시험 펼치기')
+  expect(folded).not.toContain('예상 완료 시간')
+  expect(folded.indexOf('묻기 방식')).toBeGreaterThan(-1)
+  expect(folded.indexOf('묻기 방식')).toBeLessThan(folded.indexOf('기어 3'))
+  expect(folded.indexOf('기어 3')).toBeLessThan(folded.indexOf('단계 흐름'))
+  await ui.press({ key: 'more-toggle' })
+  const opened = await drawnText($)
+  expect(opened).toContain('시험 펼치기')
+  expect(opened).toContain('예상 완료 시간')
+  expect(kit.store.get('scv-dashboard:more')).toBe(true)
+  expect(await drawnText($)).toContain('시험 펼치기')
+  await ui.unmount()
+})
+
+test('pane T16 막힌 작업은 접혀 있어도 위에 보인다', async ($, on) => {
+  const kit = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', '[!] b', 'c'] }) })
+  withProject(kit)
+  kit.store.delete('scv-dashboard:more')
+  await start($)
+  const drawn = await drawnText($)
+
+  expect(drawn).toContain('막힌 작업 1')
+  expect(drawn).not.toContain('시험 펼치기')
+})
+
+test('pane T17 묻기 방식의 이름과 뜻 — 값 없음 · ends · 모르는 값', async ($, on) => {
+  expect(parseAskMode(null)).toBe('all')
+  expect(parseAskMode('{"SCV_ASK_MODE":" ENDS "}')).toBe('ends')
+  expect(parseAskMode('{"SCV_ASK_MODE":"sometimes"}')).toBe('all')
+  expect(parseAskMode('not json')).toBe('all')
+  expect(askModeView('all').name).toBe('전부 묻기')
+  expect(askModeView('ends').name).toBe('처음 · 끝에만 묻기')
+  expect(askModeView('all').next).toBe('ends')
+  const kit = engine(on, {})
+  withProject(kit, { settings: '{"SCV_ASK_MODE":"ends"}' })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await text(ui, /^처음 · 끝에만 묻기$/)).toBe('처음 · 끝에만 묻기')
+  expect((await ui.find({ type: 'Button', key: 'ask-mode-switch' }))?.text).toBe('전부 묻기로 바꾸기')
+  await ui.unmount()
+})
+
+test('pane T18 묻기 방식 바꾸기 — 본체의 설정 명령을 프로젝트 폴더에서 고른 값으로 한 번 부른다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'ask-mode-switch' })
+  const ran = kit.runs.filter(one => one.argv[1]?.endsWith('/ask-mode.sh'))
+
+  expect(ran).toHaveLength(1)
+  expect(ran[0]?.argv).toEqual(['bash', `${CORE_DIR}/scripts/ask-mode.sh`, 'ends'])
+  expect(ran[0]?.cwd).toBe('/work')
+  expect(await text(ui, /^묻기 방식을 바꿈/)).toBe('묻기 방식을 바꿈 — 다음 메시지부터 처음 · 끝에만 묻기')
+  await ui.unmount()
+})
+
+test('pane T18b 본체 설치를 못 찾으면 명령을 돌리지 않고 입력창에 넣는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { isInstalled: false })
+  const { fills } = promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'ask-mode-switch' })
+
+  expect(kit.runs.filter(one => one.argv[1]?.endsWith('/ask-mode.sh'))).toHaveLength(0)
+  expect(fills).toEqual([{ text: '/scv:ask-mode ends', mode: 'replace' }])
+  expect(await text(ui, /^바로 바꾸지 못해/)).toBe('바로 바꾸지 못해 입력창에 넣음: /scv:ask-mode ends')
+  await ui.unmount()
+})
+
+test('pane T19 기어 목록 — 기어만(톱니 제외), 값 · 하는 일 · 인자. 목록이 없으면 안내 한 줄', async ($, on) => {
+  expect(parseGears(GEAR_INDEX).map(one => one.name)).toEqual(['group-subjects', 'make-list', 'release-ci'])
+  expect(parseGears(GEAR_INDEX)[2]).toEqual({ name: 'release-ci', mark: 'effect', takes: 'none', gives: 'verdict', does: '릴리스 전 CI 를 다 돌림', args: ['repo=core', 'os=mac', 'jobs=4'] })
+  expect(parseGears(null)).toEqual([])
+  const kit = engine(on, {})
+  withProject(kit)
+  await start($)
+  const drawn = await drawnText($)
+
+  expect(drawn).toContain('release-ci')
+  expect(drawn).toContain('없음 → verdict')
+  expect(drawn).toContain('릴리스 전 CI 를 다 돌림')
+  expect(drawn).toContain('인자 repo=core · os=mac · jobs=4')
+  expect(drawn).not.toContain('ci-gate')
+  expect(drawn).not.toContain('ci-run')
+})
+
+test('pane T19b 기어 목록 파일이 없는 프로젝트는 안내 한 줄이고 창이 깨지지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { index: null })
+  await start($)
+  const drawn = await drawnText($)
+
+  expect(drawn).toContain('기어 0')
+  expect(drawn).toContain('이 프로젝트에 기어가 없습니다')
+})
+
+test('pane T20 쓰기 — 부작용 있는 기어는 쓰기만, 누르면 입력창에 그 기어의 명령이 들어간다', async ($, on) => {
+  const rows = gearRows(parseGears(GEAR_INDEX), true, true)
+  expect(rows.map(one => one.direct)).toEqual(['input', 'run', null])
+  expect(gearRows(parseGears(GEAR_INDEX), false, true).map(one => one.direct)).toEqual([null, null, null])
+  expect(gearRows(parseGears(GEAR_INDEX), true, false).map(one => one.direct)).toEqual([null, 'run', null])
+  expect(gearCommand('release-ci')).toBe('/scv:gear run release-ci')
+  expect(gearCommand('bad name; rm')).toBe(null)
+  const kit = engine(on, {})
+  withProject(kit)
+  const { fills } = promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await has(ui, 'gear-use-release-ci')).toBe(true)
+  expect(await has(ui, 'gear-run-release-ci')).toBe(false)
+  expect(await has(ui, 'gear-run-make-list')).toBe(true)
+  await ui.press({ key: 'gear-use-release-ci' })
+  expect(fills).toEqual([{ text: '/scv:gear run release-ci', mode: 'replace' }])
+  expect(kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('pane T21 바로 실행 — 본체 기어 실행기를 30초 제한으로 부르고 출력을 칸에 보인다', async ($, on) => {
+  expect(gearRunArgv(CORE_DIR, 'make-list')).toEqual(['bash', `${CORE_DIR}/scripts/gear.sh`, 'run', 'make-list'])
+  expect(gearResultView(0, 'a\nb\n', '')).toEqual(['a', 'b'])
+  expect(gearResultView(0, '', '')).toEqual(['끝남 — 출력 없음'])
+  expect(gearResultView(1, '', 'GEAR_ERROR: 없음')).toEqual(['실패 — 종료 코드 1', 'GEAR_ERROR: 없음'])
+  expect(gearResultView(0, '1\n2\n3\n4', '', 2)).toEqual(['1', '2', '… 외 2줄'])
+  const kit = engine(on, {})
+  withProject(kit)
+  kit.proc.stdout = '하나\n둘\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'gear-run-make-list' })
+  const ran = kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))
+
+  expect(ran).toHaveLength(1)
+  expect(ran[0]).toEqual({ argv: ['bash', `${CORE_DIR}/scripts/gear.sh`, 'run', 'make-list'], cwd: '/work', stdin: '', timeoutMs: 30_000 })
+  expect(await text(ui, /^│ 하나$/)).toBe('│ 하나')
+  kit.procEnd.exitCode = 1
+  kit.procEnd.stderr = 'GEAR_ERROR: 톱니 파일이 없다'
+  await ui.press({ key: 'gear-run-make-list' })
+  expect(await text(ui, /^│ 실패/)).toBe('│ 실패 — 종료 코드 1')
+  await ui.unmount()
+})
+
+test('pane T21b 표시 칸이 없는 예전 목록 파일이면 바로 실행이 없다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { index: 'make-list\tgear\t-\tnone\tlines\t목록을 만듦\t' })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await has(ui, 'gear-run-make-list')).toBe(false)
+  expect(await has(ui, 'gear-use-make-list')).toBe(true)
+  // the session asked SCV once to write the index again (a newer core fills the mark in)
+  expect(kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh')).map(one => one.argv.slice(2))).toEqual([['index']])
+  await ui.unmount()
+})
+
+test('pane T22 입력 칸에 적은 글은 표준 입력으로만 가고 명령에 섞이지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  kit.proc.stdout = 'feat 1\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.input({ key: 'gear-input-group-subjects', text: 'feat: a; rm -rf "x" count=9' })
+  const ran = kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))
+
+  expect(ran).toHaveLength(1)
+  expect(ran[0]?.argv).toEqual(['bash', `${CORE_DIR}/scripts/gear.sh`, 'run', 'group-subjects'])
+  expect(ran[0]?.stdin).toBe('feat: a; rm -rf "x" count=9')
+  await ui.unmount()
+})
+
+test('pane T23 확인을 기다리는 기어 실행이 있으면 기어 칸에 알린다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  kit.extraDirs['scv/journal/.gear-run'] = ['abcd1234', 'ffff0000']
+  kit.extra['.gear-run/abcd1234/kind'] = 'confirm\n'
+  kit.extra['.gear-run/ffff0000/kind'] = 'text\n'
+  await start($)
+
+  expect(await drawnText($)).toContain('확인 기다림 1')
+})
+
+test('pane T23b 설치 폴더 찾기와 칸 목록 — 순수부', async () => {
+  expect(pluginRoot(INSTALLED, '/work')).toBe(CORE_DIR)
+  expect(pluginRoot(JSON.stringify({ plugins: { 'scv@m': [{ scope: 'user', installPath: '/u' }, { scope: 'project', projectPath: '/work', installPath: '/p' }] } }), '/work')).toBe('/p')
+  expect(pluginRoot('{"plugins":{"other@x":[{"scope":"user","installPath":"/x"}]}}', '/work')).toBe(null)
+  expect(pluginRoot(null, '/work')).toBe(null)
+  expect(pluginRoot('broken', '/work')).toBe(null)
+  expect(paneSections({ plan: false, blocks: false, project: true })).toEqual(['limits', 'askMode', 'gears'])
+  expect(paneSections({ plan: true, blocks: true, project: true })).toEqual(['limits', 'askMode', 'gears', 'blocks', 'steps', 'more'])
+  expect(paneSections({ plan: true, blocks: false, project: false })).toEqual(['limits', 'steps', 'more'])
 })
