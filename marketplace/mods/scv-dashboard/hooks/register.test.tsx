@@ -131,6 +131,14 @@ const engine = (
   const extra: Record<string, string> = {}
   // folders listed for the gear-run state, by the end of their path
   const extraDirs: Record<string, string[]> = {}
+  // files listed in a folder (name and when it last changed), by the end of the folder's path
+  const extraFiles: Record<string, { name: string; mtimeMs: number }[]> = {}
+  // compactions that reached the engine itself (the mod's own answer never does), and what the engine answers
+  const compactions: { trigger: string; instructions?: string }[] = []
+  on('session.compact', (_, e) => {
+    compactions.push({ trigger: e.trigger, instructions: e.instructions })
+    return { messages: e.messages, tokensBefore: 500_000, tokensAfter: 40_000 } as never
+  })
   const env: Record<string, string | undefined> = { HOME: '/home/u' }
   // the cards under '더 보기' are open here, as every test written before the fold expects; a fold test closes them
   store.set('scv-dashboard:more', true)
@@ -160,7 +168,10 @@ const engine = (
           ? Object.keys(e.path.endsWith('scv/archive') ? archived : files).map(dir)
           : e.path.endsWith('scv/core/catalog/pure')
             ? Object.keys(catalog).map(name => ({ ...dir(name), kind: 'file' as const }))
-            : (Object.entries(extraDirs).find(([end]) => e.path.endsWith(end))?.[1] ?? []).map(dir),
+            : [
+                ...(Object.entries(extraDirs).find(([end]) => e.path.endsWith(end))?.[1] ?? []).map(dir),
+                ...(Object.entries(extraFiles).find(([end]) => e.path.endsWith(end))?.[1] ?? []).map(one => ({ ...dir(one.name), kind: 'file' as const, mtimeMs: one.mtimeMs })),
+              ],
   }))
   on('fs.read', (_, e) => {
     const [, where, slug, file] = e.path.match(/scv\/(promote|archive)\/([^/]+)\/(PLAN|TESTS)\.md$/) ?? []
@@ -215,7 +226,7 @@ const engine = (
   })
   on('session.receive', (_, e) => ({ text: e.text }))
 
-  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent, delivery, runs, procEnd, extra, extraDirs, env }
+  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent, delivery, runs, procEnd, extra, extraDirs, extraFiles, compactions, env }
 }
 
 const start = ($: Engine) =>
@@ -3440,5 +3451,135 @@ test('gear-match T18 설명이 길어도 자르지 않고, 한 줄이 이미 붙
   expect(hintLine(gear)).toBe(`저장해 둔 방법이 있음: ${long}`)
   const once = submitWithGear('해 줘', gear, false)
   expect(submitWithGear(once, gear, false)).toBe(once)
+})
+
+// ── pane 0.3.3: a long conversation made light ───────────────────────────────────
+import { DEFAULT_LIGHT, lastTurns, lightDue, lightMessages, lightNote, parseLight, recordTail, resumeBrief } from './model'
+
+const RECORD = ['---', 'slug: x', '---', '', '# 대화', '', '## Turn 1 — t', '', '**User**: 첫 요청', '', '**Claude Code**: 첫 답', '', '## Turn 2 — t', '', '**User**: 둘째 요청', '', '**Claude Code**: 둘째 답'].join('\n')
+const endTurn = ($: Engine) => $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+const settle = () => new Promise<void>(done => setTimeout(done, 80))
+const SAID = [
+  { role: 'user', text: '요청', toolUses: [] },
+  { role: 'assistant', text: '답', toolUses: [] },
+]
+// how full the conversation is (it drops to 8% once a compaction stood), the turn's end, and the compact command as
+// the engine runs it: a compaction of the main conversation, the person's kind
+const withUsage = ($: Engine, on: On, percent: number, kit: { compactions: unknown[] }, done = { count: 0 }) => {
+  on('session.usage', () => ({ value: { rateLimits: [], context: { percent: done.count > 0 ? 8 : percent } } }) as never)
+  on('turn.complete', () => ({ text: '', reason: 'answer' as const }))
+  on('command.run', async (_, e) => {
+    if (e.command !== 'compact') return { text: '' }
+    await ($.session as unknown as { compact: (e: unknown) => Promise<unknown> }).compact({ trigger: 'manual', instructions: e.args, messages: SAID })
+    done.count += 1
+
+    return { text: '' }
+  })
+
+  return kit
+}
+
+test('light T1 순수부 — 기준 · 최근 턴 · 기록 끝 · 바꿔 끼울 글', async () => {
+  expect(parseLight(undefined)).toEqual(DEFAULT_LIGHT)
+  expect(parseLight({ isOn: false, percent: 30 })).toEqual({ isOn: false, percent: 30 })
+  expect(parseLight({ isOn: 'yes', percent: 500 })).toEqual(DEFAULT_LIGHT)
+  expect(lightDue(DEFAULT_LIGHT, 49, false, 0, 1)).toBe(false)
+  expect(lightDue(DEFAULT_LIGHT, 50, false, 0, 1)).toBe(true)
+  expect(lightDue(DEFAULT_LIGHT, 80, true, 0, 1)).toBe(false)
+  expect(lightDue({ isOn: false, percent: 50 }, 80, false, 0, 1)).toBe(false)
+  expect(lightDue(DEFAULT_LIGHT, null, false, 0, 1)).toBe(false)
+  expect(lightDue(DEFAULT_LIGHT, 80, false, 1_000, 60_000)).toBe(false)
+  expect(lightDue(DEFAULT_LIGHT, 80, false, 1_000, 400_000)).toBe(true)
+  const said = [
+    { role: 'user' as const, text: '첫 요청' },
+    { role: 'assistant' as const, text: '' },
+    { role: 'user' as const, text: '', toolResults: [{}] },
+    { role: 'assistant' as const, text: '첫 답' },
+    { role: 'user' as const, text: '둘째 요청' },
+    { role: 'assistant' as const, text: '둘째 답' },
+  ]
+  expect(lastTurns(said, 1)).toEqual([{ role: 'user', text: '둘째 요청' }, { role: 'assistant', text: '둘째 답' }])
+  expect(lastTurns(said).map(one => one.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+  expect(recordTail(RECORD)).toBe(RECORD)
+  expect(recordTail(RECORD, 60).startsWith('## Turn 2')).toBe(true)
+  expect(recordTail(null)).toBe('')
+  const brief = resumeBrief({ recordPath: 'scv/conversations/a.md', tail: '## Turn 2', plans: [{ title: '계획 하나', status: 'in_progress', done: 2, total: 5 }] })
+  expect(brief).toContain('scv/conversations/a.md')
+  expect(brief).toContain('계획 하나 (in_progress, 단계 2/5)')
+  expect(brief).toContain('## Turn 2')
+  const after = lightMessages(brief, lastTurns(said, 1))
+  expect(after.map(one => one.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
+  expect(after[0]?.text).toBe(brief)
+  expect(lightNote({ kind: 'records', before: 62, after: 8, ms: 1200 })).toBe('기록으로 바꿔 끼워 가볍게 함 62% → 8% · 1초')
+  expect(lightNote({ kind: 'records', before: 62, after: 62, ms: 1200 })).toBe('기록으로 바꿔 끼워 가볍게 함 62% · 1초')
+  expect(lightNote({ kind: 'summary', before: null, after: null, ms: 70_000 })).toBe('요약해서 가볍게 함 · 70초')
+  expect(lightNote({ kind: 'skipped', before: 62, after: null, ms: 1 })).toBe('가볍게 하지 못함 — 다음 턴 끝에 다시 봄')
+})
+
+test('light T2 턴이 끝날 때 기준을 넘으면 기록으로 바꿔 끼운다 — 모델 요약은 부르지 않는다', async ($, on) => {
+  const kit = engine(on, { a: plan({ title: '계획 하나', status: 'in_progress', steps: FIVE }) })
+  withProject(kit)
+  withUsage($, on, 62, kit)
+  kit.extraFiles['scv/conversations'] = [{ name: 'old.md', mtimeMs: 1 }, { name: 'new.md', mtimeMs: 9 }]
+  kit.extra['scv/conversations/new.md'] = RECORD
+  kit.extra['scv/conversations/old.md'] = '옛 기록'
+  await start($)
+  await endTurn($)
+  await settle()
+
+  expect(kit.compactions).toHaveLength(0)
+  expect(await drawnText($)).toContain('기록으로 바꿔 끼워 가볍게 함 62% → 8%')
+})
+
+test('light T3 기록이 없으면 자동 요약으로 넘어간다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 62, kit)
+  await start($)
+  await endTurn($)
+  await settle()
+
+  expect(kit.compactions).toHaveLength(1)
+  expect(kit.compactions[0]?.trigger).toBe('manual')
+  expect(kit.compactions[0]?.instructions).toContain('진행 중인 SCV 계획')
+  expect(await drawnText($)).toContain('요약해서 가볍게 함 62% → 8%')
+})
+
+test('light T4 기준 아래거나 꺼 두면 아무것도 하지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 40, kit)
+  await start($)
+  await endTurn($)
+  await settle()
+  expect(kit.compactions).toHaveLength(0)
+  expect(await drawnText($)).not.toContain('가볍게 함 ')
+})
+
+test('light T5 창의 한 줄과 끄기 버튼 — 끄면 기준을 넘어도 그대로 두고, 다음 세션에도 남는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 62, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await drawnText($)).toContain('대화가 길어지면(50%) 자동으로 가볍게 함')
+  await ui.press({ key: 'light-toggle' })
+  expect(await drawnText($)).toContain('대화가 길어져도 그대로 둠')
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
+  await endTurn($)
+  await settle()
+  expect(kit.compactions).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('light T6 사람이 친 정리나 엔진의 자동 정리는 건드리지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  kit.extraFiles['scv/conversations'] = [{ name: 'new.md', mtimeMs: 9 }]
+  kit.extra['scv/conversations/new.md'] = RECORD
+  await start($)
+  await ($.session as unknown as { compact: (e: unknown) => Promise<unknown> }).compact({ trigger: 'manual', messages: SAID })
+
+  expect(kit.compactions).toEqual([{ trigger: 'manual', instructions: undefined }])
 })
 

@@ -1643,3 +1643,81 @@ export const gearCatalog = (gears: readonly Gear[], recent: readonly string[], i
 // The lately-used list with one more use at its front (no repeats, the ten newest kept).
 export const usedGear = (recent: readonly string[], name: string) => [name, ...recent.filter(one => one !== name)].slice(0, 10)
 
+
+// ── a long conversation made light (pane 0.3.3) ──────────────────────────────
+
+export type LightSettings = { isOn: boolean; percent: number }
+
+export const DEFAULT_LIGHT: LightSettings = { isOn: true, percent: 50 }
+
+// What the store kept, read back: anything of another shape is the default (on, at 50%).
+export const parseLight = (kept: unknown): LightSettings => {
+  const one = (kept ?? {}) as { isOn?: unknown; percent?: unknown }
+  const percent = typeof one.percent === 'number' && one.percent >= 10 && one.percent <= 95 ? Math.round(one.percent) : DEFAULT_LIGHT.percent
+
+  return { isOn: typeof one.isOn === 'boolean' ? one.isOn : DEFAULT_LIGHT.isOn, percent }
+}
+
+const LIGHT_GAP_MS = 5 * 60_000
+
+// Whether the conversation is made light now: switched on, at or over the mark, no turn running, and not within
+// five minutes of the last time (a pass that did not bring it under the mark is not tried again at once).
+export const lightDue = (settings: LightSettings, percent: number | null, isWorking: boolean, lastAt: number, at: number) =>
+  settings.isOn && percent !== null && percent >= settings.percent && !isWorking && (lastAt === 0 || at - lastAt >= LIGHT_GAP_MS)
+
+type Said = { role: 'user' | 'assistant'; text: string; toolResults?: readonly unknown[] }
+
+// The last few turns as plain text: what the person wrote and the last thing Claude said in that turn, each cut
+// short. Tool calls and their results are left out — the record holds what was done.
+export const lastTurns = (messages: readonly Said[], turns = 3, max = 1500): { role: 'user' | 'assistant'; text: string }[] => {
+  const all: { user: string; answer: string }[] = []
+  for (const one of messages) {
+    const text = one.text.trim()
+    if (one.role === 'user' && text !== '' && (one.toolResults?.length ?? 0) === 0) all.push({ user: text, answer: '' })
+    else if (one.role === 'assistant' && text !== '' && all.length > 0) all[all.length - 1]!.answer = text
+  }
+
+  return all.slice(-turns).flatMap(turn => [
+    { role: 'user' as const, text: cutLine(turn.user, max) },
+    { role: 'assistant' as const, text: cutLine(turn.answer || '(이 턴의 답은 기록에 있음)', max) },
+  ])
+}
+
+// The end of the conversation record, starting at a turn heading when one falls inside the part kept.
+export const recordTail = (text: string | null | undefined, max = 12_000): string => {
+  const whole = (text ?? '').trim()
+  if (whole.length <= max) return whole
+  const cut = whole.slice(-max)
+  const at = cut.indexOf('\n## ')
+
+  return (at >= 0 ? cut.slice(at + 1) : cut).trim()
+}
+
+// What stands in place of the older conversation: where the full record is, the plans in progress, and the
+// record's last part. Written by SCV from its own files — no model summary.
+export const resumeBrief = (input: { recordPath: string; tail: string; plans: readonly { title: string; status: string; done: number; total: number }[] }) =>
+  [
+    '[SCV 이어 하기] 대화가 길어져 SCV 가 앞부분을 기록으로 바꿔 끼웠습니다(모델이 쓴 요약이 아니라 SCV 가 매 턴 적어 둔 기록입니다).',
+    `- 전체 기록: ${input.recordPath} — 더 앞의 내용이 필요하면 이 파일을 읽으세요.`,
+    ...(input.plans.length > 0
+      ? ['- 진행 중인 계획:', ...input.plans.map(plan => `  - ${plan.title} (${plan.status}, 단계 ${plan.done}/${plan.total})`)]
+      : ['- 진행 중인 계획: 없음']),
+    '- 아래 기록의 끝부분과 그 뒤의 최근 대화를 이어서 일하세요. 모르는 것은 추측하지 말고 기록 파일을 읽으세요.',
+    '',
+    '## 기록의 끝부분',
+    input.tail,
+  ].join('\n')
+
+// The conversation as it reads afterwards: the brief, a word that it was read, then the last turns — a person's
+// message and Claude's by turns, ending on Claude's.
+export const lightMessages = (brief: string, turns: readonly { role: 'user' | 'assistant'; text: string }[]) =>
+  [{ role: 'user' as const, text: brief }, { role: 'assistant' as const, text: '기록을 읽었음. 이어서 진행함.' }, ...turns].map(one => ({ ...one, toolUses: [] }))
+
+// The line the pane shows after a pass: how it was done, how full the conversation was and is, and how long it took.
+export const lightNote = (input: { kind: 'records' | 'summary' | 'skipped'; before: number | null; after: number | null; ms: number }) => {
+  if (input.kind === 'skipped') return '가볍게 하지 못함 — 다음 턴 끝에 다시 봄'
+  const size =
+    input.before !== null ? ` ${Math.round(input.before)}%${input.after !== null && input.after < input.before ? ` → ${Math.round(input.after)}%` : ''}` : ''
+
+  return `${input.kind === 'records' ? '기록으로 바꿔 끼워 가볍게 함' : '요약해서 가볍게 함'}${size} · ${Math.max(1, Math.round(input.ms / 1000))}초`
+}
