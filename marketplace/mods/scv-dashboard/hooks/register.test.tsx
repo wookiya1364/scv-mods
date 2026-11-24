@@ -3897,7 +3897,7 @@ test('direct T14 오래 도는 실행 — 도는 동안 끝 줄과 걸린 시간
   // the running step's output, as SCV keeps it in the run's state folder until the step ends
   const stepFile = { mtimeMs: 0 }
   on('fs.stat', (_, e) =>
-    stepFile.mtimeMs > 0 && e.path.endsWith('scv/journal/.gear-run/aa11bb22/next')
+    stepFile.mtimeMs > 0 && /scv\/journal\/\.gear-run\/(aa11bb22|zz99zz99)\/next$/.test(e.path)
       ? ({ value: { kind: 'file', size: 20, mtimeMs: stepFile.mtimeMs, isLink: false } } as never)
       : { deny: `ENOENT ${e.path}` },
   )
@@ -3909,13 +3909,20 @@ test('direct T14 오래 도는 실행 — 도는 동안 끝 줄과 걸린 시간
   kit.spawnPlans.push({ gate: held(), after: ['치운 파일 3개\n'], code: 0 })
   await ui.press({ key: 'gear-run-tidy' })
   expect(await drawnText($)).toContain('│ 아직 출력 없음')
-  kit.extraDirs['scv/journal/.gear-run'] = ['aa11bb22']
+  // two state folders appeared: SCV writes the gear's name in each (`name`), so another gear's run — started
+  // elsewhere at the same moment — is not taken for this one. (`given`, the values a run was started with, is
+  // there only when values were given: this run has none, and the pane never reads it.)
+  kit.extraDirs['scv/journal/.gear-run'] = ['zz99zz99', 'aa11bb22']
+  kit.extra['scv/journal/.gear-run/zz99zz99/name'] = 'ci-all\n'
+  kit.extra['scv/journal/.gear-run/zz99zz99/next'] = '남의 실행이 쓴 줄\n'
+  kit.extra['scv/journal/.gear-run/aa11bb22/name'] = 'tidy\n'
   kit.extra['scv/journal/.gear-run/aa11bb22/next'] = '셈 1/20\n셈 2/20\n'
   stepFile.mtimeMs = 5
   await clock.advance(45_000)
   const running = await drawnText($)
   expect(running).toContain('│ 돌리는 중 · 45초')
   expect(running).toContain('│ 셈 2/20')
+  expect(running).not.toContain('남의 실행이 쓴 줄')
   expect(await has(ui, 'gear-stop-tidy')).toBe(true)
   expect(await has(ui, 'gear-run-tidy')).toBe(false)
   expect(told()).toHaveLength(0)
