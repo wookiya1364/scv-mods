@@ -127,6 +127,35 @@ const engine = (
   // what the pane's own commands were started with (working folder · standard input · time limit) and how they end
   const runs: { argv: string[]; cwd?: string; stdin?: string; timeoutMs?: number }[] = []
   const procEnd = { exitCode: 0, stderr: '' }
+  // what SCV's own `ask` prints for a gear, by gear name (none set: the command prints what every other one does)
+  const asks: Record<string, string> = {}
+  // the commands the pane started and reads as they run (a gear run from the pane): what each was started with, and
+  // how the next ones go — the pieces written, the exit code, and for one that does not end by itself a gate it
+  // waits at until the test opens it (then `after` is written and it ends). None queued: it writes what every
+  // command here prints and ends as they do. ended: how many of them were ended (ran out, or were told to stop).
+  const spawns: { argv: string[]; cwd?: string; input?: string }[] = []
+  const spawnPlans: { pieces?: string[]; err?: string; code?: number; gate?: Promise<void>; after?: string[] }[] = []
+  const spawnEnds = { count: 0 }
+  // SCV's gear commands in the order they were started, by either way: 'run …' waited for, 'spawn …' read as it runs
+  const gearCalls: string[] = []
+  on('process.spawn', async function* (_: unknown, e: { argv: readonly string[]; cwd?: string; input?: string }) {
+    spawns.push({ argv: [...e.argv], cwd: e.cwd, input: e.input })
+    const at = e.argv.findIndex(word => word.endsWith('/scripts/gear.sh'))
+    if (at >= 0) gearCalls.push(`spawn ${e.argv.slice(at + 1).join(' ')}`)
+    const how = spawnPlans.shift() ?? { pieces: [proc.stdout], err: procEnd.stderr, code: procEnd.exitCode }
+    try {
+      for (const text of how.pieces ?? []) if (text) yield { stream: 'stdout' as const, text }
+      if (how.err) yield { stream: 'stderr' as const, text: how.err }
+      if (how.gate) {
+        await how.gate
+        for (const text of how.after ?? []) yield { stream: 'stdout' as const, text }
+      }
+
+      return { value: { code: how.code ?? 0, signal: null } }
+    } finally {
+      spawnEnds.count += 1
+    }
+  } as never)
   // more files this project holds, by the end of their path (settings, gear index, a gear run's state, the installed list)
   const extra: Record<string, string> = {}
   // folders listed for the gear-run state, by the end of their path
@@ -216,7 +245,14 @@ const engine = (
   on('process.run', (_, e) => {
     processes.push([...e.argv])
     runs.push({ argv: [...e.argv], cwd: e.init?.cwd, stdin: e.init?.stdin, timeoutMs: e.init?.timeoutMs })
-    return { value: { exitCode: procEnd.exitCode, stdout: proc.stdout, stderr: procEnd.stderr, isStdoutTruncated: false, isStderrTruncated: false } }
+    // SCV's own gear commands answer as SCV does: `ask` with the gear's values (when the test set them), `confirm`
+    // with the tag it was given and whether the answer was the go-ahead
+    const isGear = e.argv[1]?.endsWith('/scripts/gear.sh') === true
+    if (isGear) gearCalls.push(`run ${e.argv.slice(2).join(' ')}`)
+    const asked = isGear && e.argv[2] === 'ask' ? asks[e.argv[3] ?? ''] : undefined
+    const tag = isGear && e.argv[2] === 'confirm' ? /\[기어 확인 ([0-9a-f]{8}:[0-9]+)\]/.exec(e.argv[4] ?? '')?.[1] : undefined
+    const stdout = asked ?? (tag ? `${e.argv[6] === '실행' ? 'GEAR_CONFIRMED' : 'GEAR_DECLINED'}: ${tag}\n` : proc.stdout)
+    return { value: { exitCode: procEnd.exitCode, stdout, stderr: procEnd.stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('session.id', () => ({ value: 'local-id' }))
   on('session.send', (_, e) => {
@@ -226,7 +262,7 @@ const engine = (
   })
   on('session.receive', (_, e) => ({ text: e.text }))
 
-  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent, delivery, runs, procEnd, extra, extraDirs, extraFiles, compactions, env }
+  return { opened, processes, clock, panes, store, notices, copies, toasts, notify, proc, sent, delivery, runs, procEnd, extra, extraDirs, extraFiles, compactions, env, asks, spawns, spawnPlans, spawnEnds, gearCalls }
 }
 
 const start = ($: Engine) =>
@@ -1314,7 +1350,9 @@ test('work-view T9 에이전트 안 도구가 메인 줄을 덮어쓰지 않는�
 const promptEngine = (on: On, draft = '', isFilled = true) => {
   const fills: { text: string; mode?: string }[] = []
   const suggestions: string[] = []
-  on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }) as never)
+  // what the prompt box holds: a test may change it between presses
+  const box = { text: draft }
+  on('prompt.read', () => ({ value: { text: box.text, cursor: box.text.length } }) as never)
   on('prompt.fill', (_, e) => {
     fills.push({ text: e.text, mode: e.mode })
     return { isFilled } as never
@@ -1324,7 +1362,7 @@ const promptEngine = (on: On, draft = '', isFilled = true) => {
     return { isShown: true } as never
   })
 
-  return { fills, suggestions }
+  return { fills, suggestions, box }
 }
 
 // 17:40 in Seoul (UTC+9) is 08:40 UTC
@@ -3028,7 +3066,7 @@ test('a dictionary that is the source: the functions a step writes are the dicti
 })
 
 // ── pane 0.3.0: cards on top · the fold · ask mode · gears ──────────────────────
-import { askModeView, gearCommand, gearResultView, gearRows, gearRunArgv, paneSections, parseAskMode, parseGears, pluginRoot } from './model'
+import { askModeView, gearCommand, gearLaunchArgv, gearRows, gearRunArgv, paneSections, parseAskMode, parseGears, pluginRoot } from './model'
 
 const CORE_DIR = '/home/u/.claude/plugins/cache/scv-claude-code/scv/0.102.0'
 const INSTALLED = JSON.stringify({ plugins: { 'scv@scv-claude-code': [{ scope: 'user', installPath: CORE_DIR }], 'other@x': [{ scope: 'user', installPath: '/x' }] } })
@@ -3178,11 +3216,12 @@ test('pane T19b 기어 목록 파일이 없는 프로젝트는 안내 한 줄이
   expect(drawn).toContain('이 프로젝트에 기어가 없습니다')
 })
 
-test('pane T20 쓰기 — 부작용 있는 기어는 쓰기만, 누르면 입력창에 그 기어의 명령이 들어간다', async ($, on) => {
-  const rows = gearRows(parseGears(GEAR_INDEX), true, true)
-  expect(rows.map(one => one.direct)).toEqual(['input', 'run', null])
-  expect(gearRows(parseGears(GEAR_INDEX), false, true).map(one => one.direct)).toEqual([null, null, null])
-  expect(gearRows(parseGears(GEAR_INDEX), true, false).map(one => one.direct)).toEqual([null, 'run', null])
+test('pane T20 기어 줄의 버튼 — 창이 돌릴 수 있으면 [실행], 아니면 [대화로]. 펼친 칸의 [Claude 에게 시키기]는 입력창에 명령만 넣는다', async ($, on) => {
+  // 0.4.0: the pane runs a gear marked pure, effect or outward itself; the others go to the conversation
+  const rows = gearRows(parseGears(GEAR_INDEX), true)
+  expect(rows.map(one => one.direct)).toEqual(['run', 'run', 'run'])
+  expect(gearRows(parseGears(GEAR_INDEX), false).map(one => one.direct)).toEqual([null, null, null])
+  expect(gearRows(parseGears('a\tgear\tjudge\tnone\tx\t판단\t\nb\tgear\t-\tnone\tx\t예전\t'), true).map(one => one.direct)).toEqual([null, null])
   expect(gearCommand('release-ci')).toBe('/scv:gear run release-ci')
   expect(gearCommand('bad name; rm')).toBe(null)
   const kit = engine(on, {})
@@ -3191,39 +3230,41 @@ test('pane T20 쓰기 — 부작용 있는 기어는 쓰기만, 누르면 입력
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await has(ui, 'gear-use-release-ci')).toBe(true)
+  // folded: the one button on the line runs the gear
+  expect((await ui.find({ type: 'Button', key: 'gear-run-release-ci' }))?.text).toBe('실행')
+  expect(await has(ui, 'gear-use-release-ci')).toBe(false)
+  // opened: no second run button — a quieter one hands the gear to Claude
   await ui.press({ key: 'gear-open-release-ci' })
-  expect(await has(ui, 'gear-run-release-ci')).toBe(false)
-  await ui.press({ key: 'gear-open-make-list' })
-  expect(await has(ui, 'gear-run-make-list')).toBe(true)
+  expect((await ui.find({ type: 'Button', key: 'gear-use-release-ci' }))?.text).toBe('Claude 에게 시키기')
+  expect(await ui.findAll({ type: 'Button', key: 'gear-run-release-ci' })).toHaveLength(1)
   await ui.press({ key: 'gear-use-release-ci' })
   expect(fills).toEqual([{ text: '/scv:gear run release-ci', mode: 'replace' }])
   expect(kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))).toHaveLength(0)
+  expect(kit.spawns).toHaveLength(0)
   await ui.unmount()
 })
 
-test('pane T21 바로 실행 — 본체 기어 실행기를 30초 제한으로 부르고 출력을 칸에 보인다', async ($, on) => {
+// 0.4.0: a run from the pane is read as it runs (no 30-second limit), under the fixed launcher
+test('pane T21 바로 실행 — 본체 기어 실행기를 프로젝트 폴더에서 부르고 출력을 칸에 보인다', async ($, on) => {
   expect(gearRunArgv(CORE_DIR, 'make-list')).toEqual(['bash', `${CORE_DIR}/scripts/gear.sh`, 'run', 'make-list'])
-  expect(gearResultView(0, 'a\nb\n', '')).toEqual(['a', 'b'])
-  expect(gearResultView(0, '', '')).toEqual(['끝남 — 출력 없음'])
-  expect(gearResultView(1, '', 'GEAR_ERROR: 없음')).toEqual(['실패 — 종료 코드 1', 'GEAR_ERROR: 없음'])
-  expect(gearResultView(0, '1\n2\n3\n4', '', 2)).toEqual(['1', '2', '… 외 2줄'])
+  expect(gearRunArgv(CORE_DIR, 'bad name; rm')).toBe(null)
   const kit = engine(on, {})
   withProject(kit)
+  kit.asks['make-list'] = 'GEAR_ASK: make-list\nnone\n'
   kit.proc.stdout = '하나\n둘\n'
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'gear-open-make-list' })
   await ui.press({ key: 'gear-run-make-list' })
-  const ran = kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))
 
-  expect(ran).toHaveLength(1)
-  expect(ran[0]).toEqual({ argv: ['bash', `${CORE_DIR}/scripts/gear.sh`, 'run', 'make-list'], cwd: '/work', stdin: '', timeoutMs: 30_000 })
+  expect(kit.spawns).toHaveLength(1)
+  expect(kit.spawns[0]).toEqual({ argv: gearLaunchArgv(['bash', `${CORE_DIR}/scripts/gear.sh`, 'run', 'make-list']), cwd: '/work', input: '' })
   expect(await text(ui, /^│ 하나$/)).toBe('│ 하나')
   kit.procEnd.exitCode = 1
   kit.procEnd.stderr = 'GEAR_ERROR: 톱니 파일이 없다'
   await ui.press({ key: 'gear-run-make-list' })
   expect(await text(ui, /^│ 실패/)).toBe('│ 실패 — 종료 코드 1')
+  expect(await text(ui, /^│ GEAR_ERROR/)).toBe('│ GEAR_ERROR: 톱니 파일이 없다')
   await ui.unmount()
 })
 
@@ -3244,16 +3285,19 @@ test('pane T21b 표시 칸이 없는 예전 목록 파일이면 바로 실행이
 test('pane T22 입력 칸에 적은 글은 표준 입력으로만 가고 명령에 섞이지 않는다', async ($, on) => {
   const kit = engine(on, {})
   withProject(kit)
+  kit.asks['group-subjects'] = 'GEAR_ASK: group-subjects\ninput\tsubjects\n'
   kit.proc.stdout = 'feat 1\n'
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'gear-open-group-subjects' })
+  // 0.4.0: the field is in the values block a press on the run button opens
+  await ui.press({ key: 'gear-run-group-subjects' })
   await ui.input({ key: 'gear-input-group-subjects', text: 'feat: a; rm -rf "x" count=9' })
-  const ran = kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))
+  const ran = kit.spawns
 
   expect(ran).toHaveLength(1)
-  expect(ran[0]?.argv).toEqual(['bash', `${CORE_DIR}/scripts/gear.sh`, 'run', 'group-subjects'])
-  expect(ran[0]?.stdin).toBe('feat: a; rm -rf "x" count=9')
+  expect(ran[0]?.argv).toEqual(gearLaunchArgv(['bash', `${CORE_DIR}/scripts/gear.sh`, 'run', 'group-subjects']))
+  expect(ran[0]?.input).toBe('feat: a; rm -rf "x" count=9')
   await ui.unmount()
 })
 
@@ -3389,7 +3433,8 @@ test('gear-list T13 · T14 기어 10개는 5줄과 모두 보기, 최근 쓴 것
   expect(gearCatalog(gears, [], true).shown).toHaveLength(10)
   expect(usedGear(['a', 'b'], 'b')).toEqual(['b', 'a'])
   const kit = engine(on, {})
-  withProject(kit, { index: TEN })
+  // no SCV found here: each line's button hands the gear to the conversation (0.4.0: with SCV found it would run it)
+  withProject(kit, { index: TEN, isInstalled: false })
   promptEngine(on)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
@@ -3407,7 +3452,7 @@ test('gear-list T13 · T14 기어 10개는 5줄과 모두 보기, 최근 쓴 것
 
 test('gear-list T15 역할 문장이 길면 접힌 줄은 줄이고, 펼치면 전문', async ($, on) => {
   const long = '아주 긴 역할 문장입니다 '.repeat(6).trim()
-  const rows = gearRows(parseGears(`long-one\tgear\teffect\tnone\tx\t${long}\t`), true, true)
+  const rows = gearRows(parseGears(`long-one\tgear\teffect\tnone\tx\t${long}\t`), true)
   expect(rows[0]?.title.length).toBeLessThanOrEqual(34)
   expect(rows[0]?.title.endsWith('…')).toBe(true)
   expect(rows[0]?.does).toBe(long)
@@ -3583,3 +3628,438 @@ test('light T6 사람이 친 정리나 엔진의 자동 정리는 건드리지 �
   expect(kit.compactions).toEqual([{ trigger: 'manual', instructions: undefined }])
 })
 
+
+// ── pane 0.4.0: a gear run from the pane, with no model ──────────────────────────
+import { argChoices, confirmLines, confirmStop, gearPaste, hintNote, outwardSteps, parseAsk, runPlan, runView } from './model'
+
+const GEAR_SH = `${CORE_DIR}/scripts/gear.sh`
+const DIRECT = [
+  'push-tags\ttooth\toutward\tnone\tlines\t태그를 원격에 올림\t',
+  'tidy\tgear\teffect\tnone\tlines\t임시 파일을 치움\t정리 임시 파일 치움',
+  'ci-all\tgear\teffect\tnone\tverdict\t시험을 다 돌림\t시험 전부 돌림\tos=mac',
+  'count-lines\tgear\tpure\tlines\tlines\t줄 수를 셈\t줄 수 세기\tcount=4',
+  'ship\tgear\toutward\tnone\tlines\t태그를 올려 내보냄\t내보내기 태그 올림',
+  'review\tgear\tjudge\tnone\ttext\t바뀐 것을 읽고 판단함\t검토 판단 읽기',
+].join('\n')
+const DIRECT_ASKS: Record<string, string> = {
+  tidy: 'GEAR_ASK: tidy\nnone\n',
+  'ci-all': 'GEAR_ASK: ci-all\narg\tos\tmac\topen\t돌릴 곳: mac · linux\n',
+  'count-lines': 'GEAR_ASK: count-lines\narg\tcount\t4\topen\t한 번에 겹쳐 돌릴 시험 수\ninput\tlines\n',
+  ship: 'GEAR_ASK: ship\nnone\n',
+}
+// what SCV prints when a run stops before a step that reaches outside (exit code 11)
+const STOP_AT = (token: string, step: number, of: number, tooth: string, does: string) =>
+  [
+    `GEAR_CONFIRM: ${token}`,
+    `GEAR_STEP: ${step}/${of} ${tooth} — ${does}`,
+    '=== 밖으로 나가는 단계 ===',
+    `사용자에게 선택 도구로 물어라 — 질문 글 끝에 [기어 확인 ${token}:${step}] 를 그대로 넣고, 보기는 "실행" 과 "실행하지 않음" 둘.`,
+    `"실행" 답이 온 뒤에만: bash "${GEAR_SH}" resume ${token}`,
+    '=== 이 단계가 돌릴 글 ===',
+    'git push --tags',
+    '',
+  ].join('\n')
+// a project with the gears above, SCV installed, and SCV's `ask` answering for each gear
+const directKit = (on: On, isClockMocked = false) => {
+  const kit = engine(on, {}, DREAMS, { at: 1_000_000 }, {}, isClockMocked)
+  withProject(kit, { index: DIRECT })
+  Object.assign(kit.asks, DIRECT_ASKS)
+
+  return kit
+}
+// every text sent to Claude while the test runs
+const sends = (on: On) => {
+  const went: string[] = []
+  on('prompt.submit', (_, e) => {
+    went.push(e.text)
+    return { text: e.text }
+  })
+
+  return went
+}
+const labelOf = async (ui: { find: (q: { type: 'Button'; key: string }) => Promise<{ text?: string } | undefined> }, key: string) =>
+  (await ui.find({ type: 'Button', key }))?.text
+
+test('direct T7 설명에서 버튼 보기를 뽑는다 — 보기가 둘 이상이고 기본값이 그중 하나일 때만', () => {
+  expect(argChoices('돌릴 곳: mac · linux', 'mac')).toEqual({ kind: 'buttons', choices: ['mac', 'linux'], picked: 'mac' })
+  expect(argChoices('저장소: core · claude · codex · selftest', 'core')).toEqual({ kind: 'buttons', choices: ['core', 'claude', 'codex', 'selftest'], picked: 'core' })
+  expect(argChoices('한 번에 겹쳐 돌릴 시험 수', '4')).toEqual({ kind: 'field' })
+  expect(argChoices('모양: json · text', 'yaml')).toEqual({ kind: 'field' })
+  expect(argChoices('', '')).toEqual({ kind: 'field' })
+  // the values come from what SCV's own `ask` printed; anything else is not read as values
+  expect(parseAsk(DIRECT_ASKS['count-lines'])).toEqual({
+    name: 'count-lines',
+    args: [{ name: 'count', value: '4', isOpen: true, desc: '한 번에 겹쳐 돌릴 시험 수' }],
+    hasInput: true,
+    inputKind: 'lines',
+  })
+  expect(parseAsk('GEAR_ASK: x\narg\trepo\tcore\tfixed\t저장소: core · claude\n')?.args[0]?.isOpen).toBe(false)
+  expect(parseAsk(DIRECT_ASKS.tidy)).toEqual({ name: 'tidy', args: [], hasInput: false, inputKind: null })
+  expect(parseAsk('usage: gear.sh …')).toBe(null)
+  expect(parseAsk('')).toBe(null)
+})
+
+test('direct T8 누른 뒤 할 일을 정한다 — 바로 실행 · 값 칸 · 확인 · 대화로', () => {
+  const pick = [{ name: 'os', value: 'mac', isOpen: true, desc: '돌릴 곳: mac · linux' }]
+  const type = [{ name: 'count', value: '4', isOpen: true, desc: '한 번에 겹쳐 돌릴 시험 수' }]
+  const none = { args: [], hasInput: false, chosen: null, canType: true }
+
+  expect(runPlan({ mark: 'pure', ...none })).toBe('run')
+  expect(runPlan({ mark: 'effect', ...none })).toBe('run')
+  expect(runPlan({ mark: 'effect', ...none, args: pick })).toBe('values')
+  expect(runPlan({ mark: 'outward', ...none })).toBe('confirm')
+  expect(runPlan({ mark: 'judge', ...none })).toBe('chat')
+  // a surface with no field: buttons still work there, a value to type (or data to put in) goes to the conversation
+  expect(runPlan({ mark: 'effect', ...none, args: pick, canType: false })).toBe('values')
+  expect(runPlan({ mark: 'effect', ...none, args: type, canType: false })).toBe('chat')
+  expect(runPlan({ mark: 'pure', ...none, hasInput: true, canType: false })).toBe('chat')
+  expect(runPlan({ mark: 'pure', ...none, hasInput: true })).toBe('values')
+  // with the values set: it runs, and a gear that reaches outside still asks first
+  expect(runPlan({ mark: 'effect', ...none, args: pick, chosen: { os: 'linux' } })).toBe('run')
+  expect(runPlan({ mark: 'outward', ...none, args: pick })).toBe('values')
+  expect(runPlan({ mark: 'outward', ...none, args: pick, chosen: { os: 'linux' } })).toBe('confirm')
+  // a value the gear's own file fixed is not asked for; a mark this pane does not know is never run here
+  expect(runPlan({ mark: 'effect', ...none, args: [{ ...pick[0]!, isOpen: false }] })).toBe('run')
+  expect(runPlan({ mark: '-', ...none })).toBe('chat')
+  // the gear's own line: a run button where the pane handles it, the conversation for a gear with a judgment step
+  expect(gearRows(parseGears(DIRECT), true).map(one => one.direct)).toEqual(['run', 'run', 'run', 'run', null])
+})
+
+test('direct T9 값이 없는 기어는 누르는 즉시 창이 돌린다 — 입력창에 아무것도 넣지 않고 보내지도 않는다', async ($, on) => {
+  const kit = directKit(on)
+  const { fills } = promptEngine(on)
+  const went = sends(on)
+  kit.proc.stdout = '치운 파일 3개\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // the gear's line is folded: its one button is 실행, and a press runs the gear and opens the line to show the result
+  expect(await labelOf(ui, 'gear-run-tidy')).toBe('실행')
+  expect(await drawnText($)).not.toContain('이름 tidy')
+  await ui.press({ key: 'gear-run-tidy' })
+
+  expect(await drawnText($)).toContain('이름 tidy')
+  expect(kit.spawns).toEqual([{ argv: gearLaunchArgv(['bash', GEAR_SH, 'run', 'tidy']), cwd: '/work', input: '' }])
+  expect(fills).toHaveLength(0)
+  expect(went).toHaveLength(0)
+  expect(await text(ui, /^│ 끝남$/)).toBe('│ 끝남')
+  expect(await text(ui, /^│ 치운/)).toBe('│ 치운 파일 3개')
+  // a quick run is not announced
+  expect(kit.notices).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('direct T10 고를 값은 버튼으로 정하고 실행한다 — 고른 값이 낱말 하나로 붙고, 값 안내는 기어 목록이 바뀔 때만 다시 읽는다', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const kit = directKit(on, true)
+  const asked = () => kit.gearCalls.filter(one => one === 'run ask ci-all').length
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // pressed on the folded line: the line opens with the values block
+  await ui.press({ key: 'gear-run-ci-all' })
+
+  // the values block: nothing has run, the value now is the one picked
+  expect(kit.spawns).toHaveLength(0)
+  expect(await has(ui, 'gear-run-ci-all')).toBe(false)
+  expect(await labelOf(ui, 'gear-pick-ci-all-os-0')).toBe('● mac')
+  expect(await labelOf(ui, 'gear-pick-ci-all-os-1')).toBe('○ linux')
+  expect(await has(ui, 'gear-chat-ci-all')).toBe(true)
+  await ui.press({ key: 'gear-pick-ci-all-os-1' })
+  expect(await labelOf(ui, 'gear-pick-ci-all-os-1')).toBe('● linux')
+  await ui.press({ key: 'gear-go-ci-all' })
+  expect(kit.spawns).toHaveLength(1)
+  expect(kit.spawns[0]?.argv).toEqual(gearLaunchArgv(['bash', GEAR_SH, 'run', 'ci-all', 'os=linux']))
+  // the value as it stood adds no word
+  await ui.press({ key: 'gear-run-ci-all' })
+  await ui.press({ key: 'gear-go-ci-all' })
+  expect(kit.spawns[1]?.argv).toEqual(gearLaunchArgv(['bash', GEAR_SH, 'run', 'ci-all']))
+  expect(asked()).toBe(1)
+  // the gear index reads differently: what was kept is dropped, and the next press asks SCV again
+  kit.extra['scv/gears/INDEX.tsv'] = `${DIRECT}\nmore\tgear\tpure\tnone\tlines\t새 기어\t`
+  await clock.advance(3000)
+  await ui.press({ key: 'gear-run-ci-all' })
+  expect(asked()).toBe(2)
+  await ui.unmount()
+})
+
+test('direct T11 적어야 하는 값은 낱말 하나의 값으로, 넣을 자료는 표준 입력으로만 간다', async ($, on) => {
+  const kit = directKit(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'gear-open-count-lines' })
+  await ui.press({ key: 'gear-run-count-lines' })
+  expect(kit.spawns).toHaveLength(0)
+  await ui.input({ key: 'gear-arg-count-lines-count', text: '7', kind: 'change' })
+  await ui.input({ key: 'gear-input-count-lines', text: '첫 줄\n둘째 줄', kind: 'change' })
+  await ui.press({ key: 'gear-go-count-lines' })
+
+  expect(kit.spawns).toHaveLength(1)
+  expect(kit.spawns[0]).toEqual({ argv: gearLaunchArgv(['bash', GEAR_SH, 'run', 'count-lines', 'count=7']), cwd: '/work', input: '첫 줄\n둘째 줄' })
+  // spaces, quotes and a semicolon in a value: still the value part of one word, and never in the launcher's text
+  const odd = '7; rm -rf "x" $(id) \'y\''
+  await ui.press({ key: 'gear-run-count-lines' })
+  await ui.input({ key: 'gear-arg-count-lines-count', text: odd, kind: 'change' })
+  await ui.input({ key: 'gear-input-count-lines', text: 'count=9; echo "$HOME"' })
+  const argv = kit.spawns[1]?.argv ?? []
+  expect(kit.spawns).toHaveLength(2)
+  expect(argv).toEqual(gearLaunchArgv(['bash', GEAR_SH, 'run', 'count-lines', `count=${odd}`]))
+  expect(argv).toHaveLength(gearLaunchArgv(['bash', GEAR_SH, 'run', 'count-lines']).length + 1)
+  expect(argv[2]).toBe(gearLaunchArgv([])[2])
+  expect(argv[2]).not.toContain('rm -rf')
+  expect(kit.spawns[1]?.input).toBe('count=9; echo "$HOME"')
+  // a name `ask` did not list, or a value the gear's own file fixed, is never made into a word
+  const listed = [{ name: 'count', value: '4', isOpen: true, desc: '' }, { name: 'repo', value: 'core', isOpen: false, desc: '' }]
+  expect(gearRunArgv(CORE_DIR, 'count-lines', { count: '7', repo: 'x', other: 'y' }, listed)).toEqual(['bash', GEAR_SH, 'run', 'count-lines', 'count=7'])
+  await ui.unmount()
+})
+
+test('direct T12 밖으로 나가는 기어는 확인을 거친다 — 취소면 아무것도 돌지 않고, 실행이면 본체의 확인 기록 뒤에만 그 단계가 돈다', async ($, on) => {
+  expect(outwardSteps('flow: tidy | push-tags\nin: none\n\n# ship\nflow: 본문의 줄', DIRECT)).toEqual([{ name: 'push-tags', does: '태그를 원격에 올림' }])
+  expect(outwardSteps(null, DIRECT)).toEqual([])
+  expect(confirmLines([{ name: 'push-tags', does: '태그를 원격에 올림' }], ['os=linux'])).toEqual([
+    '밖으로 나가는 단계 1개 — [실행]을 누르기 전에는 아무것도 돌지 않음',
+    '· push-tags — 태그를 원격에 올림',
+    '값: os=linux',
+  ])
+  expect(confirmStop(STOP_AT('ab12cd34', 2, 2, 'push-tags', '태그를 원격에 올림'))).toEqual({
+    token: 'ab12cd34',
+    step: '2',
+    tooth: 'push-tags',
+    label: '2/2 push-tags — 태그를 원격에 올림',
+    script: ['git push --tags'],
+  })
+  expect(confirmStop('GEAR_CONFIRM: ../x\n[기어 확인 ../x:1]')).toBe(null)
+  const kit = directKit(on)
+  kit.extra['scv/gears/ship/GEAR.md'] = 'flow: tidy | push-tags\nin: none\nout: lines\n\n# ship\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'gear-run-ship' })
+
+  // the question comes first: what goes out, and nothing has run
+  const question = await drawnText($)
+  expect(question).toContain('밖으로 나가는 단계 1개')
+  expect(question).toContain('· push-tags — 태그를 원격에 올림')
+  expect(kit.spawns).toHaveLength(0)
+  // 취소: nothing runs, nothing is written down
+  await ui.press({ key: 'gear-confirm-no-ship' })
+  expect(kit.spawns).toHaveLength(0)
+  expect(kit.gearCalls.filter(one => one.includes('confirm'))).toHaveLength(0)
+  expect(await drawnText($)).toContain('실행하지 않음 — 아무것도 돌지 않았습니다')
+  // 실행: the run stops before the step (11), SCV's confirm command writes the go-ahead down, then resume runs the step
+  kit.spawnPlans.push({ pieces: [STOP_AT('ab12cd34', 2, 2, 'push-tags', '태그를 원격에 올림')], code: 11 }, { pieces: ['v1.0 올림\n'], code: 0 })
+  await ui.press({ key: 'gear-run-ship' })
+  await ui.press({ key: 'gear-confirm-yes-ship' })
+  expect(kit.gearCalls.slice(-3)).toEqual(['spawn run ship', 'run confirm --question SCV 창에서 받은 답 [기어 확인 ab12cd34:2] --answer 실행', 'spawn resume ab12cd34'])
+  expect(await text(ui, /^│ v1/)).toBe('│ v1.0 올림')
+  // a stop at a step the pane's question did not name: one press does not cover it — the card asks again, and
+  // 취소 there writes the refusal down and runs nothing more
+  kit.spawnPlans.push({ pieces: [STOP_AT('ffff0001', 3, 3, 'delete-remote', '원격 가지를 지움')], code: 11 })
+  await ui.press({ key: 'gear-run-ship' })
+  await ui.press({ key: 'gear-confirm-yes-ship' })
+  expect(kit.gearCalls.at(-1)).toBe('spawn run ship')
+  const again = await drawnText($)
+  expect(again).toContain('다음 단계도 밖으로 나감 — 3/3 delete-remote — 원격 가지를 지움')
+  expect(again).toContain('git push --tags')
+  await ui.press({ key: 'gear-confirm-no-ship' })
+  expect(kit.gearCalls.at(-1)).toBe('run confirm --question SCV 창에서 받은 답 [기어 확인 ffff0001:3] --answer 실행하지 않음')
+  expect(kit.gearCalls.filter(one => one.startsWith('spawn resume'))).toEqual(['spawn resume ab12cd34'])
+  // 실행 there goes on from that step: the go-ahead is written down, then resume
+  kit.spawnPlans.push({ pieces: [STOP_AT('ffff0002', 3, 3, 'delete-remote', '원격 가지를 지움')], code: 11 }, { pieces: ['지움\n'], code: 0 })
+  await ui.press({ key: 'gear-run-ship' })
+  await ui.press({ key: 'gear-confirm-yes-ship' })
+  await ui.press({ key: 'gear-confirm-yes-ship' })
+  expect(kit.gearCalls.slice(-2)).toEqual(['run confirm --question SCV 창에서 받은 답 [기어 확인 ffff0002:3] --answer 실행', 'spawn resume ffff0002'])
+  await ui.unmount()
+})
+
+test('direct T13 판단 단계가 든 기어는 창이 돌리지 않는다 — 기어 줄의 버튼이 [대화로]이고 입력창에 기어 명령을 넣는다', async ($, on) => {
+  const kit = directKit(on)
+  const { fills } = promptEngine(on)
+  const went = sends(on)
+  // an older SCV: it does not print this gear's values
+  delete kit.asks.tidy
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await labelOf(ui, 'gear-use-review')).toBe('대화로')
+  expect(await has(ui, 'gear-run-review')).toBe(false)
+  await ui.press({ key: 'gear-use-review' })
+
+  expect(kit.spawns).toHaveLength(0)
+  expect(kit.gearCalls).toHaveLength(0)
+  expect(fills).toEqual([{ text: '/scv:gear run review', mode: 'replace' }])
+  expect(went).toHaveLength(0)
+  // a gear the pane would run, but whose values SCV could not say: the press goes to the conversation too, and
+  // from then on its line says so
+  expect(await labelOf(ui, 'gear-run-tidy')).toBe('실행')
+  await ui.press({ key: 'gear-run-tidy' })
+  expect(kit.spawns).toHaveLength(0)
+  expect(fills).toHaveLength(2)
+  expect(fills[1]?.text).toContain('/scv:gear run tidy')
+  expect(await labelOf(ui, 'gear-use-tidy')).toBe('대화로')
+  expect(await has(ui, 'gear-run-tidy')).toBe(false)
+  await ui.press({ key: 'gear-use-tidy' })
+  expect(kit.gearCalls).toEqual(['run ask tidy'])
+  expect(went).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('direct T14 오래 도는 실행 — 도는 동안 끝 줄과 걸린 시간, 끝나면 결과와 알림 한 번, 멈추면 멈췄다고', async ($, on) => {
+  expect(runView({ tail: '받는 중 1/3\n받는 중 2/3\n', elapsedMs: 45_000, exitCode: null, isStopped: false })).toEqual(['돌리는 중 · 45초', '받는 중 2/3'])
+  expect(runView({ tail: '', elapsedMs: 200, exitCode: null, isStopped: false })).toEqual(['돌리는 중', '아직 출력 없음'])
+  expect(runView({ tail: 'a\n\u001b[32mRELEASE_OK\u001b[0m\n', elapsedMs: 72_000, exitCode: 0, isStopped: false })).toEqual(['끝남 · 1분 12초', 'a', 'RELEASE_OK'])
+  expect(runView({ tail: '', elapsedMs: 0, exitCode: 0, isStopped: false })).toEqual(['끝남 — 출력 없음'])
+  expect(runView({ tail: 'GEAR_ERROR: 없음\n', elapsedMs: 0, exitCode: 1, isStopped: false })).toEqual(['실패 — 종료 코드 1', 'GEAR_ERROR: 없음'])
+  expect(runView({ tail: '받는 중 2/3\n', elapsedMs: 5_000, exitCode: null, isStopped: true })).toEqual(['멈춤 — 누른 대로 멈춤 · 5초', '받는 중 2/3'])
+  expect(runView({ tail: Array.from({ length: 15 }, (_, i) => `줄 ${i + 1}`).join('\n'), elapsedMs: 0, exitCode: 0, isStopped: false }).slice(0, 3)).toEqual(['끝남', '… 앞 3줄 줄임', '줄 4'])
+  const clock = mock.clock(on, { now: 1_000_000 })
+  const kit = directKit(on, true)
+  const gates: (() => void)[] = []
+  const held = () => new Promise<void>(open => gates.push(open))
+  const told = () => kit.notices.filter(one => one.includes('기어'))
+  // the running step's output, as SCV keeps it in the run's state folder until the step ends
+  const stepFile = { mtimeMs: 0 }
+  on('fs.stat', (_, e) =>
+    stepFile.mtimeMs > 0 && /scv\/journal\/\.gear-run\/(aa11bb22|zz99zz99)\/next$/.test(e.path)
+      ? ({ value: { kind: 'file', size: 20, mtimeMs: stepFile.mtimeMs, isLink: false } } as never)
+      : { deny: `ENOENT ${e.path}` },
+  )
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'gear-open-tidy' })
+  // a run that does not end by itself: it goes on behind, and the card follows it — SCV hands nothing on until
+  // the step ends, so the last line comes from the state folder that appeared with the run
+  kit.spawnPlans.push({ gate: held(), after: ['치운 파일 3개\n'], code: 0 })
+  await ui.press({ key: 'gear-run-tidy' })
+  expect(await drawnText($)).toContain('│ 아직 출력 없음')
+  // two state folders appeared: SCV writes the gear's name in each (`name`), so another gear's run — started
+  // elsewhere at the same moment — is not taken for this one. (`given`, the values a run was started with, is
+  // there only when values were given: this run has none, and the pane never reads it.)
+  kit.extraDirs['scv/journal/.gear-run'] = ['zz99zz99', 'aa11bb22']
+  kit.extra['scv/journal/.gear-run/zz99zz99/name'] = 'ci-all\n'
+  kit.extra['scv/journal/.gear-run/zz99zz99/next'] = '남의 실행이 쓴 줄\n'
+  kit.extra['scv/journal/.gear-run/aa11bb22/name'] = 'tidy\n'
+  kit.extra['scv/journal/.gear-run/aa11bb22/next'] = '셈 1/20\n셈 2/20\n'
+  stepFile.mtimeMs = 5
+  await clock.advance(45_000)
+  const running = await drawnText($)
+  expect(running).toContain('│ 돌리는 중 · 45초')
+  expect(running).toContain('│ 셈 2/20')
+  expect(running).not.toContain('남의 실행이 쓴 줄')
+  expect(await has(ui, 'gear-stop-tidy')).toBe(true)
+  expect(await has(ui, 'gear-run-tidy')).toBe(false)
+  expect(told()).toHaveLength(0)
+  // it ends: the result stays on the card, and it is announced once
+  gates[0]?.()
+  await settle()
+  const ended = await drawnText($)
+  expect(ended).toContain('│ 끝남 · 45초')
+  expect(ended).toContain('│ 치운 파일 3개')
+  expect(await has(ui, 'gear-stop-tidy')).toBe(false)
+  expect(told()).toHaveLength(1)
+  expect(told()[0]).toContain('기어 끝남 — 임시 파일을 치움')
+  // 멈춤: the card says so at once, the command is told to end, and what it writes afterwards changes nothing
+  // (this one writes a line itself before it hangs: that line is the one shown)
+  kit.spawnPlans.push({ pieces: ['받는 중 1/3\n'], gate: held(), after: ['늦은 줄\n'], code: 0 })
+  await ui.press({ key: 'gear-run-tidy' })
+  await clock.advance(6_000)
+  expect(await drawnText($)).toContain('│ 받는 중 1/3')
+  await ui.press({ key: 'gear-stop-tidy' })
+  expect(await drawnText($)).toContain('│ 멈춤 — 누른 대로 멈춤 · 6초')
+  expect(await has(ui, 'gear-run-tidy')).toBe(true)
+  gates[1]?.()
+  await settle()
+  const stopped = await drawnText($)
+  expect(stopped).toContain('│ 멈춤 — 누른 대로 멈춤 · 6초')
+  expect(stopped).not.toContain('늦은 줄')
+  expect(kit.spawnEnds.count).toBe(2)
+  expect(told()).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('direct T15 사용함 — 창이 돌릴 수 있으면 창이 돌리고 보내지 않는다, 판단 단계가 든 기어는 전처럼 한 줄과 함께 간다', async ($, on) => {
+  const gears = parseGears(DIRECT)
+  expect(hintNote(gears.find(one => one.name === 'tidy')!, true)).toBe('사용함: 창에서 바로 돌림 · 그대로 보내도 이 방법으로 합니다')
+  expect(hintNote(gears.find(one => one.name === 'review')!, true)).toBe('그대로 보내도 이 방법으로 합니다')
+  expect(hintNote(gears.find(one => one.name === 'tidy')!, false)).toBe('그대로 보내도 이 방법으로 합니다')
+  const kit = directKit(on)
+  const { fills, box } = promptEngine(on)
+  const went = sends(on)
+  await start($)
+  // a gear with nothing to set, effect: the pane runs it — no text is sent and the prompt box is left as it is
+  box.text = '임시 파일 정리해 줘'
+  await boxIs($, box.text)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+  await band.press({ key: 'gear-hint-use' })
+  expect(kit.spawns.map(one => one.argv)).toEqual([gearLaunchArgv(['bash', GEAR_SH, 'run', 'tidy'])])
+  expect(went).toHaveLength(0)
+  expect(fills).toHaveLength(0)
+  expect(await bandText($)).not.toContain('저장해 둔 방법')
+  expect(await drawnText($)).toContain('│ 끝남')
+  // sent afterwards as it is, the text is not given the gear's line: the pane already ran it
+  await $.prompt.submit(typed(box.text))
+  expect(went).toEqual(['임시 파일 정리해 줘'])
+  await band.unmount()
+  // a gear with a judgment step: as before 0.4.0 — the text goes now, with the gear's line at its end
+  box.text = '바뀐 것 검토하고 판단해 줘'
+  await boxIs($, box.text)
+  const second = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+  await second.press({ key: 'gear-hint-use' })
+  expect(kit.spawns).toHaveLength(1)
+  expect(went).toHaveLength(2)
+  expect(went[1]).toBe(
+    '바뀐 것 검토하고 판단해 줘\n\n[SCV 기어] 이 요청에 맞는 저장해 둔 방법이 있음: review — 이 기어로 해 주세요(/scv:gear run review). 값은 위 요청에서 읽고, 없는 값은 물어 주세요.',
+  )
+  expect(fills).toEqual([{ text: '', mode: 'replace' }])
+  await second.unmount()
+})
+
+test('direct T15b 사용함 — 값이 필요하면 창에 값 칸이 뜨고, Claude 에게 맡기기를 누르면 적어 둔 글이 한 줄과 함께 간다', async ($, on) => {
+  const kit = directKit(on)
+  const { fills, box } = promptEngine(on)
+  const went = sends(on)
+  await start($)
+  box.text = '시험 전부 돌려 줘'
+  await boxIs($, box.text)
+  const band = await $.ui.mount({ ...BAND, surface: 'desktop' } as never)
+  await band.press({ key: 'gear-hint-use' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  // the values block is open in the pane: nothing ran, nothing was sent
+  expect(await labelOf(ui, 'gear-pick-ci-all-os-0')).toBe('● mac')
+  expect(kit.spawns).toHaveLength(0)
+  expect(went).toHaveLength(0)
+  expect(kit.opened.length).toBeGreaterThan(1)
+  await ui.press({ key: 'gear-chat-ci-all' })
+  expect(kit.spawns).toHaveLength(0)
+  expect(went).toEqual([
+    '시험 전부 돌려 줘\n\n[SCV 기어] 이 요청에 맞는 저장해 둔 방법이 있음: ci-all — 이 기어로 해 주세요(/scv:gear run ci-all). 값은 위 요청에서 읽고, 없는 값은 물어 주세요.',
+  ])
+  expect(fills).toEqual([{ text: '', mode: 'replace' }])
+  expect(await has(ui, 'gear-go-ci-all')).toBe(false)
+  await ui.unmount()
+  await band.unmount()
+})
+
+test('direct T16 결과를 대화에 붙이기는 누를 때만 — 입력창에 들어가고 보내지는 않는다', async ($, on) => {
+  expect(gearPaste('tidy', ['끝남', '치운 파일 3개'])).toBe('기어 tidy 를 SCV 창에서 돌린 결과:\n끝남\n치운 파일 3개')
+  const kit = directKit(on)
+  const { fills, box } = promptEngine(on)
+  const went = sends(on)
+  kit.proc.stdout = '치운 파일 3개\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'gear-open-tidy' })
+  expect(await has(ui, 'gear-paste-tidy')).toBe(false)
+  await ui.press({ key: 'gear-run-tidy' })
+
+  // not pressed: the prompt box is as it was
+  expect(fills).toHaveLength(0)
+  await ui.press({ key: 'gear-paste-tidy' })
+  expect(fills).toEqual([{ text: '기어 tidy 를 SCV 창에서 돌린 결과:\n끝남\n치운 파일 3개', mode: 'replace' }])
+  // what the person already typed stays, the result after it
+  box.text = '이 결과를 보고'
+  await ui.press({ key: 'gear-paste-tidy' })
+  expect(fills[1]).toEqual({ text: '\n\n기어 tidy 를 SCV 창에서 돌린 결과:\n끝남\n치운 파일 3개', mode: 'append' })
+  expect(went).toHaveLength(0)
+  expect(kit.spawns).toHaveLength(1)
+  await ui.unmount()
+})

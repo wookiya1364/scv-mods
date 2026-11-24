@@ -157,6 +157,25 @@ export type Mirror = { host: string; at: number; askedAt: number; name?: string 
 // The viewer sessions a working session sends its state to, by address: what was sent last, when, and failed sends in a row.
 export type Viewers = Record<string, { sent: string; at: number; misses: number }>
 
+// A gear run the pane started itself (no model): when it started and ended, the end of what it wrote, how it ended
+// (exitCode null while it runs; 11: it stands before a step that reaches outside), and whether the person stopped it.
+export type GearRun = { startedAt: number; endedAt: number | null; tail: string; exitCode: number | null; isStopped: boolean }
+
+// A place where a gear run stopped before a step that reaches outside: the run's token and that step's number.
+export type GearWait = { token: string; step: string }
+
+// The block open under a gear in the pane. values: the values being set (picked: the choice buttons' values, by
+// argument). confirm: the question before a gear that reaches outside runs — its lines, the steps those lines name,
+// the values and data it will run with, and the place a started run waits at (null: nothing has run yet).
+// from: where the press came from (the gear card, or the band above the prompt box).
+export type GearForm =
+  | { kind: 'values'; from: 'card' | 'band'; picked: Record<string, string> }
+  | { kind: 'confirm'; from: 'card' | 'band'; picked: Record<string, string>; input: string; lines: string[]; teeth: string[]; wait: GearWait | null; startedAt: number }
+
+// What SCV's `ask` printed for each gear, kept while the gear index reads the same (index: the index text it was read
+// under). An empty text: the command ran and did not print values (an older SCV) — that gear goes to the conversation.
+export type GearAsks = { index: string | null; byName: Record<string, string> }
+
 declare module 'claude-code' {
   interface PluginState {
     'scv-dashboard': {
@@ -174,7 +193,9 @@ declare module 'claude-code' {
       now: number
       note: string | null
       paneNote: string | null
-      gearResult: Record<string, string[]>
+      gearRuns: Record<string, GearRun>
+      gearForms: Record<string, GearForm>
+      gearAsks: GearAsks
       light: { isOn: boolean; percent: number }
       lightSaid: string | null
       gearHint: string | null

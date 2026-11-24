@@ -1512,46 +1512,231 @@ export type GearRow = {
   does: string
   argsLine: string | null
   markLine: string | null
-  // run: a press runs it here; input: it needs a value typed first; null: only through the prompt box
-  direct: 'run' | 'input' | null
+  // run: the pane handles the gear itself — its line's button runs it (at once, or after its values or its
+  // question: runPlan's to say); null: the gear goes to the conversation, and its line's button says so
+  direct: 'run' | null
 }
 
-// One line per gear with what a press may do: a gear whose whole flow is pure runs in the pane (with a value typed
-// first when it takes one, where the surface draws a field), every other gear goes through the prompt box.
-export const gearRows = (gears: readonly Gear[], hasCore: boolean, hasField: boolean): GearRow[] =>
-  gears.map(gear => {
-    const takesValue = gear.takes !== 'none'
-    const canRun = hasCore && gear.mark === 'pure' && (!takesValue || hasField)
+const RUN_MARKS = new Set(['pure', 'effect', 'outward'])
 
-    return {
-      name: gear.name,
-      title: cutLine(gear.does || gear.name, GEAR_TITLE_MAX),
-      words: [...new Set(gear.words)].join(' · '),
-      flow: `${VALUE_WORD[gear.takes] ?? gear.takes} → ${VALUE_WORD[gear.gives] ?? gear.gives}`,
-      does: gear.does,
-      argsLine: gear.args.length > 0 ? `인자 ${gear.args.join(' · ')}` : null,
-      markLine: MARK_WORD[gear.mark] ?? null,
-      direct: canRun ? (takesValue ? 'input' : 'run') : null,
-    }
-  })
+// One line per gear with what its button does: the pane runs a gear marked pure, effect or outward, where the SCV
+// plugin was found. A gear with a judgment step, or of an older index (no mark), goes to the conversation.
+export const gearRows = (gears: readonly Gear[], hasCore: boolean): GearRow[] =>
+  gears.map(gear => ({
+    name: gear.name,
+    title: cutLine(gear.does || gear.name, GEAR_TITLE_MAX),
+    words: [...new Set(gear.words)].join(' · '),
+    flow: `${VALUE_WORD[gear.takes] ?? gear.takes} → ${VALUE_WORD[gear.gives] ?? gear.gives}`,
+    does: gear.does,
+    argsLine: gear.args.length > 0 ? `인자 ${gear.args.join(' · ')}` : null,
+    markLine: MARK_WORD[gear.mark] ?? null,
+    direct: hasCore && RUN_MARKS.has(gear.mark) ? 'run' : null,
+  }))
 
 const GEAR_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/
 
 // The command the prompt box gets: the gear alone, so Claude asks for the values it needs (core 0.102.0+).
 export const gearCommand = (name: string) => (GEAR_NAME.test(name) ? `/scv:gear run ${name}` : null)
 
-// The command a direct run starts: the name is one word of its own, and what the person typed never joins it.
-export const gearRunArgv = (core: string, name: string) => (GEAR_NAME.test(name) ? ['bash', `${core}/scripts/gear.sh`, 'run', name] : null)
+// Whether a name has the shape of a gear's (it goes into a path and a command word, so nothing else passes).
+export const isGearName = (name: string) => GEAR_NAME.test(name)
 
-// What a direct run printed, cut to a few lines; a failed one says its exit code and its error lines.
-export const gearResultView = (exitCode: number, stdout: string, stderr: string, max = 12): string[] => {
-  const linesOf = (text: string) => text.split('\n').filter(line => line.trim() !== '')
-  if (exitCode !== 0) return [`실패 — 종료 코드 ${exitCode}`, ...linesOf(stderr || stdout).slice(0, max)]
-  const lines = linesOf(stdout)
-  if (lines.length === 0) return ['끝남 — 출력 없음']
+// ── a gear run from the pane, with no model (pane 0.4.0) ─────────────────────
 
-  return lines.length > max ? [...lines.slice(0, max), `… 외 ${lines.length - max}줄`] : lines
+export type AskArg = { name: string; value: string; isOpen: boolean; desc: string }
+
+// What a gear needs set before it runs: its arguments (isOpen: the person may set it; else the gear's own file
+// fixed it) and whether it reads data on standard input (inputKind: the name of that value).
+export type GearAsk = { name: string; args: AskArg[]; hasInput: boolean; inputKind: string | null }
+
+// The values to set, from what SCV's own `ask` printed: a `GEAR_ASK: <name>` line, then a tab-separated line per
+// value (arg · name · value now · open|fixed · description, or input · kind, or none). null when the text is not
+// that (an older SCV, a failed command) — the caller then hands the gear to the conversation.
+export const parseAsk = (text: string | null | undefined): GearAsk | null => {
+  const lines = (text ?? '').split('\n').map(line => line.replace(/\r$/, ''))
+  const at = lines.findIndex(line => line.startsWith('GEAR_ASK: '))
+  if (at < 0) return null
+  const rows = lines.slice(at + 1).map(line => line.split('\t'))
+  const inputKind = rows.find(cols => cols[0] === 'input' && Boolean(cols[1]))?.[1] ?? null
+
+  return {
+    name: (lines[at] ?? '').slice('GEAR_ASK: '.length).trim(),
+    args: rows
+      .filter(cols => cols[0] === 'arg' && Boolean(cols[1]))
+      .map(cols => ({ name: cols[1] ?? '', value: cols[2] ?? '', isOpen: cols[3] !== 'fixed', desc: cols.slice(4).join('\t').trim() })),
+    hasInput: inputKind !== null,
+    inputKind,
+  }
 }
+
+export type ArgChoices = { kind: 'buttons'; choices: string[]; picked: string } | { kind: 'field' }
+
+// How an argument is set: buttons when its description lists the choices after a colon, split on ' · ', there are
+// two or more and the value now is one of them (it is the one picked at first); a field to type in otherwise.
+export const argChoices = (desc: string, value: string): ArgChoices => {
+  const colon = desc.indexOf(':')
+  const choices = colon < 0 ? [] : desc.slice(colon + 1).split(/\s+·\s+/).map(one => one.trim()).filter(Boolean)
+
+  return choices.length >= 2 && choices.includes(value) ? { kind: 'buttons', choices: [...new Set(choices)], picked: value } : { kind: 'field' }
+}
+
+export type RunPlan = 'run' | 'values' | 'confirm' | 'chat'
+
+// What a press on a gear leads to. A gear with a judgment step (or a mark this pane does not know) goes to the
+// conversation. Values still to set (chosen: null) open the values block — or go to the conversation when one must
+// be typed and this surface draws no field. With the values set: a gear that reaches outside asks first, else it runs.
+export const runPlan = (input: {
+  mark: string
+  args: readonly AskArg[]
+  hasInput: boolean
+  chosen: Readonly<Record<string, string>> | null
+  canType: boolean
+}): RunPlan => {
+  if (input.mark !== 'pure' && input.mark !== 'effect' && input.mark !== 'outward') return 'chat'
+  const open = input.args.filter(arg => arg.isOpen)
+  if (input.chosen === null && (open.length > 0 || input.hasInput)) {
+    const isTyped = input.hasInput || open.some(arg => argChoices(arg.desc, arg.value).kind === 'field')
+
+    return isTyped && !input.canType ? 'chat' : 'values'
+  }
+
+  return input.mark === 'outward' ? 'confirm' : 'run'
+}
+
+const ARG_NAME = /^[a-z][0-9a-z_]{0,31}$/
+
+// The command a direct run starts, one word each: the gear's name, then a `name=value` word for every value the
+// person changed — only for the open arguments `ask` listed. What was typed is the value part of one word, never
+// more words and never a shell text.
+export const gearRunArgv = (core: string, name: string, chosen: Readonly<Record<string, string>> = {}, args: readonly AskArg[] = []) =>
+  GEAR_NAME.test(name)
+    ? [
+        'bash',
+        `${core}/scripts/gear.sh`,
+        'run',
+        name,
+        ...args
+          .filter(arg => arg.isOpen && ARG_NAME.test(arg.name) && Object.hasOwn(chosen, arg.name) && chosen[arg.name] !== arg.value)
+          .map(arg => `${arg.name}=${chosen[arg.name]}`),
+      ]
+    : null
+
+const RUN_TOKEN = /^[0-9a-f]{8}$/
+const RUN_STEP = /^[0-9]{1,4}$/
+
+// The command that goes on with a run stopped before a step that reaches outside (it takes no values: those given
+// at the start stay in force).
+export const gearResumeArgv = (core: string, token: string) => (RUN_TOKEN.test(token) ? ['bash', `${core}/scripts/gear.sh`, 'resume', token] : null)
+
+// The command that writes down the person's answer for one stopped step, as SCV's own answer hook does: the
+// question carries the run's tag, the answer is the word SCV reads as a go-ahead or a refusal.
+export const gearConfirmArgv = (core: string, token: string, step: string, isYes: boolean) =>
+  RUN_TOKEN.test(token) && RUN_STEP.test(step)
+    ? ['bash', `${core}/scripts/gear.sh`, 'confirm', '--question', `SCV 창에서 받은 답 [기어 확인 ${token}:${step}]`, '--answer', isYes ? '실행' : '실행하지 않음']
+    : null
+
+// The fixed script a direct run starts under: the command (its own words, "$@") runs in a process group of its own,
+// so a stop takes down everything it started; its output and exit code pass through. Nothing typed is in this text.
+const GEAR_LAUNCH = [
+  'set -m',
+  'exec 3>&2 2>/dev/null',
+  'if { : 4<&0; } 2>/dev/null; then "$@" <&0 2>&3 3>&- & else "$@" </dev/null 2>&3 3>&- & fi',
+  'pid=$!',
+  `trap 'kill -TERM -- "-$pid"; sleep 1; kill -KILL -- "-$pid"; exit 143' TERM INT HUP`,
+  'wait "$pid"',
+  'exit $?',
+].join('\n')
+
+// A command as the pane starts it: under the fixed script, its own words after it.
+export const gearLaunchArgv = (argv: readonly string[]) => ['bash', '-c', GEAR_LAUNCH, 'scv-gear', ...argv]
+
+const RUN_LINES = 12
+
+// An output's lines as a person would see them: what the terminal shows after carriage returns, no colour codes or
+// control characters, no empty lines, each at most 120 characters.
+const shownLines = (text: string) =>
+  text
+    .split('\n')
+    .map(raw => raw.replace(/\r+$/, '').split('\r').pop() ?? '')
+    // eslint-disable-next-line no-control-regex
+    .map(shown => shown.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, '').replace(/[\u0000-\u001f\u007f]/g, ' ').trimEnd())
+    .filter(line => line.trim() !== '')
+    .map(line => shorten(line, LINE_ROOM))
+
+// The lines a gear's card shows for a run started here. Running (exitCode null): that it runs, for how long, and
+// the last line it wrote. Stopped by the person: that, and the last line. Ended: how (the exit code when it failed;
+// 11: it stands before a step that reaches outside) and its last lines. A time under a second is not said.
+export const runView = (input: { tail: string; elapsedMs: number; exitCode: number | null; isStopped: boolean }): string[] => {
+  const took = input.elapsedMs >= 1000 ? ` · ${formatDuration(input.elapsedMs)}` : ''
+  const lines = shownLines(input.tail)
+  if (input.isStopped) return [`멈춤 — 누른 대로 멈춤${took}`, ...lines.slice(-1)]
+  if (input.exitCode === null) return [`돌리는 중${took}`, lines.at(-1) ?? '아직 출력 없음']
+  if (input.exitCode === 11) return ['밖으로 나가는 단계 앞에서 멈춤 — 그 단계는 돌지 않음']
+  const last = lines.slice(-RUN_LINES)
+  const cut = lines.length > last.length ? [`… 앞 ${lines.length - last.length}줄 줄임`] : []
+  if (input.exitCode === 10) return ['끝까지 못 돌림 — Claude 가 판단하는 단계에서 멈춤. [Claude 에게 시키기]로 대화에서 돌려 주세요', ...cut, ...last]
+  if (input.exitCode !== 0) return [`실패 — 종료 코드 ${input.exitCode}${took}`, ...cut, ...last]
+
+  return lines.length === 0 ? [`끝남 — 출력 없음${took}`] : [`끝남${took}`, ...cut, ...last]
+}
+
+export type OutwardStep = { name: string; does: string }
+
+// The steps of a gear's flow that reach outside, from the gear's own file (the `flow:` line at its top) and the
+// index: each step the index marks outward, with what it does. Empty when the flow cannot be read.
+export const outwardSteps = (gearText: string | null | undefined, indexText: string | null | undefined): OutwardStep[] => {
+  const front = (gearText ?? '').split(/\n\s*\n/)[0] ?? ''
+  const flow = /^flow:[ \t]*(.+)$/m.exec(front)?.[1] ?? ''
+  const rows = (indexText ?? '').split('\n').map(line => line.split('\t'))
+
+  return flow
+    .split('|')
+    .map(step => step.trim())
+    .filter(step => step !== '' && step !== '@')
+    .flatMap(step => {
+      const row = rows.find(cols => cols[0] === step)
+
+      return row && row[2] === 'outward' ? [{ name: step, does: row[5] ?? '' }] : []
+    })
+}
+
+// What the pane says before a gear that reaches outside is started: the steps that go out and the values it would
+// run with. Nothing has run when this is shown.
+export const confirmLines = (steps: readonly OutwardStep[], words: readonly string[]): string[] => [
+  steps.length > 0
+    ? `밖으로 나가는 단계 ${steps.length}개 — [실행]을 누르기 전에는 아무것도 돌지 않음`
+    : '밖으로 나가는 단계가 있음(올리기 · 네트워크 · 지우기 같은 일) — [실행]을 누르기 전에는 아무것도 돌지 않음',
+  ...steps.map(step => `· ${step.name}${step.does ? ` — ${step.does}` : ''}`),
+  ...(words.length > 0 ? [`값: ${words.join(' · ')}`] : []),
+]
+
+export type ConfirmStop = { token: string; step: string; tooth: string; label: string; script: string[] }
+
+// Where a run stopped before a step that reaches outside, from what SCV printed (exit code 11): the run's token,
+// the step's number (from the tag `[기어 확인 <token>:<step>]`), the step's name and line, and the script it would run.
+export const confirmStop = (stdout: string): ConfirmStop | null => {
+  const token = /^GEAR_CONFIRM: ([0-9a-f]{8})$/m.exec(stdout)?.[1]
+  if (!token) return null
+  const step = new RegExp(`\\[기어 확인 ${token}:([0-9]{1,4})\\]`).exec(stdout)?.[1]
+  if (!step) return null
+  const label = /^GEAR_STEP: (.+)$/m.exec(stdout)?.[1]?.trim() ?? ''
+  const script = /^=== 이 단계가 돌릴 글 ===\n([\s\S]*?)(?:\n=== |$(?![\s\S]))/m.exec(stdout)?.[1] ?? ''
+
+  return { token, step, tooth: /^[0-9]+\/[0-9]+ (\S+)/.exec(label)?.[1] ?? '', label, script: shownLines(script) }
+}
+
+const STOP_SCRIPT_LINES = 6
+
+// What the pane says when a run stands before a further step that reaches outside: that step's own line and the
+// start of the script it would run.
+export const stopLines = (stop: ConfirmStop): string[] => [
+  `다음 단계도 밖으로 나감 — ${stop.label || stop.tooth}`,
+  ...stop.script.slice(0, STOP_SCRIPT_LINES).map(line => `  ${line}`),
+  ...(stop.script.length > STOP_SCRIPT_LINES ? [`  … 외 ${stop.script.length - STOP_SCRIPT_LINES}줄`] : []),
+]
+
+// What goes into the prompt box when the person asks for a run's result there: which gear, and its result lines.
+export const gearPaste = (name: string, lines: readonly string[]) => [`기어 ${name} 를 SCV 창에서 돌린 결과:`, ...lines].join('\n')
 
 // Where the SCV plugin is installed, from Claude's own list of installed plugins: the install made for this
 // project when there is one, else the person's own. null when the list has none (then presses fall back to the prompt box).
@@ -1618,6 +1803,13 @@ export const gearMatch = (text: string, gears: readonly Gear[]): GearMatch | nul
 // The line drawn above the prompt box while a gear fits what is being typed: the gear's whole role line, never cut
 // (the band wraps it) — a cut line hid what the gear does (seen in the app, 2026-11-24).
 export const hintLine = (gear: Gear) => `저장해 둔 방법이 있음: ${gear.does || gear.name}`
+
+// The small line under it: what a press on 사용함 does for this gear — it runs in the pane where the pane can run
+// it, else the text is sent with the gear's line as before.
+export const hintNote = (gear: Gear, hasCore: boolean) =>
+  hasCore && (gear.mark === 'pure' || gear.mark === 'effect' || gear.mark === 'outward')
+    ? '사용함: 창에서 바로 돌림 · 그대로 보내도 이 방법으로 합니다'
+    : '그대로 보내도 이 방법으로 합니다'
 
 // What is sent: the person's own text, with one line at its end that names the gear when one fits and was not
 // turned down. The gear's name goes in only when it has the shape of one.
