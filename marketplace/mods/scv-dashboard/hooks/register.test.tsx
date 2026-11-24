@@ -3216,12 +3216,12 @@ test('pane T19b 기어 목록 파일이 없는 프로젝트는 안내 한 줄이
   expect(drawn).toContain('이 프로젝트에 기어가 없습니다')
 })
 
-test('pane T20 쓰기 — 누르면 입력창에 그 기어의 명령이 들어가고 창은 아무것도 돌리지 않는다, 실행 버튼은 표시를 아는 기어 모두에', async ($, on) => {
-  // 0.4.0: the run button is on every gear whose mark is known (what a press does is runPlan's to say)
+test('pane T20 기어 줄의 버튼 — 창이 돌릴 수 있으면 [실행], 아니면 [대화로]. 펼친 칸의 [Claude 에게 시키기]는 입력창에 명령만 넣는다', async ($, on) => {
+  // 0.4.0: the pane runs a gear marked pure, effect or outward itself; the others go to the conversation
   const rows = gearRows(parseGears(GEAR_INDEX), true)
   expect(rows.map(one => one.direct)).toEqual(['run', 'run', 'run'])
   expect(gearRows(parseGears(GEAR_INDEX), false).map(one => one.direct)).toEqual([null, null, null])
-  expect(rows.map(one => one.runLabel)).toEqual(['바로 실행', '바로 실행', '바로 실행'])
+  expect(gearRows(parseGears('a\tgear\tjudge\tnone\tx\t판단\t\nb\tgear\t-\tnone\tx\t예전\t'), true).map(one => one.direct)).toEqual([null, null])
   expect(gearCommand('release-ci')).toBe('/scv:gear run release-ci')
   expect(gearCommand('bad name; rm')).toBe(null)
   const kit = engine(on, {})
@@ -3230,11 +3230,13 @@ test('pane T20 쓰기 — 누르면 입력창에 그 기어의 명령이 들어�
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
-  expect(await has(ui, 'gear-use-release-ci')).toBe(true)
+  // folded: the one button on the line runs the gear
+  expect((await ui.find({ type: 'Button', key: 'gear-run-release-ci' }))?.text).toBe('실행')
+  expect(await has(ui, 'gear-use-release-ci')).toBe(false)
+  // opened: no second run button — a quieter one hands the gear to Claude
   await ui.press({ key: 'gear-open-release-ci' })
-  expect(await has(ui, 'gear-run-release-ci')).toBe(true)
-  await ui.press({ key: 'gear-open-make-list' })
-  expect(await has(ui, 'gear-run-make-list')).toBe(true)
+  expect((await ui.find({ type: 'Button', key: 'gear-use-release-ci' }))?.text).toBe('Claude 에게 시키기')
+  expect(await ui.findAll({ type: 'Button', key: 'gear-run-release-ci' })).toHaveLength(1)
   await ui.press({ key: 'gear-use-release-ci' })
   expect(fills).toEqual([{ text: '/scv:gear run release-ci', mode: 'replace' }])
   expect(kit.runs.filter(one => one.argv[1]?.endsWith('/gear.sh'))).toHaveLength(0)
@@ -3431,7 +3433,8 @@ test('gear-list T13 · T14 기어 10개는 5줄과 모두 보기, 최근 쓴 것
   expect(gearCatalog(gears, [], true).shown).toHaveLength(10)
   expect(usedGear(['a', 'b'], 'b')).toEqual(['b', 'a'])
   const kit = engine(on, {})
-  withProject(kit, { index: TEN })
+  // no SCV found here: each line's button hands the gear to the conversation (0.4.0: with SCV found it would run it)
+  withProject(kit, { index: TEN, isInstalled: false })
   promptEngine(on)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
@@ -3718,7 +3721,8 @@ test('direct T8 누른 뒤 할 일을 정한다 — 바로 실행 · 값 칸 · 
   // a value the gear's own file fixed is not asked for; a mark this pane does not know is never run here
   expect(runPlan({ mark: 'effect', ...none, args: [{ ...pick[0]!, isOpen: false }] })).toBe('run')
   expect(runPlan({ mark: '-', ...none })).toBe('chat')
-  expect(gearRows(parseGears(DIRECT), true).map(one => one.runLabel)).toEqual(['바로 실행', '바로 실행', '바로 실행', '바로 실행', '대화에서 실행'])
+  // the gear's own line: a run button where the pane handles it, the conversation for a gear with a judgment step
+  expect(gearRows(parseGears(DIRECT), true).map(one => one.direct)).toEqual(['run', 'run', 'run', 'run', null])
 })
 
 test('direct T9 값이 없는 기어는 누르는 즉시 창이 돌린다 — 입력창에 아무것도 넣지 않고 보내지도 않는다', async ($, on) => {
@@ -3728,9 +3732,12 @@ test('direct T9 값이 없는 기어는 누르는 즉시 창이 돌린다 — �
   kit.proc.stdout = '치운 파일 3개\n'
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'gear-open-tidy' })
+  // the gear's line is folded: its one button is 실행, and a press runs the gear and opens the line to show the result
+  expect(await labelOf(ui, 'gear-run-tidy')).toBe('실행')
+  expect(await drawnText($)).not.toContain('이름 tidy')
   await ui.press({ key: 'gear-run-tidy' })
 
+  expect(await drawnText($)).toContain('이름 tidy')
   expect(kit.spawns).toEqual([{ argv: gearLaunchArgv(['bash', GEAR_SH, 'run', 'tidy']), cwd: '/work', input: '' }])
   expect(fills).toHaveLength(0)
   expect(went).toHaveLength(0)
@@ -3747,11 +3754,12 @@ test('direct T10 고를 값은 버튼으로 정하고 실행한다 — 고른 �
   const asked = () => kit.gearCalls.filter(one => one === 'run ask ci-all').length
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'gear-open-ci-all' })
+  // pressed on the folded line: the line opens with the values block
   await ui.press({ key: 'gear-run-ci-all' })
 
   // the values block: nothing has run, the value now is the one picked
   expect(kit.spawns).toHaveLength(0)
+  expect(await has(ui, 'gear-run-ci-all')).toBe(false)
   expect(await labelOf(ui, 'gear-pick-ci-all-os-0')).toBe('● mac')
   expect(await labelOf(ui, 'gear-pick-ci-all-os-1')).toBe('○ linux')
   expect(await has(ui, 'gear-chat-ci-all')).toBe(true)
@@ -3824,7 +3832,6 @@ test('direct T12 밖으로 나가는 기어는 확인을 거친다 — 취소면
   kit.extra['scv/gears/ship/GEAR.md'] = 'flow: tidy | push-tags\nin: none\nout: lines\n\n# ship\n'
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'gear-open-ship' })
   await ui.press({ key: 'gear-run-ship' })
 
   // the question comes first: what goes out, and nothing has run
@@ -3864,19 +3871,33 @@ test('direct T12 밖으로 나가는 기어는 확인을 거친다 — 취소면
   await ui.unmount()
 })
 
-test('direct T13 판단 단계가 든 기어는 창이 돌리지 않고 입력창에 기어 명령을 넣는다', async ($, on) => {
+test('direct T13 판단 단계가 든 기어는 창이 돌리지 않는다 — 기어 줄의 버튼이 [대화로]이고 입력창에 기어 명령을 넣는다', async ($, on) => {
   const kit = directKit(on)
   const { fills } = promptEngine(on)
   const went = sends(on)
+  // an older SCV: it does not print this gear's values
+  delete kit.asks.tidy
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'gear-open-review' })
-  expect(await labelOf(ui, 'gear-run-review')).toBe('대화에서 실행')
-  await ui.press({ key: 'gear-run-review' })
+  expect(await labelOf(ui, 'gear-use-review')).toBe('대화로')
+  expect(await has(ui, 'gear-run-review')).toBe(false)
+  await ui.press({ key: 'gear-use-review' })
 
   expect(kit.spawns).toHaveLength(0)
   expect(kit.gearCalls).toHaveLength(0)
   expect(fills).toEqual([{ text: '/scv:gear run review', mode: 'replace' }])
+  expect(went).toHaveLength(0)
+  // a gear the pane would run, but whose values SCV could not say: the press goes to the conversation too, and
+  // from then on its line says so
+  expect(await labelOf(ui, 'gear-run-tidy')).toBe('실행')
+  await ui.press({ key: 'gear-run-tidy' })
+  expect(kit.spawns).toHaveLength(0)
+  expect(fills).toHaveLength(2)
+  expect(fills[1]?.text).toContain('/scv:gear run tidy')
+  expect(await labelOf(ui, 'gear-use-tidy')).toBe('대화로')
+  expect(await has(ui, 'gear-run-tidy')).toBe(false)
+  await ui.press({ key: 'gear-use-tidy' })
+  expect(kit.gearCalls).toEqual(['run ask tidy'])
   expect(went).toHaveLength(0)
   await ui.unmount()
 })

@@ -828,11 +828,15 @@ const readGearAsk = async ($: Api, shot: Snapshot, name: string) => {
   const ran = await $.process
     .run(['bash', `${shot.core}/scripts/gear.sh`, 'ask', name], { ...(shot.cwd ? { cwd: shot.cwd } : {}), timeoutMs: 15_000 })
     .catch(() => undefined)
-  const asked = ran?.exitCode === 0 ? parseAsk(ran.stdout) : null
-  if (!ran || !asked || asked.name !== name) return null
-  await update($, gearAsks, value => ({ index, byName: { ...(value.index === index ? value.byName : {}), [name]: ran.stdout } }))
+  // the command could not be started (or did not end in time): nothing is kept, the next press tries again
+  if (!ran) return null
+  const asked = ran.exitCode === 0 ? parseAsk(ran.stdout) : null
+  const isRead = asked !== null && asked.name === name
+  // an answer that is not the gear's values (an older SCV has no `ask`) is kept as empty: the gear's line then
+  // offers the conversation instead of a run
+  await update($, gearAsks, value => ({ index, byName: { ...(value.index === index ? value.byName : {}), [name]: isRead ? ran.stdout : '' } }))
 
-  return asked
+  return isRead ? asked : null
 }
 
 // Copies a run's last line into the drawn state: when it changed, and a second apart at most (the refresh timer
@@ -1730,12 +1734,17 @@ export const register: Register = on => {
       await update($, paneNote, () => (filled ? `바로 바꾸지 못해 입력창에 넣음: ${command}` : `바꾸지 못함 — 입력창에 ${command} 를 넣어 보내 주세요`))
     }
 
-    // 쓰기: the gear's command into the prompt box — sent, Claude asks for the values the gear needs and runs it.
+    // 대화로 · Claude 에게 시키기: the gear's command into the prompt box — sent, Claude asks for the values the
+    // gear needs and runs it.
     const useGear = (name: string) => handToChat($, name, 'card')
+    // SCV was asked for this gear's values and did not print them (an older SCV): the gear goes to the conversation.
+    const isUnread = (name: string) => asksKept.index === (shot.gearsText ?? null) && asksKept.byName[name] === ''
 
-    // The run button: the pane runs the gear itself (at once, or after its values or its question), with no model;
-    // a gear only Claude can run goes into the prompt box as 쓰기 does.
+    // 실행, on the gear's own line: the pane runs the gear itself, with no model — at once, or after its values or
+    // its question, which open under the line. A gear already running, or with such a block open, is shown
+    // instead of started again; one that turns out to be Claude's to run goes into the prompt box.
     const pressRun = async (name: string) => {
+      if (liveRuns.has(name) || (await read($, gearForms))[name]) return void (await update($, gearOpen, () => name))
       if ((await pressGear($, name, 'card', Boolean(Input))) === 'chat') await useGear(name)
     }
 
@@ -1904,6 +1913,7 @@ export const register: Register = on => {
             const run = gearRan[row.name]
             const form = gearBlocks[row.name]
             const isRunning = isLiveRun(row.name, run)
+            const canRun = row.direct === 'run' && !isUnread(row.name)
 
             return (
               <Box key={`gear-${row.name}`} flexDirection="column">
@@ -1914,7 +1924,14 @@ export const register: Register = on => {
                     </Button>
                   </Box>
                   <Box flexDirection="row">
-                    {mirrored ? [] : [<Button key={`gear-use-${row.name}`} label="쓰기" onPress={() => void useGear(row.name).catch(() => undefined)} />]}
+                    {mirrored
+                      ? []
+                      : !canRun
+                        ? [<Button key={`gear-use-${row.name}`} label="대화로" onPress={() => void useGear(row.name).catch(() => undefined)} />]
+                        : isRunning || (form && isOpen)
+                          ? // running: 멈춤 is under the line; a block open under the line has its own buttons
+                            []
+                          : [<Button key={`gear-run-${row.name}`} label="실행" onPress={() => void pressRun(row.name).catch(() => undefined)} />]}
                   </Box>
                 </Box>
                 {isOpen ? (
@@ -1924,7 +1941,9 @@ export const register: Register = on => {
                     <Text dimColor>{row.argsLine ? row.argsLine.replace(/^인자 /, '정할 값 ') : '정할 값 없음'}</Text>
                     {row.words ? [<Text key="words" dimColor>{`이럴 때: ${row.words}`}</Text>] : []}
                     {row.markLine ? [<Text key="mark" dimColor>{row.markLine}</Text>] : []}
-                    {row.direct === 'run' && !isRunning && !form ? [<Button key={`gear-run-${row.name}`} label={row.runLabel} onPress={() => void pressRun(row.name).catch(() => undefined)} />] : []}
+                    {canRun && !mirrored && !isRunning && !form
+                      ? [<Button key={`gear-use-${row.name}`} label="Claude 에게 시키기" dimColor onPress={() => void useGear(row.name).catch(() => undefined)} />]
+                      : []}
                     {form?.kind === 'values' ? valuesBlock(row.name, form) : null}
                     {form?.kind === 'confirm' ? confirmBlock(row.name, form) : null}
                     {(run ? runLines(row.name, run, at) : []).map((line, i) => (

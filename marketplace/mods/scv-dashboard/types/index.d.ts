@@ -172,7 +172,8 @@ export type GearForm =
   | { kind: 'values'; from: 'card' | 'band'; picked: Record<string, string> }
   | { kind: 'confirm'; from: 'card' | 'band'; picked: Record<string, string>; input: string; lines: string[]; teeth: string[]; wait: GearWait | null; startedAt: number }
 
-// What SCV's `ask` printed for each gear, kept while the gear index reads the same (index: the index text it was read under).
+// What SCV's `ask` printed for each gear, kept while the gear index reads the same (index: the index text it was read
+// under). An empty text: the command ran and did not print values (an older SCV) — that gear goes to the conversation.
 export type GearAsks = { index: string | null; byName: Record<string, string> }
 
 declare module 'claude-code' {

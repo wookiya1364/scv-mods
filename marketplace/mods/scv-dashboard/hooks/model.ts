@@ -1512,16 +1512,15 @@ export type GearRow = {
   does: string
   argsLine: string | null
   markLine: string | null
-  // run: the gear has a run button (what a press then does is runPlan's to say); null: only through the prompt box
+  // run: the pane handles the gear itself — its line's button runs it (at once, or after its values or its
+  // question: runPlan's to say); null: the gear goes to the conversation, and its line's button says so
   direct: 'run' | null
-  // what that button says: a gear with a judgment step runs in the conversation, every other one here
-  runLabel: string
 }
 
-const RUN_MARKS = new Set(['pure', 'effect', 'outward', 'judge'])
+const RUN_MARKS = new Set(['pure', 'effect', 'outward'])
 
-// One line per gear with whether it has a run button: every gear whose mark is known, where the SCV plugin was
-// found. A gear of an older index (no mark) goes through the prompt box only.
+// One line per gear with what its button does: the pane runs a gear marked pure, effect or outward, where the SCV
+// plugin was found. A gear with a judgment step, or of an older index (no mark), goes to the conversation.
 export const gearRows = (gears: readonly Gear[], hasCore: boolean): GearRow[] =>
   gears.map(gear => ({
     name: gear.name,
@@ -1532,7 +1531,6 @@ export const gearRows = (gears: readonly Gear[], hasCore: boolean): GearRow[] =>
     argsLine: gear.args.length > 0 ? `인자 ${gear.args.join(' · ')}` : null,
     markLine: MARK_WORD[gear.mark] ?? null,
     direct: hasCore && RUN_MARKS.has(gear.mark) ? 'run' : null,
-    runLabel: gear.mark === 'judge' ? '대화에서 실행' : '바로 실행',
   }))
 
 const GEAR_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/
@@ -1676,7 +1674,7 @@ export const runView = (input: { tail: string; elapsedMs: number; exitCode: numb
   if (input.exitCode === 11) return ['밖으로 나가는 단계 앞에서 멈춤 — 그 단계는 돌지 않음']
   const last = lines.slice(-RUN_LINES)
   const cut = lines.length > last.length ? [`… 앞 ${lines.length - last.length}줄 줄임`] : []
-  if (input.exitCode === 10) return ['끝까지 못 돌림 — Claude 가 판단하는 단계에서 멈춤. [쓰기]로 대화에서 돌려 주세요', ...cut, ...last]
+  if (input.exitCode === 10) return ['끝까지 못 돌림 — Claude 가 판단하는 단계에서 멈춤. [Claude 에게 시키기]로 대화에서 돌려 주세요', ...cut, ...last]
   if (input.exitCode !== 0) return [`실패 — 종료 코드 ${input.exitCode}${took}`, ...cut, ...last]
 
   return lines.length === 0 ? [`끝남 — 출력 없음${took}`] : [`끝남${took}`, ...cut, ...last]
