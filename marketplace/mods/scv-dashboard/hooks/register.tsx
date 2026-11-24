@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, DoneEntry, Evidence, Expanded, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
+import type { AgentState, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
 import type { FileFact, MirrorAct } from './model'
 import {
   STEP_TOOL,
@@ -96,10 +96,24 @@ import {
   gearCatalog,
   gearCommand,
   gearMatch,
-  gearResultView,
   gearRows,
   gearRunArgv,
   hintLine,
+  hintNote,
+  argChoices,
+  confirmLines,
+  confirmStop,
+  cutLine,
+  gearConfirmArgv,
+  gearLaunchArgv,
+  gearPaste,
+  gearResumeArgv,
+  isGearName,
+  outwardSteps,
+  parseAsk,
+  runPlan,
+  runView,
+  stopLines,
   lastTurns,
   lightDue,
   lightMessages,
@@ -115,7 +129,7 @@ import {
   submitWithGear,
   usedGear,
 } from './model'
-import type { AskMode, JobEnd, LightSettings } from './model'
+import type { AskMode, ConfirmStop, JobEnd, LightSettings, RunPlan } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -143,11 +157,16 @@ const tasks = atom({ plugin: 'scv-dashboard', key: 'tasks' } as const, [])
 const history = atom({ plugin: 'scv-dashboard', key: 'history' } as const, [])
 const now = atom({ plugin: 'scv-dashboard', key: 'now' } as const, 0)
 const note = atom({ plugin: 'scv-dashboard', key: 'note' } as const, null as string | null)
-// What the ask-mode and gear cards say after a press, and what each gear run here printed (by gear name).
+// What the ask-mode and gear cards say after a press.
 const paneNote = atom({ plugin: 'scv-dashboard', key: 'paneNote' } as const, null as string | null)
-const gearResult = atom({ plugin: 'scv-dashboard', key: 'gearResult' } as const, {} as Record<string, string[]>)
+// The gears run from the pane itself, by gear name: each one's run (under way or ended), the block open under it
+// (values to set, or the question before a gear that reaches outside), and what SCV said each gear needs set.
+const gearRuns = atom({ plugin: 'scv-dashboard', key: 'gearRuns' } as const, {} as Record<string, GearRun>)
+const gearForms = atom({ plugin: 'scv-dashboard', key: 'gearForms' } as const, {} as Record<string, GearForm>)
+const gearAsks = atom({ plugin: 'scv-dashboard', key: 'gearAsks' } as const, { index: null, byName: {} } as GearAsks)
 // The fold of the cards under '더 보기' is kept across sessions, by this key in the mod's store.
 const MORE_KEY = 'scv-dashboard:more'
+// A run from the pane that took this long is a long one: its end is announced.
 const GEAR_RUN_MS = 30_000
 // The gear that fits what is being typed (its name), and the one the person turned down for this text.
 const gearHint = atom({ plugin: 'scv-dashboard', key: 'gearHint' } as const, null as string | null)
@@ -761,6 +780,366 @@ const openByCommand = async ($: Api) => {
   }
 }
 
+// ── a gear run from the pane, with no model (0.4.0) ──────────────────────────
+
+// What the person typed into a gear's fields, by gear then by field (an argument's name, or DATA_FIELD for the data
+// that goes in on standard input). Kept outside the drawn state, so a keystroke redraws nothing.
+const DATA_FIELD = '<data>'
+const typedValues = new Map<string, Record<string, string>>()
+const noteTyped = (name: string, field: string, value: string) => void typedValues.set(name, { ...typedValues.get(name), [field]: value })
+
+// A run under way, as this copy of the module holds it: how to end it (ending the stream ends the child), what it
+// wrote so far (out: standard output alone; all: with its error lines), and what of it was last copied to the drawn state.
+// SCV hands a step's output on only when the step ends, so while a step runs its last line is read from the run's
+// own state folder (dir; found as the folder that was not there before the start: before), an unchanged file not
+// read again (fileAt: when the file read last had changed; fileTail: its end).
+type LiveRun = {
+  end: (() => void) | null
+  out: string
+  all: string
+  isStopped: boolean
+  flushedAt: number
+  flushedLine: string
+  before: string[]
+  dir: string | null
+  fileAt: number
+  fileTail: string
+}
+const liveRuns = new Map<string, LiveRun>()
+const KEEP_CHARS = 64 * 1024
+// Where SCV keeps a run's state while it runs: a folder per run, the running step's output in `next` and `err`.
+const gearStateDir = (cwd: string) => `${cwd ? `${cwd}/` : ''}scv/journal/.gear-run`
+
+type GearFrom = 'card' | 'band'
+// One run to start or go on with. first: the command to start (null when it goes on from a stop). wait: the stopped
+// step the person just said yes to. teeth: the steps named in the text that yes was given on.
+type GearGo = { name: string; from: GearFrom; startedAt: number; first: { argv: string[]; input: string } | null; wait: GearWait | null; teeth: string[] }
+
+const closeForm = ($: Api, name: string) => update($, gearForms, ({ [name]: _closed, ...rest }) => rest)
+const openForm = ($: Api, name: string, form: GearForm) => update($, gearForms, all => ({ ...all, [name]: form }))
+
+// What a gear needs set, read once through SCV's own `ask` and kept while the gear index reads the same.
+const readGearAsk = async ($: Api, shot: Snapshot, name: string) => {
+  if (!shot.core || !isGearName(name)) return null
+  const index = shot.gearsText ?? null
+  const kept = await read($, gearAsks)
+  const known = kept.index === index ? kept.byName[name] : undefined
+  if (known !== undefined) return parseAsk(known)
+  const ran = await $.process
+    .run(['bash', `${shot.core}/scripts/gear.sh`, 'ask', name], { ...(shot.cwd ? { cwd: shot.cwd } : {}), timeoutMs: 15_000 })
+    .catch(() => undefined)
+  const asked = ran?.exitCode === 0 ? parseAsk(ran.stdout) : null
+  if (!ran || !asked || asked.name !== name) return null
+  await update($, gearAsks, value => ({ index, byName: { ...(value.index === index ? value.byName : {}), [name]: ran.stdout } }))
+
+  return asked
+}
+
+// Copies a run's last line into the drawn state: when it changed, and a second apart at most (the refresh timer
+// brings the rest), so a command that writes fast does not redraw the pane for every piece.
+const flushRun = async ($: Api, name: string, liveRun: LiveRun) => {
+  const tail = liveRun.all.trim() ? tailOf(liveRun.all) : liveRun.fileTail
+  const line = progressOf(tail).line
+  if (line === liveRun.flushedLine) return
+  const at = await $.clock.now()
+  if (liveRun.flushedAt !== 0 && at - liveRun.flushedAt < 1000) return
+  liveRun.flushedLine = line
+  liveRun.flushedAt = at
+  await update($, gearRuns, all => {
+    const run = all[name]
+
+    return run && run.exitCode === null && !run.isStopped ? { ...all, [name]: { ...run, tail } } : all
+  })
+}
+
+// The end of the running step's output, from the run's state folder: the one of its two files (output, errors) that
+// changed last. The folder is the one that appeared after the start (when SCV wrote the gear's name in it, that
+// name must be this gear's). Read only when the file changed since the last look, and a large one by its end alone.
+const readRunFile = async ($: Api, name: string, liveRun: LiveRun) => {
+  const state = gearStateDir((await read($, snapshot)).cwd)
+  if (!liveRun.dir) {
+    const fresh = (await $.fs.list(state).catch(() => []))
+      .filter(one => one.kind === 'dir' && !liveRun.before.includes(one.name))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    for (const one of fresh) {
+      const owner = await readText($, `${state}/${one.name}/name`)
+      if (owner !== null && owner.trim() !== name) continue
+      liveRun.dir = `${state}/${one.name}`
+      break
+    }
+  }
+  if (!liveRun.dir) return
+  const files = await Promise.all(['next', 'err'].map(async file => ({ full: `${liveRun.dir}/${file}`, stat: await $.fs.stat(`${liveRun.dir}/${file}`).catch(() => undefined) })))
+  const newest = files.filter(one => one.stat?.kind === 'file' && one.stat.size > 0).sort((a, b) => (b.stat?.mtimeMs ?? 0) - (a.stat?.mtimeMs ?? 0))[0]
+  if (!newest?.stat || newest.stat.mtimeMs === liveRun.fileAt) return
+  liveRun.fileAt = newest.stat.mtimeMs
+  liveRun.fileTail =
+    newest.stat.size <= WHOLE_READ_BYTES
+      ? tailOf((await readText($, newest.full)) ?? '')
+      : ((await $.process.run(['tail', '-c', '4000', newest.full]).catch(() => undefined))?.stdout ?? '')
+}
+
+// Each refresh: the runs under way are looked at again — the running step's last line, then the drawn state.
+const flushRuns = async ($: Api) => {
+  for (const [name, liveRun] of liveRuns) {
+    if (liveRun.isStopped) continue
+    await readRunFile($, name, liveRun).catch(() => undefined)
+    await flushRun($, name, liveRun)
+  }
+}
+
+// Runs one command of a gear run to its end: its exit code and what it wrote. The child lives as long as this loop
+// reads it — a stop ends the stream, which ends the child, and the fixed launcher takes down what the child started;
+// the module unloading (the session's end) ends it the same way. What the person typed is in `input` or is the
+// value part of one word of `argv`, never anything else.
+const runToEnd = async ($: Api, name: string, liveRun: LiveRun, argv: readonly string[], input: string, cwd: string | undefined, dir: string | null) => {
+  liveRun.out = ''
+  liveRun.all = ''
+  liveRun.fileTail = ''
+  liveRun.fileAt = 0
+  liveRun.dir = dir
+  liveRun.before = dir ? [] : (await $.fs.list(gearStateDir(cwd ?? '')).catch(() => [])).map(one => one.name)
+  if (liveRun.isStopped) return { code: null, out: '', all: '' }
+  try {
+    const stream = $.process.spawn({ argv: gearLaunchArgv(argv), ...(cwd ? { cwd } : {}), input })
+    liveRun.end = () => void Promise.resolve(stream.return({ code: null, signal: 'SIGTERM' })).catch(() => undefined)
+    let step = await stream.next()
+    while (!step.done && !liveRun.isStopped) {
+      const piece = step.value
+      if (piece.stream === 'stdout') liveRun.out = `${liveRun.out}${piece.text}`.slice(-KEEP_CHARS)
+      liveRun.all = `${liveRun.all}${piece.text}`.slice(-KEEP_CHARS)
+      await flushRun($, name, liveRun)
+      step = await stream.next()
+    }
+
+    return { code: step.done ? step.value.code : null, out: liveRun.out, all: liveRun.all }
+  } catch (error) {
+    return { code: 1, out: liveRun.out, all: `${liveRun.all}\n시작하지 못했거나 끊김 — ${String(error)}` }
+  } finally {
+    liveRun.end = null
+  }
+}
+
+// A run's end: its result stays on the gear's card. A long run is announced once; a short one started from the band
+// above the prompt box (the pane may be out of sight) says so in a toast.
+const endRun = async ($: Api, go: GearGo, how: { code: number; tail: string }) => {
+  const at = await $.clock.now()
+  await update($, gearRuns, all => ({ ...all, [go.name]: { startedAt: go.startedAt, endedAt: at, tail: tailOf(how.tail), exitCode: how.code, isStopped: false } }))
+  const took = at - go.startedAt
+  const gear = parseGears((await read($, snapshot)).gearsText).find(one => one.name === go.name)
+  const said = buildAlertText([
+    `기어 ${how.code === 0 ? '끝남' : `실패(종료 코드 ${how.code})`} — ${cutLine(gear?.does || go.name, 34)}`,
+    took >= 1000 ? formatDuration(took) : null,
+  ])
+  if (took >= GEAR_RUN_MS) return alert($, said)
+  if (go.from === 'band') await Promise.resolve($.ui.toast(`SCV: ${said}`)).catch(() => undefined)
+}
+
+// A run that stands before a step the person has not said yes to: the card asks, with that step's own lines.
+const waitAt = async ($: Api, go: GearGo, stop: ConfirmStop) => {
+  const at = await $.clock.now()
+  await update($, gearRuns, all => ({ ...all, [go.name]: { startedAt: go.startedAt, endedAt: at, tail: '', exitCode: 11, isStopped: false } }))
+  await openForm($, go.name, {
+    kind: 'confirm',
+    from: go.from,
+    picked: {},
+    input: '',
+    lines: stopLines(stop),
+    teeth: [stop.tooth],
+    wait: { token: stop.token, step: stop.step },
+    startedAt: go.startedAt,
+  })
+}
+
+// Follows a gear run to its end. A run that stops before a step that reaches outside (exit code 11) goes on only
+// with the person's go-ahead for that step: the press just made counts once, and only when the text it was made on
+// named the step (teeth) — then SCV's own confirm command writes the answer down and resume runs the step. For any
+// other stop the card asks again. No other way leads past such a step.
+const driveGear = async ($: Api, go: GearGo, liveRun: LiveRun) => {
+  const shot = await read($, snapshot)
+  const core = shot.core
+  if (!core) return
+  const cwd = shot.cwd || undefined
+  await update($, gearRuns, all => ({ ...all, [go.name]: { startedAt: go.startedAt, endedAt: null, tail: '', exitCode: null, isStopped: false } }))
+  await closeForm($, go.name)
+  let next = go.first
+  let said = go.wait
+  let teeth = go.teeth
+  // a run that goes on from a stop keeps its state folder, named by its token
+  let dir: string | null = null
+  for (;;) {
+    if (said) {
+      const confirm = gearConfirmArgv(core, said.token, said.step, true)
+      const wrote = confirm ? await $.process.run(confirm, { ...(cwd ? { cwd } : {}), timeoutMs: 15_000 }).catch(() => undefined) : undefined
+      const resume = gearResumeArgv(core, said.token)
+      if (!resume || !wrote?.stdout.includes(`GEAR_CONFIRMED: ${said.token}:${said.step}`)) {
+        return endRun($, go, { code: 1, tail: '확인을 적지 못해 밖으로 나가는 단계를 돌리지 않음' })
+      }
+      next = { argv: resume, input: '' }
+      dir = `${gearStateDir(cwd ?? '')}/${said.token}`
+      said = null
+    }
+    if (!next) return
+    const ended = await runToEnd($, go.name, liveRun, next.argv, next.input, cwd, dir)
+    if (liveRun.isStopped) return
+    const halted = ended.code === 11 ? confirmStop(ended.out) : null
+    if (!halted) return endRun($, go, { code: ended.code ?? 1, tail: ended.code === 0 ? ended.out : ended.all })
+    if (!teeth.includes(halted.tooth)) return waitAt($, go, halted)
+    teeth = []
+    said = { token: halted.token, step: halted.step }
+  }
+}
+
+// Starts a run (or goes on with a stopped one) and leaves it running: the press that started it returns at once.
+const beginRun = async ($: Api, go: Omit<GearGo, 'startedAt'> & { startedAt?: number }) => {
+  const liveRun: LiveRun = { end: null, out: '', all: '', isStopped: false, flushedAt: 0, flushedLine: '', before: [], dir: null, fileAt: 0, fileTail: '' }
+  liveRuns.set(go.name, liveRun)
+  typedValues.delete(go.name)
+  const startedAt = go.startedAt ?? (await $.clock.now())
+  await noteGearUse($, go.name)
+  await update($, gearOpen, () => go.name)
+  void driveGear($, { ...go, startedAt }, liveRun)
+    .catch(() => undefined)
+    .finally(() => {
+      if (liveRuns.get(go.name) === liveRun) liveRuns.delete(go.name)
+    })
+}
+
+// The person's stop: the card says so at once, and the stream's end takes the child (and what it started) down.
+const stopGear = async ($: Api, name: string) => {
+  const liveRun = liveRuns.get(name)
+  if (!liveRun || liveRun.isStopped) return
+  liveRun.isStopped = true
+  liveRun.end?.()
+  liveRuns.delete(name)
+  const at = await $.clock.now()
+  await update($, gearRuns, all => {
+    const run = all[name]
+
+    return run ? { ...all, [name]: { ...run, endedAt: at, tail: liveRun.all.trim() ? tailOf(liveRun.all) : liveRun.fileTail, isStopped: true } } : all
+  })
+}
+
+// The question before a gear that reaches outside is started: which of its steps go out, and with which values.
+const openConfirm = async ($: Api, shot: Snapshot, name: string, from: GearFrom, picked: Record<string, string>, input: string) => {
+  const steps = outwardSteps(await readText($, `${shot.cwd ? `${shot.cwd}/` : ''}scv/gears/${name}/GEAR.md`), shot.gearsText)
+  const asked = await readGearAsk($, shot, name)
+  const words = (shot.core ? gearRunArgv(shot.core, name, picked, asked?.args ?? []) : null)?.slice(4) ?? []
+  const startedAt = await $.clock.now()
+  await openForm($, name, { kind: 'confirm', from, picked, input, lines: confirmLines(steps, words), teeth: steps.map(step => step.name), wait: null, startedAt })
+  await update($, gearOpen, () => name)
+}
+
+// A press on a gear's run button, or on 사용함 above the prompt box: what it leads to (runPlan), with the first step
+// done — the gear started here, its values block opened, or its question opened. 'chat' is the caller's to hand on.
+const pressGear = async ($: Api, name: string, from: GearFrom, canType: boolean): Promise<RunPlan> => {
+  const shot = await read($, snapshot)
+  const gear = parseGears(shot.gearsText).find(one => one.name === name)
+  if (!gear || !shot.core || !isGearName(name) || (await read($, mirror))) return 'chat'
+  if (liveRuns.has(name)) return 'run'
+  // a gear with a judgment step is Claude's to run: nothing is read or started for it here
+  if (gear.mark === 'judge') return 'chat'
+  const asked = await readGearAsk($, shot, name)
+  if (!asked) return 'chat'
+  const plan = runPlan({ mark: gear.mark, args: asked.args, hasInput: asked.hasInput, chosen: null, canType })
+  if (plan === 'chat') return plan
+  await update($, paneNote, () => null)
+  // used: it moves to the front of the list, so its line (and the block opened under it) is among those shown
+  await noteGearUse($, name)
+  if (plan === 'run') {
+    const argv = gearRunArgv(shot.core, name)
+    if (argv) await beginRun($, { name, from, first: { argv, input: '' }, wait: null, teeth: [] })
+  } else if (plan === 'confirm') {
+    await openConfirm($, shot, name, from, {}, '')
+  } else {
+    typedValues.delete(name)
+    const picked = Object.fromEntries(asked.args.flatMap(arg => (arg.isOpen && argChoices(arg.desc, arg.value).kind === 'buttons' ? [[arg.name, arg.value]] : [])))
+    await openForm($, name, { kind: 'values', from, picked })
+    await update($, gearOpen, () => name)
+  }
+
+  return plan
+}
+
+// 이 값으로 실행: the values as set — a button's pick, what was typed, else the value as it stood — then the run, or
+// first the question when the gear reaches outside.
+const submitValues = async ($: Api, name: string) => {
+  const form = (await read($, gearForms))[name]
+  const shot = await read($, snapshot)
+  const gear = parseGears(shot.gearsText).find(one => one.name === name)
+  const asked = await readGearAsk($, shot, name)
+  if (!form || form.kind !== 'values' || !gear || !asked || !shot.core || liveRuns.has(name)) return
+  const typed = typedValues.get(name) ?? {}
+  const chosen = Object.fromEntries(asked.args.filter(arg => arg.isOpen).map(arg => [arg.name, typed[arg.name] ?? form.picked[arg.name] ?? arg.value]))
+  const input = asked.hasInput ? (typed[DATA_FIELD] ?? '') : ''
+  const plan = runPlan({ mark: gear.mark, args: asked.args, hasInput: asked.hasInput, chosen, canType: true })
+  if (plan === 'confirm') return openConfirm($, shot, name, form.from, chosen, input)
+  const argv = plan === 'run' ? gearRunArgv(shot.core, name, chosen, asked.args) : null
+  if (argv) await beginRun($, { name, from: form.from, first: { argv, input }, wait: null, teeth: [] })
+}
+
+// The answer to a gear's question. 실행: the run starts (or goes on from the step it waits at) — the go-ahead is
+// then written down through SCV's own confirm command when the run reaches that step. 취소: nothing runs; a run
+// that was waiting has the refusal written down the same way.
+const answerConfirm = async ($: Api, name: string, isYes: boolean) => {
+  const form = (await read($, gearForms))[name]
+  const shot = await read($, snapshot)
+  if (!form || form.kind !== 'confirm' || !shot.core || liveRuns.has(name)) return
+  await closeForm($, name)
+  if (!isYes) {
+    const refuse = form.wait ? gearConfirmArgv(shot.core, form.wait.token, form.wait.step, false) : null
+    if (refuse) await $.process.run(refuse, { ...(shot.cwd ? { cwd: shot.cwd } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+
+    return void (await update($, paneNote, () => (form.wait ? '실행하지 않음 — 밖으로 나가는 단계는 돌지 않았습니다' : '실행하지 않음 — 아무것도 돌지 않았습니다')))
+  }
+  if (form.wait) return beginRun($, { name, from: form.from, startedAt: form.startedAt, first: null, wait: form.wait, teeth: [] })
+  const asked = await readGearAsk($, shot, name)
+  const argv = gearRunArgv(shot.core, name, form.picked, asked?.args ?? [])
+  if (argv) await beginRun($, { name, from: form.from, first: { argv, input: form.input }, wait: null, teeth: form.teeth })
+}
+
+// Hands a gear to the conversation. From the band, what the person typed goes now with the gear's line at its end
+// (what a press on 사용함 did before 0.4.0); from the card, the gear's command goes into the prompt box, unsent —
+// sent, Claude asks for the values the gear needs and runs it.
+const handToChat = async ($: Api, name: string, from: GearFrom) => {
+  await closeForm($, name)
+  typedValues.delete(name)
+  const gear = parseGears((await read($, snapshot)).gearsText).find(one => one.name === name)
+  const box = from === 'band' ? await $.prompt.read().catch(() => ({ text: '', cursor: 0 })) : { text: '', cursor: 0 }
+  if (gear && box.text.trim() !== '') {
+    await noteGearUse($, name)
+    await $.prompt.fill({ text: '', mode: 'replace' }).catch(() => undefined)
+    await $.prompt.submit({ text: submitWithGear(box.text, gear, false), asUser: true }).catch(() => undefined)
+
+    return
+  }
+  const command = gearCommand(name)
+  if (!command) return
+  await noteGearUse($, name)
+  const filled = await fillPrompt($, command)
+  await update($, paneNote, () => (filled ? `입력창에 넣음: ${command} — 보내면 필요한 값을 물어봄` : `입력창에 못 넣음 — ${command}`))
+}
+
+// Whether a run the state holds as under way really is: this copy of the module must hold its stream (a module
+// loaded again ended the child, and the state it left still says 'running').
+const isLiveRun = (name: string, run: GearRun | undefined) => run !== undefined && run.exitCode === null && !run.isStopped && liveRuns.has(name)
+
+// The lines a gear's card shows for its run; for one under way the time runs to the pane's clock.
+const runLines = (name: string, run: GearRun, at: number) =>
+  run.exitCode === null && !run.isStopped && !liveRuns.has(name)
+    ? ['끊김 — 창이 다시 불리면서 이 실행도 끝났습니다']
+    : runView({ tail: run.tail, elapsedMs: Math.max(0, (run.endedAt ?? at) - run.startedAt), exitCode: run.exitCode, isStopped: run.isStopped })
+
+// 결과를 대화에 붙이기: a run's result lines into the prompt box, after what the person typed. Never sent.
+const pasteResult = async ($: Api, name: string) => {
+  const run = (await read($, gearRuns))[name]
+  if (!run) return
+  const text = gearPaste(name, runLines(name, run, run.endedAt ?? run.startedAt))
+  const box = await $.prompt.read().catch(() => ({ text: '', cursor: 0 }))
+  const filled = await $.prompt.fill(box.text.trim() === '' ? { text, mode: 'replace' } : { text: `\n\n${text}`, mode: 'append' }).catch(() => ({ isFilled: false }))
+  await update($, paneNote, () => (filled.isFilled ? '결과를 입력창에 넣음 — 보내지는 않았습니다' : '결과를 입력창에 넣지 못했습니다'))
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -787,10 +1166,17 @@ export const register: Register = on => {
       await $.process.run(['bash', `${first.core}/scripts/gear.sh`, 'index'], { ...(first.cwd ? { cwd: first.cwd } : {}), timeoutMs: 15_000 }).catch(() => undefined)
       await refresh($)
     }
-    $.clock.every(REFRESH_MS, () => void refresh($).then(() => readJobTails($)).then(() => pushMirror($)).catch(() => undefined))
+    $.clock.every(REFRESH_MS, () => void refresh($).then(() => readJobTails($)).then(() => flushRuns($)).then(() => pushMirror($)).catch(() => undefined))
     void openPane($).catch(() => undefined)
 
     return started
+  })
+
+  // The session ends: a gear still running from the pane is stopped (the module's unloading ends it too).
+  on('session.end', async ($, e, next) => {
+    for (const name of [...liveRuns.keys()]) await stopGear($, name).catch(() => undefined)
+
+    return next(e)
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -1046,24 +1432,32 @@ export const register: Register = on => {
       return next(e)
     }
     drawnHint.name = gear.name
-    const { Box, Text, Button } = $.ui.resolve(e)
-    // 사용함: what is in the box goes now, with the gear's line at its end. Sent without a press it goes the same
-    // way (the line is added where the text is sent); 사용안함 turns the gear down for this text.
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    const hasCore = Boolean((await read($, snapshot)).core) && !(await read($, mirror))
+    // 사용함: the pane runs the gear itself where it can — at once, or after its values are set or its question is
+    // answered in the pane; nothing is sent and the prompt box stays as it is. A gear only Claude can run (a judgment
+    // step, values this surface cannot take, no SCV found) goes as before: what is in the box is sent now with the
+    // gear's line at its end. Sent without a press the text goes that way too; 사용안함 turns the gear down for this text.
     const useNow = async () => {
       const box = await $.prompt.read().catch(() => ({ text: '', cursor: 0 }))
       if (box.text.trim() === '') return
-      await noteGearUse($, gear.name)
+      const did = await pressGear($, gear.name, 'band', 'Input' in elements)
       drawnHint.name = null
       await update($, gearHint, () => null)
-      await $.prompt.fill({ text: '', mode: 'replace' }).catch(() => undefined)
-      await $.prompt.submit({ text: submitWithGear(box.text, gear, false), asUser: true }).catch(() => undefined)
+      if (did === 'chat') return handToChat($, gear.name, 'band')
+      // the pane has the gear now: this text is not given its line again, and the pane is where the rest happens
+      await update($, gearDismissed, () => gear.name)
+      await openPane($).catch(() => undefined)
+      const said = did === 'run' ? '창에서 바로 돌림 — 결과는 SCV 칸의 기어 줄에' : did === 'values' ? 'SCV 칸에서 값을 정하면 바로 돌림' : '밖으로 나가는 일 — SCV 칸에서 [실행]을 눌러야 돌아감'
+      await Promise.resolve($.ui.toast(`SCV: ${said}`)).catch(() => undefined)
     }
 
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text>{hintLine(gear)}</Text>
         <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-          <Text dimColor>그대로 보내도 이 방법으로 합니다</Text>
+          <Text dimColor>{hintNote(gear, hasCore)}</Text>
           <Box flexDirection="row" gap={1}>
             <Button key="gear-hint-use" label="사용함" onPress={() => void useNow().catch(() => undefined)} />
             <Button key="gear-hint-dismiss" label="사용안함" onPress={() => void update($, gearDismissed, () => gear.name)} />
@@ -1311,8 +1705,11 @@ export const register: Register = on => {
     const askView = askModeView(parseAskMode(shot.settingsText))
     const openGear = await read($, gearOpen)
     const gearView = gearCatalog(parseGears(shot.gearsText), await read($, gearRecent), await read($, gearsAll))
-    const gearList = gearRows(gearView.shown, Boolean(shot.core) && !mirrored, Boolean(Input))
-    const gearOut = await read($, gearResult)
+    const gearList = gearRows(gearView.shown, Boolean(shot.core) && !mirrored)
+    const gearRan = await read($, gearRuns)
+    const gearBlocks = await read($, gearForms)
+    const asksKept = await read($, gearAsks)
+    const askOf = (name: string) => (asksKept.index === (shot.gearsText ?? null) ? parseAsk(asksKept.byName[name]) : null)
     const paneMessage = await read($, paneNote)
     const projectDir = shot.cwd || undefined
 
@@ -1333,26 +1730,104 @@ export const register: Register = on => {
       await update($, paneNote, () => (filled ? `바로 바꾸지 못해 입력창에 넣음: ${command}` : `바꾸지 못함 — 입력창에 ${command} 를 넣어 보내 주세요`))
     }
 
-    // The gear's command into the prompt box: sent, Claude asks for the values the gear needs and runs it.
-    const useGear = async (name: string) => {
-      const command = gearCommand(name)
-      if (!command) return
-      await noteGearUse($, name)
-      const filled = await fillPrompt($, command)
-      await update($, paneNote, () => (filled ? `입력창에 넣음: ${command} — 보내면 필요한 값을 물어봄` : `입력창에 못 넣음 — ${command}`))
+    // 쓰기: the gear's command into the prompt box — sent, Claude asks for the values the gear needs and runs it.
+    const useGear = (name: string) => handToChat($, name, 'card')
+
+    // The run button: the pane runs the gear itself (at once, or after its values or its question), with no model;
+    // a gear only Claude can run goes into the prompt box as 쓰기 does.
+    const pressRun = async (name: string) => {
+      if ((await pressGear($, name, 'card', Boolean(Input))) === 'chat') await useGear(name)
     }
 
-    // A gear with no side effect runs here: what was typed goes in on standard input only, never into the command.
-    const runGear = async (name: string, input: string) => {
-      const argv = shot.core ? gearRunArgv(shot.core, name) : null
-      if (!argv) return
-      await noteGearUse($, name)
-      await update($, gearResult, all => ({ ...all, [name]: ['돌리는 중…'] }))
-      const ran = await $.process
-        .run(argv, { ...(projectDir ? { cwd: projectDir } : {}), stdin: input, timeoutMs: GEAR_RUN_MS })
-        .catch((error: unknown) => ({ exitCode: 1, stdout: '', stderr: `30초 안에 끝나지 않았거나 시작하지 못함 — ${String(error)}` }))
-      await update($, gearResult, all => ({ ...all, [name]: gearResultView(ran.exitCode, ran.stdout, ran.stderr) }))
+    const pickValue = (name: string, arg: string, value: string) =>
+      update($, gearForms, all => {
+        const form = all[name]
+
+        return form?.kind === 'values' ? { ...all, [name]: { ...form, picked: { ...form.picked, [arg]: value } } } : all
+      })
+
+    // The values of a gear, set here: a row of buttons where its description lists the choices (the value now is
+    // the one picked), a field for a value to type and for the data it reads, then the run — or Claude.
+    const valuesBlock = (name: string, form: Extract<GearForm, { kind: 'values' }>) => {
+      const asked = askOf(name)
+      if (!asked) return null
+      const isTyped = asked.hasInput || asked.args.some(arg => arg.isOpen && argChoices(arg.desc, arg.value).kind === 'field')
+
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold>값 정하기</Text>
+          {asked.args.map(arg => {
+            const how = argChoices(arg.desc, arg.value)
+            if (!arg.isOpen) return <Text key={`gear-fixed-${name}-${arg.name}`} dimColor>{`${arg.name} = ${arg.value} — 기어가 정해 둠`}</Text>
+            if (how.kind === 'buttons') {
+              return (
+                <Box key={`gear-arg-row-${name}-${arg.name}`} flexDirection="column">
+                  <Text dimColor>{`${arg.name} — ${arg.desc}`}</Text>
+                  <Box flexDirection="row" gap={1}>
+                    {how.choices.map((choice, i) => (
+                      <Button
+                        key={`gear-pick-${name}-${arg.name}-${i}`}
+                        label={`${(form.picked[arg.name] ?? arg.value) === choice ? '●' : '○'} ${choice}`}
+                        onPress={() => void pickValue(name, arg.name, choice)}
+                      />
+                    ))}
+                  </Box>
+                </Box>
+              )
+            }
+
+            return Input ? (
+              <Input
+                key={`gear-arg-${name}-${arg.name}`}
+                label={arg.name}
+                placeholder={arg.desc || '값을 적기'}
+                value={arg.value}
+                submitLabel="값 넣기"
+                onInput={(value: string) => noteTyped(name, arg.name, value)}
+                onSubmit={(value: string) => noteTyped(name, arg.name, value)}
+              />
+            ) : (
+              <Text key={`gear-arg-${name}-${arg.name}`} dimColor>{`${arg.name} = ${arg.value} — ${arg.desc}`}</Text>
+            )
+          })}
+          {asked.hasInput && Input
+            ? [
+                <Input
+                  key={`gear-input-${name}`}
+                  label="넣을 자료"
+                  rows={3}
+                  placeholder={`이 기어가 읽을 자료(${asked.inputKind ?? ''})를 적기`}
+                  submitLabel="이 값으로 실행"
+                  onInput={(value: string) => noteTyped(name, DATA_FIELD, value)}
+                  onSubmit={(value: string) => {
+                    noteTyped(name, DATA_FIELD, value)
+                    void submitValues($, name).catch(() => undefined)
+                  }}
+                />,
+              ]
+            : []}
+          {isTyped && !Input ? [<Text key="no-field" dimColor>이 화면에는 입력 칸이 없어 값을 적을 수 없습니다 — Claude 에게 맡기면 물어봅니다.</Text>] : []}
+          <Box flexDirection="row" gap={1}>
+            {isTyped && !Input ? [] : [<Button key={`gear-go-${name}`} label="이 값으로 실행" variant="primary" onPress={() => void submitValues($, name).catch(() => undefined)} />]}
+            <Button key={`gear-chat-${name}`} label="Claude 에게 맡기기" onPress={() => void handToChat($, name, form.from).catch(() => undefined)} />
+          </Box>
+        </Box>
+      )
     }
+
+    // The question before a gear that reaches outside runs: what goes out, then 실행 or 취소.
+    const confirmBlock = (name: string, form: Extract<GearForm, { kind: 'confirm' }>) => (
+      <Box flexDirection="column" marginTop={1}>
+        <Text bold color="#e3b341">밖으로 나가는 일 — 확인</Text>
+        {form.lines.map((line, i) => (
+          <Text key={`gear-ask-${name}-${i}`}>{line}</Text>
+        ))}
+        <Box flexDirection="row" gap={1}>
+          <Button key={`gear-confirm-yes-${name}`} label="실행" variant="primary" onPress={() => void answerConfirm($, name, true).catch(() => undefined)} />
+          <Button key={`gear-confirm-no-${name}`} label="취소" onPress={() => void answerConfirm($, name, false).catch(() => undefined)} />
+        </Box>
+      </Box>
+    )
 
     const toggleMore = async () => {
       const value = await update($, expanded, one => ({ ...one, more: !one.more }))
@@ -1426,13 +1901,16 @@ export const register: Register = on => {
           {(shot.gearWaits ?? 0) > 0 ? <Text color="#e3b341">{`확인 기다림 ${shot.gearWaits} — 밖으로 나가는 단계 앞에서 멈춘 기어 실행이 있습니다`}</Text> : null}
           {gearList.map(row => {
             const isOpen = openGear === row.name
+            const run = gearRan[row.name]
+            const form = gearBlocks[row.name]
+            const isRunning = isLiveRun(row.name, run)
 
             return (
               <Box key={`gear-${row.name}`} flexDirection="column">
                 <Box flexDirection="row" justifyContent="space-between" alignItems="center">
                   <Box flexDirection="row" flexShrink={1}>
                     <Button key={`gear-open-${row.name}`} plain onPress={() => void update($, gearOpen, value => (value === row.name ? null : row.name))}>
-                      {`${isOpen ? '▾' : '▸'} ${row.title}`}
+                      {`${isOpen ? '▾' : '▸'} ${row.title}${isRunning ? ' · 돌리는 중' : ''}`}
                     </Button>
                   </Box>
                   <Box flexDirection="row">
@@ -1446,20 +1924,16 @@ export const register: Register = on => {
                     <Text dimColor>{row.argsLine ? row.argsLine.replace(/^인자 /, '정할 값 ') : '정할 값 없음'}</Text>
                     {row.words ? [<Text key="words" dimColor>{`이럴 때: ${row.words}`}</Text>] : []}
                     {row.markLine ? [<Text key="mark" dimColor>{row.markLine}</Text>] : []}
-                    {row.direct === 'run' ? [<Button key={`gear-run-${row.name}`} label="바로 실행" onPress={() => void runGear(row.name, '').catch(() => undefined)} />] : []}
-                    {row.direct === 'input' && Input
-                      ? [
-                          <Input
-                            key={`gear-input-${row.name}`}
-                            placeholder="넣을 값을 적고 바로 실행"
-                            submitLabel="바로 실행"
-                            onSubmit={(value: string) => void runGear(row.name, value).catch(() => undefined)}
-                          />,
-                        ]
-                      : []}
-                    {(gearOut[row.name] ?? []).map((line, i) => (
+                    {row.direct === 'run' && !isRunning && !form ? [<Button key={`gear-run-${row.name}`} label={row.runLabel} onPress={() => void pressRun(row.name).catch(() => undefined)} />] : []}
+                    {form?.kind === 'values' ? valuesBlock(row.name, form) : null}
+                    {form?.kind === 'confirm' ? confirmBlock(row.name, form) : null}
+                    {(run ? runLines(row.name, run, at) : []).map((line, i) => (
                       <Text key={`gear-out-${row.name}-${i}`} dimColor>{`│ ${line}`}</Text>
                     ))}
+                    {isRunning ? [<Button key={`gear-stop-${row.name}`} label="멈춤" onPress={() => void stopGear($, row.name).catch(() => undefined)} />] : []}
+                    {run && !isRunning && run.exitCode !== 11
+                      ? [<Button key={`gear-paste-${row.name}`} label="결과를 대화에 붙이기" onPress={() => void pasteResult($, row.name).catch(() => undefined)} />]
+                      : []}
                   </Box>
                 ) : null}
               </Box>
