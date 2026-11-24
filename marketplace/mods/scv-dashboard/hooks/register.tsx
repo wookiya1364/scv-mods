@@ -92,8 +92,17 @@ import {
   tailOf,
   isMirrorAskDue,
   mirrorLineText,
+  askModeView,
+  gearCommand,
+  gearResultView,
+  gearRows,
+  gearRunArgv,
+  paneSections,
+  parseAskMode,
+  parseGears,
+  pluginRoot,
 } from './model'
-import type { JobEnd } from './model'
+import type { AskMode, JobEnd } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -121,6 +130,12 @@ const tasks = atom({ plugin: 'scv-dashboard', key: 'tasks' } as const, [])
 const history = atom({ plugin: 'scv-dashboard', key: 'history' } as const, [])
 const now = atom({ plugin: 'scv-dashboard', key: 'now' } as const, 0)
 const note = atom({ plugin: 'scv-dashboard', key: 'note' } as const, null as string | null)
+// What the ask-mode and gear cards say after a press, and what each gear run here printed (by gear name).
+const paneNote = atom({ plugin: 'scv-dashboard', key: 'paneNote' } as const, null as string | null)
+const gearResult = atom({ plugin: 'scv-dashboard', key: 'gearResult' } as const, {} as Record<string, string[]>)
+// The fold of the cards under '더 보기' is kept across sessions, by this key in the mod's store.
+const MORE_KEY = 'scv-dashboard:more'
+const GEAR_RUN_MS = 30_000
 const focusStep = atom({ plugin: 'scv-dashboard', key: 'focusStep' } as const, null as number | null)
 const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
 // The functions each step made and called, by `<plan>#<step index>`; kept per project like the step signals.
@@ -194,7 +209,32 @@ const readSources = async ($: Api, cwd: string): Promise<Omit<Snapshot, 'root'>>
   const report = parseDreams(dreamsText)?.reportPath
   const reportHtml = report ? await readText($, report.startsWith('/') ? report : `${cwd ? `${cwd}/` : ''}${report}`) : null
 
-  return { plans, dreamsText, reportHtml, cwd, catalog: await readCatalog($, `${scv}/core/catalog/pure`) }
+  return {
+    plans,
+    dreamsText,
+    reportHtml,
+    cwd,
+    catalog: await readCatalog($, `${scv}/core/catalog/pure`),
+    settingsText: await readText($, `${scv}/scv_settings.json`),
+    gearsText: await readText($, `${scv}/gears/INDEX.tsv`),
+    gearWaits: await countGearWaits($, `${scv}/journal/.gear-run`),
+  }
+}
+
+// Gear runs stopped before a tooth that reaches outside, waiting for the person's go-ahead (their state folders say so).
+const countGearWaits = async ($: Api, dir: string) => {
+  const runs = (await $.fs.list(dir).catch(() => [])).filter(one => one.kind === 'dir').slice(0, 8)
+  const kinds = await Promise.all(runs.map(one => readText($, `${dir}/${one.name}/kind`)))
+
+  return kinds.filter(kind => (kind ?? '').trim() === 'confirm').length
+}
+
+// Where the SCV plugin is installed, read from Claude's list of installed plugins; null when it is not found.
+const findCore = async ($: Api, project: string) => {
+  const home = await $.env.get('HOME').catch(() => undefined)
+  if (!home) return null
+
+  return pluginRoot(await readText($, `${home}/.claude/plugins/installed_plugins.json`), project)
 }
 
 // The project's pure-function dictionary, every kind file in it; none yet (no build) is an empty one.
@@ -256,7 +296,8 @@ const refresh = async ($: Api) => {
   const root = await sessionRoot($, current.root)
   const project = root === current.root && current.cwd ? current.cwd : await projectOf($, root)
   if (current.cwd && project !== current.cwd) await loadRuns($, project)
-  const next = { ...(await readSources($, project)), root }
+  const core = current.core && project === current.cwd ? current.core : await findCore($, project)
+  const next = { ...(await readSources($, project)), root, core }
   await update($, snapshot, () => next)
   await update($, now, () => at)
   await loadSignals($, next.cwd)
@@ -642,7 +683,15 @@ export const register: Register = on => {
     await $.command.register({ name: 'scv-panel', description: 'Open the SCV dashboard pane' })
     await $.command.register({ name: 'scv-mirror', description: "Draw another session's SCV pane here: /scv-mirror <address>, or /scv-mirror stop", argumentHint: '<address> | stop' })
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
+    const more = await $.store.get(MORE_KEY).catch(() => undefined)
+    await update($, expanded, value => ({ ...value, more: more === true }))
     await refresh($)
+    // A gear index written before core 0.102.0 has no mark on its gear lines ('-'): have SCV write it again, once.
+    const first = await read($, snapshot)
+    if (first.core && parseGears(first.gearsText).some(gear => gear.mark === '-')) {
+      await $.process.run(['bash', `${first.core}/scripts/gear.sh`, 'index'], { ...(first.cwd ? { cwd: first.cwd } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+      await refresh($)
+    }
     $.clock.every(REFRESH_MS, () => void refresh($).then(() => readJobTails($)).then(() => pushMirror($)).catch(() => undefined))
     void openPane($).catch(() => undefined)
 
@@ -1069,6 +1118,146 @@ export const register: Register = on => {
       )
     }
 
+    const usage = usageLine(await read($, limits), offsetAt(at))
+    const context = contextLine(await read($, contextFill))
+    const Input = 'Input' in elements ? elements.Input : undefined
+    const askView = askModeView(parseAskMode(shot.settingsText))
+    const gearList = gearRows(parseGears(shot.gearsText), Boolean(shot.core) && !mirrored, Boolean(Input))
+    const gearOut = await read($, gearResult)
+    const paneMessage = await read($, paneNote)
+    const projectDir = shot.cwd || undefined
+
+    // A press switches the ask mode through SCV's own settings command, so the next message already follows it.
+    // Where the plugin is not found (or the command fails), the command goes into the prompt box instead.
+    const switchAskMode = async (next: AskMode) => {
+      const ran = shot.core
+        ? await $.process.run(['bash', `${shot.core}/scripts/ask-mode.sh`, next], { ...(projectDir ? { cwd: projectDir } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+        : undefined
+      if (ran?.exitCode === 0) {
+        await refresh($)
+        const forced = /^ENV_VALUE: (.+)$/m.exec(ran.stdout)?.[1]
+
+        return void (await update($, paneNote, () => (forced ? `설정은 바꿨지만 환경 변수가 먼저임: ${forced}` : `묻기 방식을 바꿈 — 다음 메시지부터 ${askModeView(next).name}`)))
+      }
+      const command = `/scv:ask-mode ${next}`
+      const filled = await fillPrompt($, command)
+      await update($, paneNote, () => (filled ? `바로 바꾸지 못해 입력창에 넣음: ${command}` : `바꾸지 못함 — 입력창에 ${command} 를 넣어 보내 주세요`))
+    }
+
+    // The gear's command into the prompt box: sent, Claude asks for the values the gear needs and runs it.
+    const useGear = async (name: string) => {
+      const command = gearCommand(name)
+      if (!command) return
+      const filled = await fillPrompt($, command)
+      await update($, paneNote, () => (filled ? `입력창에 넣음: ${command} — 보내면 필요한 값을 물어봄` : `입력창에 못 넣음 — ${command}`))
+    }
+
+    // A gear with no side effect runs here: what was typed goes in on standard input only, never into the command.
+    const runGear = async (name: string, input: string) => {
+      const argv = shot.core ? gearRunArgv(shot.core, name) : null
+      if (!argv) return
+      await update($, gearResult, all => ({ ...all, [name]: ['돌리는 중…'] }))
+      const ran = await $.process
+        .run(argv, { ...(projectDir ? { cwd: projectDir } : {}), stdin: input, timeoutMs: GEAR_RUN_MS })
+        .catch((error: unknown) => ({ exitCode: 1, stdout: '', stderr: `30초 안에 끝나지 않았거나 시작하지 못함 — ${String(error)}` }))
+      await update($, gearResult, all => ({ ...all, [name]: gearResultView(ran.exitCode, ran.stdout, ran.stderr) }))
+    }
+
+    const toggleMore = async () => {
+      const value = await update($, expanded, one => ({ ...one, more: !one.more }))
+      await $.store.set(MORE_KEY, value.more === true).catch(() => undefined)
+    }
+
+    // A row only for a value this session has; with neither there is no card (nothing to say yet).
+    const limitsCard = () =>
+      usage || context
+        ? card(
+            <Box flexDirection="column">
+              {context ? (
+                <Box flexDirection="row" gap={1}>
+                  <Text bold>컨텍스트</Text>
+                  <Text dimColor>{context}</Text>
+                </Box>
+              ) : null}
+              {usage ? (
+                <Box flexDirection="row" gap={1}>
+                  <Text bold>사용 한도</Text>
+                  <Text dimColor>{usage}</Text>
+                </Box>
+              ) : null}
+            </Box>,
+            '#4f8cff',
+          )
+        : null
+
+    const askCard = () =>
+      card(
+        <>
+          <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+            <Box flexDirection="row" gap={1}>
+              <Text bold>묻기 방식</Text>
+              <Text>{askView.name}</Text>
+            </Box>
+            <Box flexDirection="row">
+              {mirrored ? [] : [<Button key="ask-mode-switch" label={askView.nextLabel} onPress={() => void switchAskMode(askView.next).catch(() => undefined)} />]}
+            </Box>
+          </Box>
+          <Text dimColor>{askView.meaning}</Text>
+        </>,
+      )
+
+    const gearsCard = () =>
+      card(
+        <Box flexDirection="column">
+          <Text bold>{`기어 ${gearList.length}`}</Text>
+          {gearList.length === 0 ? <Text dimColor>이 프로젝트에 기어가 없습니다 — 되풀이하는 일을 기어로 만들어 달라고 하면 여기에 보입니다.</Text> : null}
+          {(shot.gearWaits ?? 0) > 0 ? <Text color="#e3b341">{`확인 기다림 ${shot.gearWaits} — 밖으로 나가는 단계 앞에서 멈춘 기어 실행이 있습니다`}</Text> : null}
+          {gearList.map(row => (
+            <Box key={`gear-${row.name}`} flexDirection="column" marginTop={1}>
+              <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+                <Box flexDirection="row" gap={1}>
+                  <Text bold>{row.name}</Text>
+                  <Text dimColor>{row.flow}</Text>
+                </Box>
+                <Box flexDirection="row" gap={1}>
+                  {row.direct === 'run' ? <Button key={`gear-run-${row.name}`} label="바로 실행" onPress={() => void runGear(row.name, '').catch(() => undefined)} /> : null}
+                  {mirrored ? null : <Button key={`gear-use-${row.name}`} label="쓰기" onPress={() => void useGear(row.name).catch(() => undefined)} />}
+                </Box>
+              </Box>
+              {row.does ? <Text>{row.does}</Text> : null}
+              {row.argsLine ? <Text dimColor>{row.argsLine}</Text> : null}
+              {row.markLine ? <Text dimColor>{row.markLine}</Text> : null}
+              {row.direct === 'input' && Input ? (
+                <Input
+                  key={`gear-input-${row.name}`}
+                  placeholder="넣을 값을 적고 바로 실행"
+                  submitLabel="바로 실행"
+                  onSubmit={(value: string) => void runGear(row.name, value).catch(() => undefined)}
+                />
+              ) : null}
+              {(gearOut[row.name] ?? []).map((line, i) => (
+                <Text key={`gear-out-${row.name}-${i}`} dimColor>{`│ ${line}`}</Text>
+              ))}
+            </Box>
+          ))}
+          {paneMessage ? <Text dimColor>{paneMessage}</Text> : null}
+        </Box>,
+      )
+
+    // Always on top: context · usage, then ask mode and gears where this session's project is read.
+    const hasProject = shot.settingsText !== undefined
+    const topCards = (hasPlan: boolean, hasBlocks: boolean) => {
+      const sections = paneSections({ plan: hasPlan, blocks: hasBlocks, project: hasProject })
+
+      return (
+        <Box flexDirection="column">
+          {sections.includes('limits') ? limitsCard() : null}
+          {sections.includes('askMode') ? askCard() : null}
+          {sections.includes('gears') ? gearsCard() : null}
+        </Box>
+      )
+    }
+
     // Until the host's first state comes, what this session holds is its own folder or an older state: not shown.
     if (mirrored && !mirrored.at) {
       return (
@@ -1085,6 +1274,7 @@ export const register: Register = on => {
         <Box flexDirection="column">
           {mirrorLine}
           <Text bold>SCV 대시보드</Text>
+          {topCards(false, false)}
           <Text dimColor>이 폴더에 진행 중인 SCV 계획이 없습니다. /scv:promote 로 계획을 만들면 여기에 보입니다.</Text>
           <Text dimColor>{`확인한 곳: ${shot.cwd || '(작업 폴더 모름)'}/scv/promote`}</Text>
           {nowCard(null)}
@@ -1147,8 +1337,6 @@ export const register: Register = on => {
         )
       : null
     const agentRows = agentLines(team, at, formatDuration)
-    const usage = usageLine(await read($, limits), offsetAt(at))
-    const context = contextLine(await read($, contextFill))
 
     function dreamsPart() {
       return card(
@@ -1175,6 +1363,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {mirrorLine}
+        {topCards(true, blocks.length > 0)}
         {plans.length > 1 && Select ? (
           <Select
             key="plan"
@@ -1187,113 +1376,6 @@ export const register: Register = on => {
         {plan.isArchived ? <Text dimColor>진행 중인 계획이 없어 최근 끝난 계획을 보여 줍니다.</Text> : null}
         {plans.length > 1 && Select ? null : <Text bold>{plan.title}</Text>}
         <Text dimColor>{`상태: ${statusWords(plan.status, stages, plan.pausedBy ? titleOf(plans, plan.pausedBy) : '')}`}</Text>
-        {returnLine(plan, plans) ? <Text dimColor>{returnLine(plan, plans)}</Text> : null}
-        {plan.history.length > 0 ? (
-          <Box flexDirection="column">
-            <Text dimColor>{`변경 이력 (최근 ${Math.min(3, plan.history.length)} / ${plan.history.length})`}</Text>
-            {plan.history.slice(0, 3).map((entry, i) => (
-              <Text key={`hist-${i}`} dimColor>{`· ${entry}`}</Text>
-            ))}
-          </Box>
-        ) : null}
-        {card(
-          <>
-            <Text bold>{headline(stages, blocks, eta, formatDuration)}</Text>
-            <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-              <Text color={action.command ? STATE_COLOR.doing : '#8b949e'}>{`다음: ${action.text}`}</Text>
-              {action.command ? (
-                <Box flexDirection="row" gap={1}>
-                  <Button key="next-fill" label="입력창에 넣기" onPress={() => void fillNext(action.command ?? '')} />
-                  <Button
-                    key="next-copy"
-                    label="명령 복사"
-                    onPress={() =>
-                      void $.ui.copy({ text: action.command ?? '', surface: e.surface }).then(copied =>
-                        update($, note, () => (copied.isCopied ? `복사함: ${action.command}` : `복사 못 함 — ${action.command}`)),
-                      )
-                    }
-                  />
-                </Box>
-              ) : null}
-            </Box>
-            {message && isActionNote(message) ? <Text dimColor>{message}</Text> : null}
-          </>,
-          barColor(stages, blocks),
-        )}
-
-
-        {away
-          ? card(
-              <>
-                <Text bold>{away.title}</Text>
-                {away.lines.map(line => (
-                  <Text>{line}</Text>
-                ))}
-              </>,
-            )
-          : null}
-
-        {card(
-          <>
-            <Box flexDirection="row" justifyContent="space-between">
-              <Text bold>진행률</Text>
-              <Text bold>{`${count.done}/${count.total}`}</Text>
-            </Box>
-            <Box width="100%" height={1} backgroundColor="#21262d">
-              <Box width={`${percent}%`} height={1} backgroundColor={barColor(stages, blocks)} />
-            </Box>
-            <Text dimColor>
-              {eta.kind === 'done'
-                ? '모든 단계 완료'
-                : eta.kind === 'unknown'
-                  ? '예상 완료 시간: 아직 추정 불가'
-                  : `예상 완료 시간: 약 ${formatDuration(eta.ms)} 남음 (추정 · 단계 ${eta.basis}개 평균)`}
-            </Text>
-          </>,
-        )}
-
-        {card(
-          <>
-            <Box flexDirection="row" justifyContent="space-between">
-              <Text bold>진행 중</Text>
-              <Text color={halted ? STATE_COLOR.blocked : state.isWorking ? '#4f8cff' : '#8b949e'}>
-                {halted
-                  ? `멈춤 — ${halted.why === 'error' ? '오류' : '거절'}`
-                  : state.isWorking
-                    ? `일하는 중 · ${formatDuration(at - state.turnStartedAt)}`
-                    : turn === 'background'
-                      ? '뒤의 일을 기다리는 중'
-                      : '쉬는 중'}
-              </Text>
-            </Box>
-            <Text>{current ? `단계: ${current.name}` : '진행 중인 단계 없음'}</Text>
-            {state.tool ? (
-              <Text dimColor>
-                {`${state.tool.name}${state.tool.target ? `: ${state.tool.target}` : ''} · ${formatDuration(at - state.tool.startedAt)}`}
-              </Text>
-            ) : null}
-            {todo.length > 0 ? (
-              <Text dimColor>{`할 일 ${doneTasks}/${todo.length}${doingTask ? ` · ${doingTask.subject}` : ''}`}</Text>
-            ) : null}
-            {agentRows.map(line => (
-              <Text dimColor>{`└ ${line}`}</Text>
-            ))}
-            {usage ? (
-              <Box flexDirection="row" gap={1}>
-                <Text bold>사용 한도</Text>
-                <Text dimColor>{usage}</Text>
-              </Box>
-            ) : null}
-            {context ? (
-              <Box flexDirection="row" gap={1}>
-                <Text bold>컨텍스트</Text>
-                <Text dimColor>{context}</Text>
-              </Box>
-            ) : null}
-          </>,
-          '#4f8cff',
-        )}
-
         {blocks.length > 0
           ? card(
               <>
@@ -1312,7 +1394,6 @@ export const register: Register = on => {
             )
           : null}
 
-        {nowCard(current && current.state === 'doing' ? { number: stages.indexOf(current) + 1, name: current.name } : null)}
         {card(
           <>
             <Box flexDirection="row" justifyContent="space-between">
@@ -1449,6 +1530,105 @@ export const register: Register = on => {
           </>,
         )}
 
+        <Button key="more-toggle" label={open.more ? '접기 — 진행률 · 시험 결과 · 드림 · 변경 이력' : '더 보기 — 진행률 · 시험 결과 · 드림 · 변경 이력'} onPress={() => void toggleMore().catch(() => undefined)} />
+        {open.more ? (
+          <Box flexDirection="column" marginTop={1}>
+        {returnLine(plan, plans) ? <Text dimColor>{returnLine(plan, plans)}</Text> : null}
+        {plan.history.length > 0 ? (
+          <Box flexDirection="column">
+            <Text dimColor>{`변경 이력 (최근 ${Math.min(3, plan.history.length)} / ${plan.history.length})`}</Text>
+            {plan.history.slice(0, 3).map((entry, i) => (
+              <Text key={`hist-${i}`} dimColor>{`· ${entry}`}</Text>
+            ))}
+          </Box>
+        ) : null}
+        {card(
+          <>
+            <Text bold>{headline(stages, blocks, eta, formatDuration)}</Text>
+            <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+              <Text color={action.command ? STATE_COLOR.doing : '#8b949e'}>{`다음: ${action.text}`}</Text>
+              {action.command ? (
+                <Box flexDirection="row" gap={1}>
+                  <Button key="next-fill" label="입력창에 넣기" onPress={() => void fillNext(action.command ?? '')} />
+                  <Button
+                    key="next-copy"
+                    label="명령 복사"
+                    onPress={() =>
+                      void $.ui.copy({ text: action.command ?? '', surface: e.surface }).then(copied =>
+                        update($, note, () => (copied.isCopied ? `복사함: ${action.command}` : `복사 못 함 — ${action.command}`)),
+                      )
+                    }
+                  />
+                </Box>
+              ) : null}
+            </Box>
+            {message && isActionNote(message) ? <Text dimColor>{message}</Text> : null}
+          </>,
+          barColor(stages, blocks),
+        )}
+
+
+        {away
+          ? card(
+              <>
+                <Text bold>{away.title}</Text>
+                {away.lines.map(line => (
+                  <Text>{line}</Text>
+                ))}
+              </>,
+            )
+          : null}
+
+        {card(
+          <>
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text bold>진행률</Text>
+              <Text bold>{`${count.done}/${count.total}`}</Text>
+            </Box>
+            <Box width="100%" height={1} backgroundColor="#21262d">
+              <Box width={`${percent}%`} height={1} backgroundColor={barColor(stages, blocks)} />
+            </Box>
+            <Text dimColor>
+              {eta.kind === 'done'
+                ? '모든 단계 완료'
+                : eta.kind === 'unknown'
+                  ? '예상 완료 시간: 아직 추정 불가'
+                  : `예상 완료 시간: 약 ${formatDuration(eta.ms)} 남음 (추정 · 단계 ${eta.basis}개 평균)`}
+            </Text>
+          </>,
+        )}
+
+        {card(
+          <>
+            <Box flexDirection="row" justifyContent="space-between">
+              <Text bold>진행 중</Text>
+              <Text color={halted ? STATE_COLOR.blocked : state.isWorking ? '#4f8cff' : '#8b949e'}>
+                {halted
+                  ? `멈춤 — ${halted.why === 'error' ? '오류' : '거절'}`
+                  : state.isWorking
+                    ? `일하는 중 · ${formatDuration(at - state.turnStartedAt)}`
+                    : turn === 'background'
+                      ? '뒤의 일을 기다리는 중'
+                      : '쉬는 중'}
+              </Text>
+            </Box>
+            <Text>{current ? `단계: ${current.name}` : '진행 중인 단계 없음'}</Text>
+            {state.tool ? (
+              <Text dimColor>
+                {`${state.tool.name}${state.tool.target ? `: ${state.tool.target}` : ''} · ${formatDuration(at - state.tool.startedAt)}`}
+              </Text>
+            ) : null}
+            {todo.length > 0 ? (
+              <Text dimColor>{`할 일 ${doneTasks}/${todo.length}${doingTask ? ` · ${doingTask.subject}` : ''}`}</Text>
+            ) : null}
+            {agentRows.map(line => (
+              <Text dimColor>{`└ ${line}`}</Text>
+            ))}
+          </>,
+          '#4f8cff',
+        )}
+
+        {nowCard(current && current.state === 'doing' ? { number: stages.indexOf(current) + 1, name: current.name } : null)}
         {card(
           <>
             <Box flexDirection="row" justifyContent="space-between">
@@ -1465,6 +1645,8 @@ export const register: Register = on => {
         )}
 
         {dreamsPart()}
+          </Box>
+        ) : null}
       </Box>
     )
   })

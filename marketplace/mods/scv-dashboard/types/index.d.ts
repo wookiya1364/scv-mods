@@ -121,7 +121,20 @@ export type Dreams = { date: string; items: string[]; reportPath: string | null 
 // cwd: the project folder the pane reads (the nearest holding scv/); root: the session root it was found from.
 // reportHtml: the dreams report itself, so a viewer on another device can open its own copy.
 // catalog: the project's pure-function dictionary, read with the plans.
-export type Snapshot = { plans: PlanFile[]; dreamsText: string | null; reportHtml?: string | null; cwd: string; root: string; catalog?: Catalog }
+// settingsText · gearsText: the project's SCV settings and gear index as read (undefined in a viewer session, which reads no file).
+// core: where the SCV plugin is installed (null: not found). gearWaits: gear runs waiting for the person's go-ahead.
+export type Snapshot = {
+  plans: PlanFile[]
+  dreamsText: string | null
+  reportHtml?: string | null
+  cwd: string
+  root: string
+  catalog?: Catalog
+  settingsText?: string | null
+  gearsText?: string | null
+  core?: string | null
+  gearWaits?: number
+}
 
 // hasEnded: this session saw its own main turn end (a new session knows nothing of the turn before it).
 // background: the turn that ended last started work that will wake the session by itself.
@@ -133,7 +146,8 @@ export type Live = {
   background?: boolean
 }
 
-export type Expanded = { steps: boolean; tests: boolean; blocks: boolean; dreams: boolean }
+// more: the cards under '더 보기' (progress, tests, dreams, history) are open
+export type Expanded = { steps: boolean; tests: boolean; blocks: boolean; dreams: boolean; more?: boolean }
 
 // A viewer session drawing another session's state: whose, when it last arrived (0: nothing yet) and when it was last asked for.
 // hostAt: the working session's own clock on the newest state taken, so a state that arrives late is dropped.
@@ -159,6 +173,8 @@ declare module 'claude-code' {
       history: { slug: string; done: number; at: number }[]
       now: number
       note: string | null
+      paneNote: string | null
+      gearResult: Record<string, string[]>
       focusStep: number | null
       stepLog: Record<string, WorkEntry[]>
       stepFunctions: Record<string, StepFunctions>
