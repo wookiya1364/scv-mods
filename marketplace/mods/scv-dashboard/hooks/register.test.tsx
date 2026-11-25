@@ -10,7 +10,6 @@ import {
   estimateEta,
   formatDuration,
   mergeTests,
-  parseDreams,
   parsePlan,
   parseTestOutput,
   applyBlocks,
@@ -92,12 +91,6 @@ const st = (name: string, state: 'done' | 'doing' | 'blocked' | 'waiting' | 'you
 
 const ELEVEN = ['[x] a', '[x] b', '[x] c', '[x] d', '[x] e', '[~] f', 'g', 'h', 'i', 'j', 'k']
 
-const DREAMS = JSON.stringify({
-  date: '20261022',
-  summary: '[SCV 드림] 아직 셀 것이 없음(보관된 계획 0개) · 개선점: 완료 기준 비율 0/7(0%) · 보고서 scv/dreams/x.html',
-  report: 'scv/dreams/x.html',
-})
-
 // The output files of background jobs the now-view tests set up, and the ones the mod read.
 const JOB_OUTPUTS: { files: Record<string, { text: string; mtimeMs: number; size?: number; base64?: string }>; reads: string[] } = { files: {}, reads: [] }
 
@@ -107,7 +100,6 @@ type Files = Record<string, { planText: string; testsText: string; record?: stri
 const engine = (
   on: On,
   files: Files,
-  dreams: string | null = DREAMS,
   clock = { at: 1_000_000 },
   archived: Files = {},
   // true: the test answers $.clock itself (mock.clock), so the refresh timer can be advanced
@@ -212,8 +204,6 @@ const engine = (
     if (kept && catalog[kept] !== undefined) return { value: catalog[kept] }
     const more = Object.entries(extra).find(([end]) => e.path.endsWith(end))?.[1]
     if (more !== undefined) return { value: more }
-    if (e.path.endsWith('scv/dreams/latest.json') && dreams) return { value: dreams }
-    if (e.path.endsWith('scv/dreams/x.html') && dreams) return { value: '<h1>드림</h1>' }
     // a background job's output file (now-view): which ones were read is kept, to see that only changed files are
     const output = JOB_OUTPUTS.files[e.path]
     if (output) {
@@ -530,7 +520,6 @@ test('progress T10 프로젝트 파일을 쓰지 않는다', async ($, on) => {
   await $.tool.call({ tool: 'Bash', command: 'npm test' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'step-1' })
-  await ui.press({ key: 'dreams-report' })
   await ui.unmount()
 
   expect(writes).toEqual([])
@@ -606,7 +595,7 @@ test('progress T15 진행률 막대도 신호등 색', () => {
 })
 
 test('progress T16 진행 중 계획이 없으면 최근 보관한 계획을 끝난 계획으로 보여 준다', async ($, on) => {
-  engine(on, {}, DREAMS, { at: 1_000_000 }, {
+  engine(on, {}, { at: 1_000_000 },{
     '20261020-old': plan({ title: '예전 계획', status: 'done', steps: ['[x] a'] }),
     '20261022-new': plan({ title: '최근 계획', status: 'done', steps: ['[x] a', '[x] b'] }),
   })
@@ -723,77 +712,48 @@ test('live T7 지난 시간 글자 형식', () => {
   expect(formatDuration(3_720_000)).toBe('1시간 2분')
 })
 
-// ── dreams plan ──────────────────────────────────────────────────────────────
+// ── the session look-back card is gone ───────────────────────────────────────
 
-test('dreams T1 최신 드림 요약 한 줄과 날짜', async ($, on) => {
-  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['a'] }) })
+test('no-lookback T1 회고 요약 칸은 없다 — 요약 파일이 남아 있어도 칸 · 버튼 · 접는 줄의 이름에 나오지 않는다', async ($, on) => {
+  // The project still holds the summary file an older version drew a card from.
+  const leftover = JSON.stringify({ date: '20261022', summary: '아직 셀 것이 없음(보관된 계획 0개) · 개선점: 완료 기준 비율 0/7(0%)', report: 'scv/x.html' })
+  const kit = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['a'] }) })
+  kit.extra['latest.json'] = leftover
+  kit.extra['scv/x.html'] = '<h1>보고서</h1>'
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const drawn = await drawnText($)
 
-  expect(await text(ui, /^아직 셀 것이 없음/)).toBe('아직 셀 것이 없음(보관된 계획 0개)')
-  expect(await text(ui, /^2026-10-22$/)).toBe('2026-10-22')
+  expect(drawn).toContain('접기 — 진행률 · 시험 결과 · 변경 이력')
+  for (const gone of ['아직 셀 것이 없음', '개선점', '보고서 열기', '2026-10-22']) expect(drawn).not.toContain(gone)
+  expect((await ui.findAll({ type: 'Button' })).map(button => String(button.props.label ?? '')).filter(label => /보고서|개선점/.test(label))).toEqual([])
   await ui.unmount()
+  // Nothing of it travels to a viewer either: the state a session sends holds no report.
+  await $.session.receive(hello())
+  const sent = kit.sent[kit.sent.length - 1]?.text.replace(/^SCV-MIRROR STATE /, '') ?? '{}'
+  expect(Object.keys(JSON.parse(sent).snapshot).filter(key => /report/i.test(key))).toEqual([])
 })
 
-test('dreams T2 개선점 펼치기', async ($, on) => {
-  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['a'] }) })
+test('no-lookback T2 계획이 없는 화면에도 회고 요약 칸은 없다', async ($, on) => {
+  const kit = engine(on, {})
+  kit.extra['latest.json'] = JSON.stringify({ date: '20261022', summary: '아직 셀 것이 없음 · 개선점: 하나', report: 'scv/x.html' })
   await start($)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const drawn = await drawnText($)
 
-  expect(await text(ui, /개선점: 완료 기준/)).toBeUndefined()
-  await ui.press({ key: 'dreams-toggle' })
-  expect(await text(ui, /개선점: 완료 기준/)).toBe('· 개선점: 완료 기준 비율 0/7(0%)')
-  await ui.press({ key: 'dreams-toggle' })
-  expect(await text(ui, /개선점: 완료 기준/)).toBeUndefined()
-  await ui.unmount()
-})
-
-test('dreams T3 보고서 열기 버튼이 보고서 전체 경로로 브라우저를 연다', async ($, on) => {
-  const { processes } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['a'] }) })
-  await start($)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'dreams-report' })
-
-  expect(processes).toEqual([['xdg-open', '/work/scv/dreams/x.html']])
-  await ui.unmount()
-})
-
-test('dreams T4 드림이 없으면 안내', async ($, on) => {
-  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['a'] }) }, null)
-  await start($)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-
-  expect(await text(ui, /아직 드림 없음/)).toBe('아직 드림 없음 — /scv:dreams 로 만들 수 있습니다.')
-  await ui.unmount()
-})
-
-test('dreams T5 parseDreams 는 앞머리를 떼고 · 로 나눈다', () => {
-  expect(parseDreams(DREAMS)).toEqual({
-    date: '2026-10-22',
-    items: ['아직 셀 것이 없음(보관된 계획 0개)', '개선점: 완료 기준 비율 0/7(0%)'],
-    reportPath: 'scv/dreams/x.html',
-  })
-  expect(parseDreams(null)).toBeUndefined()
-
-  // The real summary carries ' · ' inside parentheses too.
-  const real = JSON.stringify({
-    date: '20261022',
-    summary: '[SCV 드림] 아직 셀 것이 없음(보관된 계획 0개 · 사람 질의 9번) · 개선점: 요청에 완료 기준(무엇이 되면 끝인지)을 직접 말한 비율 0/7(0%) · 보고서 scv/dreams/r.html',
-    report: 'scv/dreams/r.html',
-  })
-  expect(parseDreams(real)?.items).toEqual([
-    '아직 셀 것이 없음(보관된 계획 0개 · 사람 질의 9번)',
-    '개선점: 요청에 완료 기준(무엇이 되면 끝인지)을 직접 말한 비율 0/7(0%)',
-  ])
+  expect(drawn).toContain('진행 중인 SCV 계획이 없습니다')
+  for (const gone of ['아직 셀 것이 없음', '개선점', '보고서 열기']) expect(drawn).not.toContain(gone)
 })
 
 // ── step-signal plan ─────────────────────────────────────────────────────────
 
-const FIVE = ['a', 'b', 'c', 'd', 'e']
+// Five steps named a to e. Each line names the pure function it builds, so a step may end with no file to show:
+// the function list is its proof.
+const FIVE = ['a — `fa`', 'b — `fb`', 'c — `fc`', 'd — `fd`', 'e — `fe`']
 
 const COMPOSE = { model: 'claude-test', promptModel: 'claude-test', surfaces: ['desktop'], tools: [], outputStyle: null, traits: [] } as const
 
-// A done signal carries proof since 0.2.29; these tests send a command's output.
+// A done signal carries proof since 0.2.29; these tests send a command's output with it, and stand on the
+// functions their step lines name.
 const DONE_OUTPUT = '시험 통과'
 const signal = ($: Engine, step: number, state: string, note?: string, slug = 'a') =>
   $.tool.call({ tool: STEP_TOOL, plan: slug, step, state, ...(note ? { note } : {}), ...(state === 'done' ? { output: DONE_OUTPUT } : {}) } as never) as Promise<{ deny?: string; result?: unknown }>
@@ -814,7 +774,7 @@ test('step-signal T1 단계 끝 신호를 받으면 진행률이 1 오른다', a
 })
 
 test('step-signal T2 계획서 표시와 신호를 합친다', async ($, on) => {
-  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c', 'd', 'e'] }) })
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b — `fb`', 'c', 'd', 'e'] }) })
   await start($)
   await signal($, 2, 'done')
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
@@ -933,7 +893,7 @@ test('step-signal T6 진행 중 계획이 있을 때만 Claude 지시가 붙는�
 })
 
 test('step-signal T6b 보관된 계획만 있으면 Claude 지시를 붙이지 않는다', async ($, on) => {
-  engine(on, {}, DREAMS, { at: 1_000_000 }, { z: plan({ title: 'z', status: 'done', steps: FIVE }) })
+  engine(on, {}, { at: 1_000_000 },{ z: plan({ title: 'z', status: 'done', steps: FIVE }) })
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base', scope: 'shared' as const }] }))
   await start($)
   const composed = await $.prompt.compose(COMPOSE)
@@ -1538,7 +1498,7 @@ test('mirror T2 보기 세션은 내 주소를 담아 요청하고, 받은 상�
   expect(await drawnText($)).toContain('상태를 기다리는 중')
 
   const hostPlan = { slug: 'p', isArchived: false, ...plan({ title: '작업 세션 계획', status: 'in_progress', steps: ['[x] a', '[~] b', 'c'] }) }
-  const state = { snapshot: { plans: [hostPlan], dreamsText: null, cwd: '/host', root: '/host' } }
+  const state = { snapshot: { plans: [hostPlan], cwd: '/host', root: '/host' } }
   const got = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
 
   expect(got.consumed).toBe('scv mirror state')
@@ -1572,14 +1532,14 @@ test('mirror T3 작업 세션은 요청한 주소로 상태를 보내고, 다른
 
 const PLANNED = () => ({ p: plan({ title: '작업 세션 계획', status: 'planned', steps: ['a', 'b'] }) })
 
-// A viewer session mirroring session_host, with the host's state (plan p, dreams report) already drawn.
+// A viewer session mirroring session_host, with the host's state (plan p) already drawn.
 const startViewer = async ($: Engine, on: On) => {
   const env = engine(on, {})
   env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
   await start($)
   await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
   const hostPlan = { slug: 'p', isArchived: false, ...PLANNED().p }
-  const state = { snapshot: { plans: [hostPlan], dreamsText: DREAMS, cwd: '/host', root: '/host' } }
+  const state = { snapshot: { plans: [hostPlan], cwd: '/host', root: '/host' } }
   await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
 
   return env
@@ -1590,7 +1550,7 @@ const hello = (address = 'session_viewer') => ({ origin: { kind: 'peer' as const
 // ── mirror-first-ask: a fresh mirror shows no older plan, and a state held up on the way does not draw over a newer one ──
 
 const stateOf = (title: string, sentAt?: number) =>
-  JSON.stringify({ snapshot: { plans: [{ slug: 'p', isArchived: false, ...plan({ title, status: 'in_progress', steps: ['a', 'b'] }) }], dreamsText: null, cwd: '/host', root: '/host' }, ...(sentAt === undefined ? {} : { sentAt }) })
+  JSON.stringify({ snapshot: { plans: [{ slug: 'p', isArchived: false, ...plan({ title, status: 'in_progress', steps: ['a', 'b'] }) }], cwd: '/host', root: '/host' }, ...(sentAt === undefined ? {} : { sentAt }) })
 
 test('mirror-first-ask T1 새로 건 거울은 상태가 올 때까지 이 폴더의 계획도, 예전에 받은 계획도 그리지 않는다', async ($, on) => {
   const env = engine(on, { own: plan({ title: '보기 기기 폴더의 예전 계획', status: 'in_progress', steps: ['a'] }) })
@@ -1631,7 +1591,7 @@ test('mirror-first-ask T2 늦게 도착한 옛 상태는 새 상태를 덮지 �
 
 test('mirror-first-ask T3 작업 세션은 보낸 시각을 붙이되, 그대로인 상태는 다시 보내지 않는다', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const env = engine(on, PLANNED(), DREAMS, undefined, {}, true)
+  const env = engine(on, PLANNED(), undefined, {}, true)
   await start($)
   await $.session.receive(hello())
   const pushed = parseMirror(env.sent[0]?.text ?? '')
@@ -1643,10 +1603,10 @@ test('mirror-first-ask T3 작업 세션은 보낸 시각을 붙이되, 그대로
 
 test('mirror-two-way T1 ACT 메시지는 봉투 안에서도 읽히고, 모르는 형태는 버린다', () => {
   const fill = { kind: 'act' as const, address: 'session_v', act: { do: 'fill' as const, slug: 'a' } }
-  const report = { kind: 'act' as const, address: 'session_v', act: { do: 'open-report' as const } }
 
   expect(parseMirror(envelope(mirrorText(fill)))).toEqual(fill)
-  expect(parseMirror(envelope(mirrorText(report)))).toEqual(report)
+  // The only act is fill; the report act an older version knew is dropped like any other unknown one.
+  expect(parseMirror(envelope('SCV-MIRROR ACT session_v {"do":"open-report"}'))).toBeNull()
   expect(parseMirror(envelope('SCV-MIRROR ACT session_v {"do":"run"}'))).toBeNull()
   expect(parseMirror(envelope('SCV-MIRROR ACT session_v {"do":"fill","slug":""}'))).toBeNull()
   expect(parseMirror(envelope('SCV-MIRROR ACT session_v {not json'))).toBeNull()
@@ -1663,7 +1623,7 @@ test('mirror-two-way T2 보낼지 판단 — 바뀌었고 간격이 지났을 �
 test('mirror-two-way T3 작업 세션은 바뀐 게 없으면 보내지 않고, 바뀌면 간격을 두고 보낸다', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const files = PLANNED()
-  const env = engine(on, files, DREAMS, undefined, {}, true)
+  const env = engine(on, files, undefined, {}, true)
   await start($)
   await $.session.receive(hello())
   expect(env.sent).toHaveLength(1)
@@ -1687,7 +1647,7 @@ test('mirror-two-way T3 작업 세션은 바뀐 게 없으면 보내지 않고, 
 test('mirror-two-way T4 BYE 를 받은 시청자에게는 바뀌어도 보내지 않는다', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const files = PLANNED()
-  const env = engine(on, files, DREAMS, undefined, {}, true)
+  const env = engine(on, files, undefined, {}, true)
   await start($)
   await $.session.receive(hello())
   const bye = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'bye', address: 'session_viewer' })) })
@@ -1701,7 +1661,7 @@ test('mirror-two-way T4 BYE 를 받은 시청자에게는 바뀌어도 보내지
 // 0.2.27: 스스로 다시 묻지 않는다 — 묻는 글마다 작업 세션의 대화에 '메시지 받음' 줄이 하나씩 생기기 때문이다.
 test('mirror-two-way T5 보기 세션은 소식이 없어도 스스로 다시 요청하지 않는다', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const env = engine(on, {}, DREAMS, undefined, {}, true)
+  const env = engine(on, {}, undefined, {}, true)
   env.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
   await start($)
   await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
@@ -1719,7 +1679,7 @@ test('mirror-two-way T5 보기 세션은 소식이 없어도 스스로 다시 �
 
 test('mirror-late-address T1 원격 주소가 늦게 적히면, 상태를 기다리는 동안 새 주소로 저절로 다시 요청한다', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const env = engine(on, {}, DREAMS, undefined, {}, true)
+  const env = engine(on, {}, undefined, {}, true)
   env.proc.stdout = JSON.stringify({ sessionId: 'local-id' })
   await start($)
   const asked = await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
@@ -1742,7 +1702,7 @@ test('mirror-late-address T1 원격 주소가 늦게 적히면, 상태를 기다
 
 test('mirror-late-address T2 상태를 받은 뒤에는 주소가 바뀌어도 10분 규칙만 따른다', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
-  const env = engine(on, {}, DREAMS, undefined, {}, true)
+  const env = engine(on, {}, undefined, {}, true)
   env.proc.stdout = JSON.stringify({ sessionId: 'local-id' })
   await start($)
   await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
@@ -1783,47 +1743,11 @@ test('mirror-two-way T7 작업 세션은 시청자의 fill 만 받아, 자기 �
   expect(fills).toHaveLength(1)
 })
 
-test('mirror-two-way T8 거울 칸의 보고서 열기는 받은 보고서를 이 기기에서 열고, 작업 세션에 보내지 않는다', async ($, on) => {
-  const env = await startViewer($, on)
-  const hostPlan = { slug: 'p', isArchived: false, ...PLANNED().p }
-  const state = { snapshot: { plans: [hostPlan], dreamsText: DREAMS, reportHtml: '<h1>드림</h1>', cwd: '/host', root: '/host' } }
-  await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
-  const sentBefore = env.sent.length
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  await ui.press({ key: 'dreams-report' })
-
-  const opened = env.processes[env.processes.length - 1] ?? []
-  expect(opened[0]).toBe('sh')
-  expect(opened).toContain('<h1>드림</h1>')
-  expect(opened.join(' ')).toContain('xdg-open')
-  expect(env.sent).toHaveLength(sentBefore)
-  await ui.unmount()
-})
-
-test('mirror-two-way T8c 작업 세션은 보고서 내용을 상태에 실어 보낸다', async ($, on) => {
-  const env = engine(on, PLANNED())
-  await start($)
-  await $.session.receive(hello())
-
-  const body = env.sent[env.sent.length - 1]?.text.replace(/^SCV-MIRROR STATE /, '') ?? '{}'
-  expect(JSON.parse(body).snapshot.reportHtml).toBe('<h1>드림</h1>')
-})
-
-test('mirror-two-way T8b 작업 세션은 시청자의 open-report 를 받아 자기 보고서를 연다', async ($, on) => {
-  const { processes } = engine(on, PLANNED())
-  await start($)
-  await $.session.receive(hello())
-  const got = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'act', address: 'session_viewer', act: { do: 'open-report' } })) })
-
-  expect(got.consumed).toBe('scv mirror act')
-  expect(processes).toContainEqual(['xdg-open', '/work/scv/dreams/x.html'])
-})
-
 test('mirror-two-way T9 ACT 는 모델에 안 가고, 모델의 SendMessage 는 여전히 검사받는다', async ($, on) => {
   engine(on, PLANNED())
   on('tool.check', () => ({ decision: 'ask' as const }))
   await start($)
-  const got = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'act', address: 'session_x', act: { do: 'open-report' } })) })
+  const got = await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'act', address: 'session_x', act: { do: 'fill', slug: 'p' } })) })
 
   expect(got.consumed).toBe('scv mirror act')
   expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'x', message: 'hi' } } as never)).decision).toBe('ask')
@@ -1886,7 +1810,7 @@ test('mirror-host-name T1 세션 기록에서 이름을 읽고, 이름과 주소
 test('mirror-host-name T2 거울 칸 맨 위에 작업 세션 이름과 주소가 함께 보인다', async ($, on) => {
   await startViewer($, on)
   const hostPlan = { slug: 'p', isArchived: false, ...PLANNED().p }
-  const state = { snapshot: { plans: [hostPlan], dreamsText: DREAMS, cwd: '/host', root: '/host' }, hostName: '맥프로_aitmcenter' }
+  const state = { snapshot: { plans: [hostPlan], cwd: '/host', root: '/host' }, hostName: '맥프로_aitmcenter' }
   await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
 
   expect(await drawnText($)).toContain('거울: 맥프로_aitmcenter (session_host)')
@@ -1896,7 +1820,7 @@ test('mirror-plan-in-view T1 거울 칸은 작업 세션이 보고 있는 계획
   await startViewer($, on)
   const first = { slug: 'a', isArchived: false, ...plan({ title: '대본 통화', status: 'in_progress', steps: ['초안'] }) }
   const second = { slug: 'b', isArchived: false, ...plan({ title: 'STT 연결', status: 'in_progress', steps: ['다리', '확인'] }) }
-  const state = { snapshot: { plans: [first, second], dreamsText: DREAMS, cwd: '/host', root: '/host' }, inView: 'b' }
+  const state = { snapshot: { plans: [first, second], cwd: '/host', root: '/host' }, inView: 'b' }
   await $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
 
   const drawn = await drawnText($)
@@ -2068,7 +1992,7 @@ const MADE_SH = [
 test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계는 순수함수 없음과 앞 단계 함수 두 개 가져다 씀', async ($, on) => {
   const clock = mock.clock(on, { now: 1_000_000 })
   const files = { a: STEP_PLAN(['[x] ', '[~] ', '']) }
-  const env = engine(on, files, DREAMS, undefined, {}, true, { 'INDEX.md': INDEX_MD, 'compare.md': COMPARE_MD })
+  const env = engine(on, files, undefined, {}, true, { 'INDEX.md': INDEX_MD, 'compare.md': COMPARE_MD })
   on('tool.call', () => ({ result: {} }))
   await start($)
   await signal($, 2, 'doing')
@@ -2089,13 +2013,24 @@ test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계�
 
   expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
   expect(await text(ui, /^훅과 절차/)).toBe('훅과 절차 문서만 고침')
-  expect(await text(ui, /^새로 만듦 /)).toBe('새로 만듦 0')
-  expect(await text(ui, /^가져다 씀 /)).toBe('가져다 씀 3')
+  // Step 2 has ended and the detail has moved on to step 3: the flow's lines carry no function list, so only step
+  // 3's detail shows lists now.
+  const all = async (pattern: RegExp) => (await ui.findAll({ type: 'Text', text: pattern })).map(one => one.text)
+  expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 0'])
+  expect(await all(/^가져다 씀 /)).toEqual(['가져다 씀 3'])
+  expect(await all(/^• scv_step_active_plan \(/)).toEqual([])
+  // what it does: once, where step 3's detail describes the function it used
+  expect(await all(/^구현 중인/)).toEqual(['구현 중인 계획 이름 하나를 고른다'])
   expect(await text(ui, /^• scv_step_line$/)).toBe('• scv_step_line')
   expect(await text(ui, /^도구 이름과 계획/)).toBe('도구 이름과 계획 이름으로 매 턴 안내 한 줄을 만든다')
   expect(await text(ui, /^첫 버전이/)).toBe('첫 버전이 둘째 버전보다 낮으면 참(숫자로 비교, 접미사는 무시)')
   // Kept per project, so a new session still shows what each step did.
   expect(env.store.get('functions:/work')).toBeDefined()
+  // The finished step keeps its lists: pressed, its detail under the flow shows what it made.
+  await ui.press({ key: 'step-2' })
+  expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 2'])
+  expect(await all(/^가져다 씀 /)).toEqual(['가져다 씀 0'])
+  expect(await all(/^• scv_step_active_plan \(/)).toEqual(['• scv_step_active_plan (고르기)'])
   await ui.unmount()
 })
 
@@ -2138,7 +2073,7 @@ test('recent-archived T1 보관 기록 날짜가 늦은 계획이 앞, 같은 �
 
 test('recent-archived T2 진행 중 계획이 없으면 칸은 가장 최근에 보관한 계획을 보여 준다', async ($, on) => {
   const record = (date: string) => `---\narchived_at: ${date}\narchived_by: w\nreason: t\n---\n`
-  engine(on, {}, DREAMS, undefined, {
+  engine(on, {}, undefined, {
     '20261025-mirror': { ...plan({ title: '열흘 전 보관한 거울 계획', status: 'done', steps: ['a'] }), record: record('2026-10-25') },
     '20261022-alerts': { ...plan({ title: '오늘 보관한 알림 계획', status: 'done', steps: ['a'] }), record: record('2026-11-02') },
   })
@@ -2228,7 +2163,7 @@ test('picker T1 계획이 64개를 넘으면 목록은 앞의 64개만, 보이�
   const archived = Object.fromEntries(
     Array.from({ length: 70 }, (_, i) => [`2026${String(i).padStart(4, '0')}-a`, { ...plan({ title: `보관 ${i}`, status: 'archived', steps: ['a'] }), record: `archived_at: 2026-10-${String((i % 28) + 1).padStart(2, '0')}T00:00:00Z` }]),
   )
-  engine(on, {}, null, { at: 1_000_000 }, archived)
+  engine(on, {}, { at: 1_000_000 }, archived)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
 
@@ -2413,7 +2348,7 @@ test('your-turn T8 거울 세션도 받은 상태로 사용자 차례 · 배경 
   const send = (live: Record<string, unknown>, sentAt: number) =>
     $.session.receive({
       origin: { kind: 'peer' },
-      text: envelope(mirrorText({ kind: 'state', body: JSON.stringify({ snapshot: { plans: [hostPlan], dreamsText: null, cwd: '/host', root: '/host' }, live, sentAt }) })),
+      text: envelope(mirrorText({ kind: 'state', body: JSON.stringify({ snapshot: { plans: [hostPlan], cwd: '/host', root: '/host' }, live, sentAt }) })),
     })
 
   await send({ isWorking: false, turnStartedAt: 0, tool: null, hasEnded: true }, 1)
@@ -2448,7 +2383,7 @@ const nowEngine = (on: On, isClockMocked = false) => {
   JOB_OUTPUTS.reads = []
   const outputs = JOB_OUTPUTS.files
   const reads = JOB_OUTPUTS.reads
-  const env = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) }, DREAMS, { at: 1_000_000 }, {}, isClockMocked)
+  const env = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) }, { at: 1_000_000 },{}, isClockMocked)
   turnEngine(on)
   agentEngine(on)
   on('fs.stat', (_, e) => {
@@ -2650,7 +2585,7 @@ test('now-view T10 다른 기기에서 보는 화면에도 뒤에서 도는 일�
       mirrorText({
         kind: 'state',
         body: JSON.stringify({
-          snapshot: { plans: [hostPlan], dreamsText: null, cwd: '/host', root: '/host' },
+          snapshot: { plans: [hostPlan], cwd: '/host', root: '/host' },
           live: { isWorking: false, turnStartedAt: 0, tool: null, hasEnded: true },
           jobs,
           doneLog,
@@ -2938,7 +2873,12 @@ test('parallel-steps T8 사용자 차례 · 답 기다림은 진행 중인 단�
 })
 
 // ── step evidence: '끝'에는 증거 · 누르면 증거와 실제 진행 (계획 20261117-wookiya1364-checks-not-comments 4단계) ─────────
-import { judgeEvidence, liveOf } from './model'
+import { backgroundSteps, bigIndexOf, doingWord, evidenceKind, isBackgroundSignal, isDrawable, judgeEvidence, liveOf, proofView, signalAnswer, turnPicture } from './model'
+
+// Three steps: the first names the pure functions it builds; the other two name none, so they have a screen to show.
+const MIXED = ['순수부 만들기 — `fa`, `fb`', '화면 그리기', '훈련 돌리기']
+const NOT_VISIBLE = '증거는 눈으로 볼 수 있는 것만 받습니다 — 화면 사진 · 영상 · 차트(이미지 · html)를 붙이세요. 소스코드와 글 파일은 증거가 아닙니다'
+const NEEDS_SCREEN = '이 단계는 보여 줄 화면이 필요합니다 — 화면 사진 · 영상 · 차트를 evidence 로 붙이세요'
 
 type FakeFile = { text?: string; base64?: string; mtimeMs: number; size?: number; real?: string }
 
@@ -2963,14 +2903,21 @@ const doingWith = ($: Engine, step: number, extra: Record<string, unknown> = {})
 const lastState = (store: Map<string, unknown>, step: number) =>
   ((store.get('signals:/work') as { step: number; state: string }[] | undefined) ?? []).filter(one => one.step === step).pop()?.state
 
-test('step-evidence T11 증거 없는 끝은 거절하고 단계는 진행 중 그대로', async ($, on) => {
-  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+test('step-evidence T11 함수도 그림도 없는 단계의 끝은 거절하고 단계는 진행 중 그대로 — 명령 출력만으로도 못 끝낸다', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
   evidenceFiles(on, {})
   await start($)
   await doingWith($, 2)
-  const answered = await doneWith($, 2, {})
-  expect(answered.deny).toContain('끝에는 증거가 필요합니다')
+  const bare = await doneWith($, 2, {})
+  const outputOnly = await doneWith($, 2, { output: '통과 21 · 실패 0' })
+  expect(bare.deny).toContain(NEEDS_SCREEN)
+  expect(outputOnly.deny).toContain(NEEDS_SCREEN)
+  expect(outputOnly.deny).toContain('output 만으로는 끝낼 수 없습니다')
   expect(lastState(store, 2)).toBe('doing')
+  // 순수 판정: 함수 이름도 파일도 없으면 거절, 출력이 있어도 같다
+  const refused = judgeEvidence([], undefined, [], undefined, [])
+  expect(!refused.isOk && refused.reason.startsWith(NEEDS_SCREEN)).toBe(true)
+  expect(judgeEvidence([], '통과', [], undefined).isOk).toBe(false)
 })
 
 test('step-evidence T12 단계 시작 전에 생긴 파일은 받지 않고, 시작 뒤 파일은 받는다', async ($, on) => {
@@ -2986,45 +2933,310 @@ test('step-evidence T12 단계 시작 전에 생긴 파일은 받지 않고, 시
 
 test('step-evidence T13 프로젝트 밖 · 없는 파일은 이유를 달리해 거절한다', async ($, on) => {
   engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
-  evidenceFiles(on, { '/etc/passwd': { text: 'x', mtimeMs: 9_000_000 }, '/work/link.png': { base64: 'AA', mtimeMs: 9_000_000, real: '/tmp/elsewhere.png' } })
+  evidenceFiles(on, { '/etc/shot.png': { base64: 'AA', mtimeMs: 9_000_000 }, '/work/link.png': { base64: 'AA', mtimeMs: 9_000_000, real: '/tmp/elsewhere.png' } })
   await start($)
   await doingWith($, 1)
-  const outside = await doneWith($, 1, { evidence: ['/etc/passwd'] })
+  const outside = await doneWith($, 1, { evidence: ['/etc/shot.png'] })
   const linked = await doneWith($, 1, { evidence: ['link.png'] })
   const missing = await doneWith($, 1, { evidence: ['missing.png'] })
-  expect(outside.deny).toContain('프로젝트 밖 파일은 증거로 받지 않습니다: /etc/passwd')
+  expect(outside.deny).toContain('프로젝트 밖 파일은 증거로 받지 않습니다: /etc/shot.png')
   expect(linked.deny).toContain('프로젝트 밖 파일은 증거로 받지 않습니다: link.png')
   expect(missing.deny).toContain('증거 파일이 없습니다: missing.png')
   expect(outside.deny).not.toBe(missing.deny)
 })
 
-test('step-evidence T14 명령 출력 발췌도 증거다 — 빈 글은 아니다', async ($, on) => {
-  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+test('step-evidence T14 함수가 있는 단계는 파일 없이 끝난다 — 함수 목록이 증거, 명령 출력은 함께 보일 뿐', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
   evidenceFiles(on, {})
   await start($)
-  expect((await doneWith($, 1, { output: '   ' })).deny).toContain('끝에는 증거가 필요합니다')
-  expect((await doneWith($, 1, { output: '통과 21 · 실패 0' })).deny).toBeUndefined()
-  // 순수 판정: 출력은 끝부분 1200자만 남는다
-  const kept = judgeEvidence([], 'x'.repeat(2000), [], undefined)
-  expect(kept.isOk && kept.evidence.output?.length).toBe(1200)
-})
-
-test('step-evidence T15 끝난 단계를 누르면 그림 · 글 앞부분 · 출력이 보인다', async ($, on) => {
-  const { clock } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
-  evidenceFiles(on, { '/work/shot.png': { base64: 'iVBORw0KGgo=', mtimeMs: 1_200_000 }, '/work/result.txt': { text: '정확도 0.91 · 손실 0.12', mtimeMs: 1_200_000 } })
-  await start($)
   await doingWith($, 1)
-  clock.at = 1_300_000
-  expect((await doneWith($, 1, { evidence: ['shot.png', 'result.txt'], output: '통과 21 · 실패 0' })).deny).toBeUndefined()
+  expect((await doneWith($, 1, {})).deny).toBeUndefined()
+  expect(lastState(store, 1)).toBe('done')
+  expect((store.get('signals:/work') as { evidence?: unknown }[])[0]?.evidence).toEqual({ files: [] })
+  // The finished step's proof names its functions, not a missing file.
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'step-1' })
+  expect(await text(ui, /^화면이 없는 단계/)).toBe('화면이 없는 단계 — 순수 함수 2개가 증거입니다: fa · fb')
+  expect(await text(ui, /^증거 없음/)).toBeUndefined()
+  await ui.unmount()
+  // 순수 판정: 함수 이름이 있으면 파일 없이 통과하고, 출력은 끝부분 1200자만 남는다
+  expect(judgeEvidence([], undefined, [], undefined, ['fa'])).toEqual({ isOk: true, evidence: { files: [] } })
+  const kept = judgeEvidence([], 'x'.repeat(2000), [], undefined, ['fa'])
+  expect(kept.isOk && kept.evidence.output?.length).toBe(1200)
+  expect(judgeEvidence([], '   ', [], undefined, ['fa'])).toEqual({ isOk: true, evidence: { files: [] } })
+})
+
+test('step-evidence T15 끝난 단계를 누르면 그림과 출력이 보이고, 영상 · html · pdf 는 여는 버튼이다', async ($, on) => {
+  const { clock, processes } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
+  evidenceFiles(on, {
+    '/work/shot.png': { base64: 'iVBORw0KGgo=', mtimeMs: 1_200_000 },
+    '/work/run.mp4': { base64: 'AAAA', mtimeMs: 1_200_000 },
+    '/work/chart.html': { text: '<h1>정확도 0.91</h1>', mtimeMs: 1_200_000 },
+    '/work/report.pdf': { base64: 'JVBERi0=', mtimeMs: 1_200_000 },
+  })
+  await start($)
+  await doingWith($, 2)
+  clock.at = 1_300_000
+  expect((await doneWith($, 2, { evidence: ['shot.png', 'run.mp4', 'chart.html', 'report.pdf'], output: '통과 21 · 실패 0' })).deny).toBeUndefined()
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'step-2' })
   const drawn = await drawnText($)
   const pictures = (drawn.match(/data:image\/png;base64,iVBORw0KGgo=/g) ?? []).length
-  const textPart = (drawn.match(/정확도 0\.91 · 손실 0\.12/g) ?? []).length
   const outputPart = (drawn.match(/통과 21 · 실패 0/g) ?? []).length
-  expect([pictures, textPart, outputPart]).toEqual([1, 1, 1])
-  expect(drawn).toContain('▸ shot.png 열기')
+  expect([pictures, outputPart]).toEqual([1, 1])
+  // Only the picture is drawn: a video, a page and a pdf are neither drawn nor read into the pane.
+  expect((drawn.match(/data:image\//g) ?? []).length).toBe(1)
+  expect(drawn).not.toContain('정확도 0.91')
+  for (const name of ['shot.png', 'run.mp4', 'chart.html', 'report.pdf']) expect(drawn).toContain(`▸ ${name} 열기`)
+  await ui.press({ key: 'evidence-2' })
+  expect(processes.some(argv => argv.includes('/work/chart.html'))).toBe(true)
   await ui.unmount()
+})
+
+test('step-evidence T18 소스코드 · 글 · 설정 · 스크립트 파일은 증거로 받지 않는다 — 하나라도 섞이면 거절', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
+  const at = { mtimeMs: 1_200_000 }
+  evidenceFiles(on, { '/work/shot.png': { base64: 'AA', ...at }, '/work/src/view.ts': { text: 'x', ...at }, '/work/notes.md': { text: 'x', ...at }, '/work/run.sh': { text: 'x', ...at } })
+  await start($)
+  await doingWith($, 2)
+  for (const path of ['src/view.ts', 'notes.md', 'run.sh', 'settings.json', 'result.txt', 'train.log', 'page.htm', 'Makefile']) {
+    expect((await doneWith($, 2, { evidence: [path] })).deny).toContain(`${NOT_VISIBLE}: ${path}`)
+  }
+  // One source file among pictures refuses the whole report, and a step that names functions is refused the same.
+  expect((await doneWith($, 2, { evidence: ['shot.png', 'src/view.ts'] })).deny).toContain(`${NOT_VISIBLE}: src/view.ts`)
+  expect((await doneWith($, 1, { evidence: ['src/view.ts'], output: '통과' })).deny).toContain(`${NOT_VISIBLE}: src/view.ts`)
+  expect(lastState(store, 2)).toBe('doing')
+  // 순수: 이름으로 종류를 정한다 — 그림 · 영상 · 문서만, 대소문자 무관
+  expect(['a.png', 'a.JPG', 'a.jpeg', 'a.gif', 'a.webp', 'a.svg'].map(evidenceKind)).toEqual(Array(6).fill('image'))
+  expect(['a.mp4', 'a.webm', 'a.MOV'].map(evidenceKind)).toEqual(Array(3).fill('video'))
+  expect(['a.html', 'a.pdf'].map(evidenceKind)).toEqual(['document', 'document'])
+  expect(['a.ts', 'a.md', 'a.json', 'a.sh', 'a.txt', 'a.htm', 'png', 'a.png.txt'].map(evidenceKind)).toEqual(Array(8).fill(null))
+})
+
+test('step-evidence T19 함수가 없는 단계는 그림 하나로 끝난다 — 영상 · html · pdf 도 받는다', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
+  const at = { mtimeMs: 1_200_000 }
+  evidenceFiles(on, { '/work/shot.png': { base64: 'AA', ...at }, '/work/run.webm': { base64: 'AA', ...at }, '/work/chart.html': { text: '<p>x</p>', ...at } })
+  await start($)
+  await doingWith($, 2)
+  expect((await doneWith($, 2, { evidence: ['shot.png'] })).deny).toBeUndefined()
+  expect(lastState(store, 2)).toBe('done')
+  expect((store.get('signals:/work') as { step: number; evidence?: unknown }[]).find(one => one.step === 2)?.evidence).toEqual({ files: [{ path: 'shot.png', size: 2, kind: 'image' }] })
+  await doingWith($, 3)
+  expect((await doneWith($, 3, { evidence: ['run.webm', 'chart.html'] })).deny).toBeUndefined()
+  expect((store.get('signals:/work') as { step: number; evidence?: { files: { kind: string }[] } }[]).find(one => one.step === 3)?.evidence?.files.map(file => file.kind)).toEqual(['video', 'document'])
+})
+
+test('step-evidence T20 옛 기록에 남은 소스 파일 증거는 여는 버튼으로 나오지 않는다', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
+  evidenceFiles(on, { '/work/shot.png': { base64: 'iVBORw0KGgo=', mtimeMs: 1 } })
+  // A record an older version kept: a source file and a text file beside a picture, and a step with only source files.
+  store.set('signals:/work', [
+    { plan: 'a', step: 2, state: 'done', note: '', at: 1, evidence: { files: [{ path: 'src/view.ts', size: 1, kind: 'other' }, { path: 'shot.png', size: 12, kind: 'image' }, { path: 'result.txt', size: 1, kind: 'text' }] } },
+    { plan: 'a', step: 3, state: 'done', note: '', at: 2, evidence: { files: [{ path: 'src/train.py', size: 1, kind: 'other' }], output: '통과' } },
+  ])
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'step-2' })
+  let drawn = await drawnText($)
+  expect(drawn).toContain('▸ shot.png 열기')
+  expect(drawn).not.toContain('view.ts')
+  expect(drawn).not.toContain('result.txt')
+  await ui.press({ key: 'step-3' })
+  drawn = await drawnText($)
+  expect(drawn).not.toContain('train.py')
+  expect(drawn).toContain('증거 없음 — 이 단계는 끝 보고에 볼 수 있는 증거가 붙지 않았습니다')
+  expect(await ui.find({ type: 'Button', key: 'evidence-0' })).toBeUndefined()
+  await ui.unmount()
+  // 순수: 볼 수 있는 파일만 남고, 종류는 이름으로 다시 정한다
+  expect(proofView({ files: [{ path: 'a.ts', size: 1, kind: 'image' }, { path: 'b.mp4', size: 2, kind: 'image' }] }, [])).toEqual({ files: [{ path: 'b.mp4', size: 2, kind: 'video' }], output: '', note: '', isMissing: false })
+  expect(proofView(undefined, ['fa'])).toEqual({ files: [], output: '', note: '화면이 없는 단계 — 순수 함수 1개가 증거입니다: fa', isMissing: false })
+  expect(proofView(undefined, []).isMissing).toBe(true)
+})
+
+test('step-evidence T23 증거 그림의 크게 보기를 누르면 창 전체가 그 그림이 되고, 닫으면 단계 흐름으로 돌아온다', async ($, on) => {
+  const { store, processes } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
+  evidenceFiles(on, { '/work/shot.png': { base64: 'iVBORw0KGgo=', mtimeMs: 1 }, '/work/chart.svg': { base64: 'PHN2Zy8+', mtimeMs: 1 }, '/work/run.mp4': { base64: 'AA', mtimeMs: 1 } })
+  store.set('signals:/work', [
+    { plan: 'a', step: 2, state: 'done', note: '', at: 1, evidence: { files: [{ path: 'shot.png', size: 12, kind: 'image' }, { path: 'run.mp4', size: 2, kind: 'video' }, { path: 'chart.svg', size: 8, kind: 'image' }] } },
+  ])
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'step-2' })
+  // 그림에만 크게 보기가 붙는다 — 영상은 여는 버튼뿐
+  expect(await ui.find({ type: 'Button', key: 'evidence-big-0' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'evidence-big-1' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'evidence-big-2' })).toBeDefined()
+  const small = (await ui.findAll({ type: 'Svg' })).map(one => String(one.props.source ?? ''))
+  expect(small.some(source => source.includes('width="1280"'))).toBe(false)
+
+  await ui.press({ key: 'evidence-big-0' })
+  let drawn = await drawnText($)
+  expect(drawn).toContain('증거 크게 보기 — 2. 화면 그리기')
+  expect(drawn).toContain('shot.png (1/2)')
+  expect(drawn).not.toContain('단계 흐름')
+  const big = await ui.findAll({ type: 'Svg' })
+  expect(big.length).toBe(1)
+  expect(String(big[0]?.props.source ?? '')).toContain('width="1280" height="800"')
+  expect(String(big[0]?.props.source ?? '')).toContain('data:image/png;base64,iVBORw0KGgo=')
+  expect(big[0]?.props.width).toBeUndefined()
+
+  // 다음은 영상을 건너뛰어 둘째 그림으로, 한 번 더 누르면 처음으로 돈다
+  await ui.press({ key: 'big-next' })
+  drawn = await drawnText($)
+  expect(drawn).toContain('chart.svg (2/2)')
+  expect(drawn).toContain('data:image/svg+xml;base64,PHN2Zy8+')
+  await ui.press({ key: 'big-next' })
+  expect(await drawnText($)).toContain('shot.png (1/2)')
+  await ui.press({ key: 'big-prev' })
+  expect(await drawnText($)).toContain('chart.svg (2/2)')
+  await ui.press({ key: 'big-open' })
+  expect(processes.some(argv => argv.includes('/work/chart.svg'))).toBe(true)
+
+  await ui.press({ key: 'big-close' })
+  drawn = await drawnText($)
+  expect(drawn).toContain('단계 흐름')
+  expect(drawn).not.toContain('증거 크게 보기')
+  expect(drawn).toContain('▸ shot.png 열기')
+  // 크게 본 채로 다른 단계를 고르면 크게 보기는 풀린다
+  await ui.press({ key: 'evidence-big-2' })
+  expect(await drawnText($)).toContain('증거 크게 보기')
+  await ui.press({ key: 'big-back' })
+  await ui.press({ key: 'step-1' })
+  expect(await drawnText($)).not.toContain('증거 크게 보기')
+  await ui.unmount()
+
+  // 순수: 어느 그림을 크게 보는지, 다음 · 이전
+  const files = [{ path: 'a.png', size: 1, kind: 'image' }, { path: 'b.mp4', size: 1, kind: 'video' }, { path: 'c.svg', size: 1, kind: 'image' }, { path: 'd.png', size: 200 * 1024, kind: 'image' }] as const
+  expect(files.map(isDrawable)).toEqual([true, false, true, false])
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 2 }, 'a', 1, files)).toBe(2)
+  expect(bigIndexOf(null, 'a', 1, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 0 }, 'b', 1, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 0 }, 'a', 2, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 0 }, 'a', null, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 1 }, 'a', 1, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 3 }, 'a', 1, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 9 }, 'a', 1, files)).toBeNull()
+  expect([turnPicture(0, files, 1), turnPicture(2, files, 1), turnPicture(0, files, -1), turnPicture(1, files, 1)]).toEqual([2, 0, 2, 1])
+  expect(turnPicture(0, [files[0]], 1)).toBe(0)
+})
+
+test('step-evidence T21 끝난 단계의 함수 목록은 단계를 눌렀을 때 아래 상세에 그대로 — 단계 흐름 줄에는 문장과 상태만', async ($, on) => {
+  const pipeline = ['`fa` | 글을 읽어 값으로 정리한다 | 글 → 값 | 순수', '`fb` | 값을 줄로 만든다 | 값 → 줄 | 순수']
+  const files = { a: plan({ title: 'p', status: 'in_progress', steps: MIXED, pipeline }) }
+  engine(on, files)
+  evidenceFiles(on, { '/work/shot.png': { base64: 'AA', mtimeMs: 1_200_000 } })
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  await doingWith($, 1)
+  await $.tool.call({ tool: 'Write', file_path: '/work/src/pure.sh', content: '# @pure\n# 역할: 글을 읽어 값으로 정리한다\n# 종류: 읽기\nfa() {\n  :\n}\n' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const all = async (pattern: RegExp) => (await ui.findAll({ type: 'Text', text: pattern })).map(one => one.text)
+  // In progress: the list is in the step's detail.
+  expect(await all(/^• fa \(/)).toEqual(['• fa (읽기)'])
+  expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 1'])
+
+  // Done, and the work moves to step 2: the detail is now step 2's. Step 1's line in the flow is its sentence and
+  // its state alone — no function list under it.
+  await doneWith($, 1, {})
+  await doingWith($, 2)
+  expect(await text(ui, /^2\. 화면 그리기 — /)).toBe('2. 화면 그리기 — 진행 중')
+  expect(await all(/^• f[ab]/)).toEqual([])
+  expect(await all(/^값을 줄로/)).toEqual([])
+  expect(await all(/^새로 만듦 /)).toEqual([])
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
+  await doneWith($, 2, { evidence: ['shot.png'] })
+  await doingWith($, 3)
+  await doneWith($, 3, { evidence: ['shot.png'] })
+  // Every step is done: no detail is open, and the flow shows no function at all.
+  expect(await text(ui, /^\d\. .* — 완료$/)).toBeUndefined()
+  expect(await all(/^• f[ab]/)).toEqual([])
+  expect(await all(/^하는 일$/)).toEqual([])
+  expect(await all(/^새로 만듦 /)).toEqual([])
+  // Pressed, the finished step shows its detail under the flow: what it builds, and what it made — kept after done.
+  await ui.press({ key: 'step-1' })
+  expect(await text(ui, /^1\. 순수부 만들기 — /)).toBe('1. 순수부 만들기 — 완료')
+  expect(await all(/^하는 일$/)).toEqual(['하는 일'])
+  expect(await all(/^• fa \(/)).toEqual(['• fa (읽기)'])
+  expect(await all(/^• fb/)).toEqual(['• fb'])
+  expect(await all(/^값을 줄로/)).toEqual(['값을 줄로 만든다'])
+  expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 1'])
+  // A finished step with no function says so in its detail, and still lists nothing on its line.
+  await ui.press({ key: 'step-2' })
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
+  expect(await all(/^• f[ab]/)).toEqual([])
+  await ui.unmount()
+})
+
+test('step-evidence T22 뒤에서 도는 단계는 진행 중(백그라운드) — background 인자 · log · url 어느 것이든, 단계마다 따로', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, { '/work/train.log': { text: 'epoch 1/10\n', mtimeMs: 1_100_000 } })
+  await start($)
+  const front = await doingWith($, 1)
+  const byFlag = await doingWith($, 2, { background: true })
+  const byLog = await doingWith($, 3, { log: 'train.log' })
+  const byUrl = await doingWith($, 4, { url: 'https://example.test/run/7' })
+  expect(String(front.result)).toContain('진행 중: 1단계')
+  expect(String(front.result)).not.toContain('백그라운드')
+  expect(String(byFlag.result)).toContain('진행 중: 1단계 · 진행 중(백그라운드): 2단계')
+  expect(String(byLog.result)).toContain('진행 중: 1단계 · 진행 중(백그라운드): 2 · 3단계')
+  expect(String(byUrl.result)).toContain('진행 중: 1단계 · 진행 중(백그라운드): 2~4단계')
+  expect((store.get('signals:/work') as { step: number; background?: boolean }[]).map(one => one.background)).toEqual([undefined, true, undefined, undefined])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const lines = (await ui.findAll({ type: 'Text', text: /지금 여기/ })).map(one => one.text)
+  expect(lines).toEqual(['진행 중  ◀ 지금 여기', '진행 중(백그라운드)  ◀ 지금 여기', '진행 중(백그라운드)  ◀ 지금 여기', '진행 중(백그라운드)  ◀ 지금 여기'])
+  await ui.press({ key: 'step-2' })
+  expect(await text(ui, /^2\. b — /)).toBe('2. b — 진행 중(백그라운드)')
+  await ui.press({ key: 'step-1' })
+  expect(await text(ui, /^1\. a — /)).toBe('1. a — 진행 중')
+  // false, or anything that is not true, is the conversation's own work; a step that ends leaves the background.
+  await doingWith($, 5, { background: false })
+  await doneWith($, 2, {})
+  expect((await ui.findAll({ type: 'Text', text: /지금 여기/ })).map(one => one.text)).toEqual([
+    '진행 중  ◀ 지금 여기',
+    '진행 중(백그라운드)  ◀ 지금 여기',
+    '진행 중(백그라운드)  ◀ 지금 여기',
+    '진행 중  ◀ 지금 여기',
+  ])
+  await ui.unmount()
+
+  // 순수: 낱말 · 판정 · 답 글
+  expect([doingWord(false), doingWord(true)]).toEqual(['진행 중', '진행 중(백그라운드)'])
+  const sig = (extra: Record<string, unknown>) => ({ plan: 'a', step: 1, state: 'doing' as const, note: '', at: 0, ...extra })
+  expect([sig({}), sig({ background: true }), sig({ source: { log: 'x.log' } }), sig({ source: { url: 'https://x.test' } }), sig({ background: false })].map(isBackgroundSignal)).toEqual([false, true, true, true, false])
+  expect(isBackgroundSignal({ ...sig({ background: true }), state: 'done' })).toBe(false)
+  expect(isBackgroundSignal({ ...sig({ background: true }), state: 'blocked' })).toBe(false)
+  expect(isBackgroundSignal(undefined)).toBe(false)
+  expect(backgroundSteps([sig({}), { ...sig({ background: true }), step: 3 }, { ...sig({ source: { log: 'l' } }), step: 2 }, { ...sig({ background: true }), plan: 'other', step: 5 }], 'a')).toEqual([2, 3])
+  expect(applySignal([], { plan: 'a', step: 1, state: 'doing', background: true }, 5)).toEqual([{ plan: 'a', step: 1, state: 'doing', note: '', at: 5, background: true }])
+  expect(applySignal([], { plan: 'a', step: 1, state: 'done', background: true }, 5)).toEqual([{ plan: 'a', step: 1, state: 'done', note: '', at: 5 }])
+  const stages = [st('a', 'doing'), st('b', 'doing'), st('c', 'waiting')]
+  expect(signalAnswer({ plan: 'a', step: 2, state: 'doing' }, stages, [2])).toBe('기록함: a 2단계 시작 — 진행 0/3 · 진행 중: 1단계 · 진행 중(백그라운드): 2단계')
+  expect(signalAnswer({ plan: 'a', step: 2, state: 'doing' }, stages, [1, 2])).toBe('기록함: a 2단계 시작 — 진행 0/3 · 진행 중(백그라운드): 1 · 2단계')
+  expect(signalAnswer({ plan: 'a', step: 2, state: 'doing' }, stages)).toBe('기록함: a 2단계 시작 — 진행 0/3 · 진행 중: 1 · 2단계')
+})
+
+test('step-evidence T23 차례가 끝나도 뒤에서 도는 단계는 사용자 차례가 아니라 진행 중(백그라운드)로 남는다 — 다른 단계는 전처럼 사용자 차례', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  evidenceFiles(on, {})
+  turnEngine(on)
+  await start($)
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await doingWith($, 1)
+  await doingWith($, 2, { background: true })
+  await turnEnd($, 'answer', 5_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.findAll({ type: 'Text', text: /지금 여기/ })).map(one => one.text)).toEqual(['사용자 차례  ◀ 지금 여기', '진행 중(백그라운드)  ◀ 지금 여기'])
+  expect(String(await text(ui, /단계 사용자 차례/)).startsWith('1단계 사용자 차례 · 2단계 진행 중 · ')).toBe(true)
+  await ui.unmount()
+
+  // 순수: 뒤에서 도는 단계만 그대로 두고, 일하는 중 · 막힘의 덧칠은 전과 같다
+  const stages = [st('a', 'done'), st('b', 'doing'), st('c', 'doing'), st('d', 'blocked'), st('e', 'waiting')]
+  expect(applyTurn(stages, 'yourTurn', [3]).map(stage => stage.state)).toEqual(['done', 'yourTurn', 'doing', 'blocked', 'waiting'])
+  expect(applyTurn(stages, 'yourTurn').map(stage => stage.state)).toEqual(['done', 'yourTurn', 'yourTurn', 'blocked', 'waiting'])
+  expect(applyTurn(stages, 'working', [3]).map(stage => stage.state)).toEqual(['done', 'doing', 'doing', 'blocked', 'waiting'])
+  expect(applyBlocks(stages, [{ kind: 'waiting', title: '', detail: '' }]).map(stage => stage.state)).toEqual(['done', 'blocked', 'blocked', 'blocked', 'waiting'])
 })
 
 test('step-evidence T16 진행 중 단계를 누르면 로그 최근 줄 · 진행률 · 주소 버튼이 보이고 주소는 읽지 않는다', async ($, on) => {
@@ -3607,7 +3819,7 @@ test('light T5 창의 한 줄과 끄기 버튼 — 끄면 기준을 넘어도 �
   withUsage($, on, 62, kit)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await drawnText($)).toContain('대화가 길어지면(50%) 자동으로 가볍게 함')
+  expect(await drawnText($)).toContain('컨텍스트가 50% 를 넘으면 자동으로 요약함 — 비우지 않음')
   await ui.press({ key: 'light-toggle' })
   expect(await drawnText($)).toContain('대화가 길어져도 그대로 둠')
   expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
@@ -3626,6 +3838,142 @@ test('light T6 사람이 친 정리나 엔진의 자동 정리는 건드리지 �
   await ($.session as unknown as { compact: (e: unknown) => Promise<unknown> }).compact({ trigger: 'manual', messages: SAID })
 
   expect(kit.compactions).toEqual([{ trigger: 'manual', instructions: undefined }])
+})
+
+
+// ── pane 0.5.0: the mark on a bar · the folder and branch the session works in ───
+import { LIGHT_MAX, LIGHT_MIN, branchOfHead, gitDirOf, lightBarSvg, moveLight, parseBranches, shortPath, switchNote } from './model'
+
+test('light T7 기준 막대 — ◀ ▶ 로 5% 씩 옮기고, 옮긴 기준이 남고, 그 기준으로 요약한다', async ($, on) => {
+  expect(moveLight(DEFAULT_LIGHT, 55)).toEqual({ isOn: true, percent: 55 })
+  expect(moveLight(DEFAULT_LIGHT, 57)).toEqual({ isOn: true, percent: 55 })
+  expect(moveLight(DEFAULT_LIGHT, 0).percent).toBe(LIGHT_MIN)
+  expect(moveLight(DEFAULT_LIGHT, 200).percent).toBe(LIGHT_MAX)
+  expect(lightBarSvg(50, 62)).toContain('#f85149')
+  expect(lightBarSvg(70, 62)).toContain('#4f8cff')
+  expect(lightBarSvg(70, null)).not.toContain('#4f8cff')
+
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 62, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await drawnText($)).toContain('기준 50%')
+  await ui.press({ key: 'light-up' })
+  await ui.press({ key: 'light-up' })
+  await ui.press({ key: 'light-up' })
+  await ui.press({ key: 'light-up' })
+  expect(await drawnText($)).toContain('컨텍스트가 70% 를 넘으면 자동으로 요약함')
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: true, percent: 70 })
+  expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('요약 기준 70% · 지금 62%')
+  await endTurn($)
+  await settle()
+  expect(kit.compactions).toHaveLength(0)
+  await ui.press({ key: 'light-down' })
+  await ui.press({ key: 'light-down' })
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: true, percent: 60 })
+  await endTurn($)
+  await settle()
+  expect(kit.compactions).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('place T1 순수부 — 브랜치 읽기 · 워크트리 · 목록 · 폴더 줄임 · 바꾼 뒤 한 줄', async () => {
+  expect(branchOfHead('ref: refs/heads/feat/x\n')).toEqual({ name: 'feat/x', isBranch: true })
+  expect(branchOfHead('0123456789abcdef0123456789abcdef01234567\n')).toEqual({ name: '0123456', isBranch: false })
+  expect(branchOfHead('')).toBe(null)
+  expect(branchOfHead(null)).toBe(null)
+  expect(gitDirOf('gitdir: /repo/.git/worktrees/w\n', '/w')).toBe('/repo/.git/worktrees/w')
+  expect(gitDirOf('gitdir: ../.git/modules/m\n', '/repo/m')).toBe('/repo/m/../.git/modules/m')
+  expect(gitDirOf(null, '/w')).toBe(null)
+  expect(parseBranches('main\n  feat/x\n(HEAD detached at 0123456)\nmain\n\n')).toEqual(['main', 'feat/x'])
+  expect(shortPath('/home/u/work/app', '/home/u')).toBe('~/work/app')
+  expect(shortPath('/home/u', '/home/u')).toBe('~')
+  expect(shortPath('/home/user2/app', '/home/u')).toBe('/home/user2/app')
+  expect(shortPath('/work', null)).toBe('/work')
+  expect(switchNote({ from: 'main', to: 'feat/x', exitCode: 0, stderr: '' })).toBe('브랜치를 바꿈: main → feat/x')
+  expect(switchNote({ from: 'main', to: 'feat/x', exitCode: 1, stderr: '\nerror: 바꿀 수 없음\n다음 줄' })).toBe('브랜치를 바꾸지 못함 — error: 바꿀 수 없음')
+  expect(switchNote({ from: 'main', to: 'feat/x', exitCode: null, stderr: '' })).toBe('브랜치를 바꾸지 못함')
+})
+
+test('place T2 창 맨 위에 폴더와 브랜치 — 브랜치를 누르면 목록이 열리고, 고르면 git 이 바꾼다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/main\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^\/work$/)).toBe('/work')
+  expect((await ui.find({ type: 'Button', key: 'branch-open' }))?.props.label).toBe('main ▾')
+  expect(await ui.find({ type: 'Select', key: 'branch-pick' })).toBeUndefined()
+
+  kit.proc.stdout = 'main\nfeat/x\n'
+  await ui.press({ key: 'branch-open' })
+  expect(kit.processes.at(-1)).toEqual(['git', 'branch', '--format=%(refname:short)'])
+  expect(kit.runs.at(-1)?.cwd).toBe('/work')
+  const picker = await ui.find({ type: 'Select', key: 'branch-pick' })
+  expect(picker?.props.value).toBe('main')
+  expect((picker?.props.options as { value: string }[]).map(one => one.value)).toEqual(['main', 'feat/x'])
+
+  kit.proc.stdout = ''
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/feat/x\n'
+  await ui.select({ key: 'branch-pick', value: 'feat/x' })
+  await settle()
+  expect(kit.processes.at(-1)).toEqual(['git', 'switch', 'feat/x'])
+  expect(kit.runs.at(-1)?.cwd).toBe('/work')
+  expect((await ui.find({ type: 'Button', key: 'branch-open' }))?.props.label).toBe('feat/x ▾')
+  expect(await drawnText($)).toContain('브랜치를 바꿈: main → feat/x')
+  expect(await ui.find({ type: 'Select', key: 'branch-pick' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('place T3 git 이 거절하면 이유를 보이고 브랜치는 그대로 — 턴이 도는 중에는 바꾸지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  withProject(kit)
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/main\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  kit.proc.stdout = 'main\nfeat/x\n'
+  await ui.press({ key: 'branch-open' })
+  kit.procEnd.exitCode = 1
+  kit.procEnd.stderr = 'error: Your local changes would be overwritten\n'
+  await ui.select({ key: 'branch-pick', value: 'feat/x' })
+  await settle()
+  expect(await drawnText($)).toContain('브랜치를 바꾸지 못함 — error: Your local changes would be overwritten')
+  expect((await ui.find({ type: 'Button', key: 'branch-open' }))?.props.label).toBe('main ▾')
+
+  kit.procEnd.exitCode = 0
+  kit.procEnd.stderr = ''
+  await ui.press({ key: 'branch-open' })
+  await $.turn.start({ text: '일', turnId: 't9' })
+  const before = kit.processes.length
+  await ui.select({ key: 'branch-pick', value: 'feat/x' })
+  await settle()
+  expect(kit.processes.slice(before).some(argv => argv[1] === 'switch')).toBe(false)
+  expect(await drawnText($)).toContain('턴이 도는 중에는 브랜치를 바꾸지 않음')
+  await ui.unmount()
+})
+
+test('place T4 git 저장소가 아니면 폴더만 보인다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^\/work$/)).toBe('/work')
+  expect(await ui.find({ type: 'Button', key: 'branch-open' })).toBeUndefined()
+  expect(await drawnText($)).not.toContain('브랜치')
+  await ui.unmount()
+})
+
+test('place T5 워크트리는 .git 파일을 따라가 읽고, 브랜치 없는 커밋은 그 앞 일곱 글자로 보인다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  kit.extra['/work/.git'] = 'gitdir: /repo/.git/worktrees/w\n'
+  kit.extra['/repo/.git/worktrees/w/HEAD'] = '0123456789abcdef0123456789abcdef01234567\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Button', key: 'branch-open' }))?.props.label).toBe('0123456 (브랜치 없음) ▾')
+  await ui.unmount()
 })
 
 
@@ -3661,7 +4009,7 @@ const STOP_AT = (token: string, step: number, of: number, tooth: string, does: s
   ].join('\n')
 // a project with the gears above, SCV installed, and SCV's `ask` answering for each gear
 const directKit = (on: On, isClockMocked = false) => {
-  const kit = engine(on, {}, DREAMS, { at: 1_000_000 }, {}, isClockMocked)
+  const kit = engine(on, {}, { at: 1_000_000 },{}, isClockMocked)
   withProject(kit, { index: DIRECT })
   Object.assign(kit.asks, DIRECT_ASKS)
 

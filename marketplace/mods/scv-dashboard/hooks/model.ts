@@ -3,10 +3,10 @@
 
 import type {
   AgentState,
+  BigProof,
   Block,
   Catalog,
   DoneEntry,
-  Dreams,
   Evidence,
   EvidenceFile,
   Job,
@@ -311,8 +311,10 @@ export const turnStateOf = (input: { isWorking: boolean; hasEnded: boolean; bloc
 }
 
 // On the person's turn the step in progress says so; a blocked step and every other step stay as they are.
-export const applyTurn = (stages: readonly Stage[], turn: TurnState): Stage[] =>
-  turn === 'yourTurn' ? stages.map(stage => (stage.state === 'doing' ? { ...stage, state: 'yourTurn' } : stage)) : [...stages]
+// background: the steps (by number) that run behind the conversation — such a step is still at work when the turn
+// ends, so it stays in progress and is not handed to the person.
+export const applyTurn = (stages: readonly Stage[], turn: TurnState, background: readonly number[] = []): Stage[] =>
+  turn === 'yourTurn' ? stages.map((stage, i) => (stage.state === 'doing' && !background.includes(i + 1) ? { ...stage, state: 'yourTurn' } : stage)) : [...stages]
 
 // What a step builds, said as the plan's pipeline: the rows it names, else the rows its words mention.
 export const stageRole = (stage: Stage, pipeline: readonly PipelineStep[]): PipelineStep[] => {
@@ -485,6 +487,32 @@ export const doneFunctions = (
   }
 }
 
+export type StepFunctionView = { builds: FunctionLine[]; did: StepFunctions | undefined; done: { made: DoneFunction[]; used: DoneFunction[] } }
+
+// One step's functions as the pane shows them in the step's detail: what it builds (하는 일), and what it made and
+// used. A finished step keeps them — pressed, its detail shows the same lists. log: what each step wrote, by
+// '<plan>#<index>'.
+export const stepFunctionView = (
+  index: number,
+  stages: readonly Stage[],
+  slug: string,
+  pipeline: readonly PipelineStep[],
+  catalog: Catalog,
+  log: Readonly<Record<string, StepFunctions>>,
+): StepFunctionView => {
+  const stage = stages[index]
+  const did = log[`${slug}#${index}`]
+  // The plan's other steps that made functions, so a call to one is described by the step that made it.
+  const earlier = stages.flatMap((_, i) => {
+    const found = i === index ? undefined : log[`${slug}#${i}`]
+
+    return found && found.made.length > 0 ? [{ step: i + 1, made: found.made }] : []
+  })
+  const builds = stage ? stageFunctions(stage, pipeline, catalog, earlier.flatMap(one => one.made).concat(did?.made ?? [])) : []
+
+  return { builds, did, done: doneFunctions(did, builds.map(line => line.name), catalog, earlier) }
+}
+
 // The code a tool call writes: Write's content, Edit's new_string, MultiEdit's new_strings. Files under the project's
 // scv folder (plans, the dictionary, records) only name functions, they do not call them, so they are left out.
 export const writtenCode = (tool: string, input: Record<string, unknown>): string | null => {
@@ -634,7 +662,7 @@ export const STEP_TOOL = 'mcp__scv-dashboard__scv_step'
 
 const SIGNAL_STATES = ['doing', 'done', 'blocked'] as const
 
-export type SignalInput = { plan: string; step: number; state: string; note?: string; evidence?: Evidence; source?: StepSource }
+export type SignalInput = { plan: string; step: number; state: string; note?: string; evidence?: Evidence; source?: StepSource; background?: boolean }
 
 export type SignalCheck = { isOk: true } | { isOk: false; reason: string }
 
@@ -688,14 +716,31 @@ export const nextStarted = (started: readonly { plan: string; step: number }[], 
 
 const SIGNAL_WORD: Record<string, string> = { doing: '시작', done: '끝', blocked: '막힘' }
 
+// What a step in progress is called: work that runs behind the conversation says so.
+export const doingWord = (isBackground: boolean) => (isBackground ? '진행 중(백그라운드)' : '진행 중')
+
+// A step in progress runs behind the conversation when its start said so (background), or named a log or a page
+// to watch it by.
+export const isBackgroundSignal = (signal: StepSignal | undefined): boolean =>
+  signal?.state === 'doing' && (signal.background === true || Boolean(signal.source?.log) || Boolean(signal.source?.url))
+
+// The steps of a plan now running behind the conversation, by number: each step is judged by its own newest signal.
+export const backgroundSteps = (signals: readonly StepSignal[], plan: string): number[] =>
+  [...new Set(signals.filter(signal => signal.plan === plan).map(signal => signal.step))]
+    .filter(step => isBackgroundSignal(lastSignalOf(signals, plan, step)))
+    .sort((a, b) => a - b)
+
 // What a taken signal answers: the step and its new state, how many steps are done, and every step now in
 // progress — so a sender that named the wrong step sees it at once. stages: the plan's stages after the signal.
-export const signalAnswer = (signal: { plan: string; step: number; state: string }, stages: readonly Stage[] | undefined) => {
+// background: the steps running behind the conversation, named apart from those worked on in it.
+export const signalAnswer = (signal: { plan: string; step: number; state: string }, stages: readonly Stage[] | undefined, background: readonly number[] = []) => {
   const said = `기록함: ${signal.plan} ${signal.step}단계 ${SIGNAL_WORD[signal.state] ?? signal.state}`
   if (!stages) return said
   const doing = stages.flatMap((stage, i) => (stage.state === 'doing' ? [i + 1] : []))
+  const groups = [doing.filter(step => !background.includes(step)), doing.filter(step => background.includes(step))]
+  const where = groups.map((steps, i) => (steps.length > 0 ? ` · ${doingWord(i === 1)}: ${stepRanges(steps)}단계` : '')).join('')
 
-  return `${said} — 진행 ${stages.filter(stage => stage.state === 'done').length}/${stages.length}${doing.length > 0 ? ` · 진행 중: ${stepRanges(doing)}단계` : ''}`
+  return `${said} — 진행 ${stages.filter(stage => stage.state === 'done').length}/${stages.length}${where}`
 }
 
 // The newest signal for a step replaces the one before it; a step still open keeps the time it started.
@@ -714,6 +759,7 @@ export const applySignal = (signals: readonly StepSignal[], input: SignalInput, 
       ...(startedAt !== undefined ? { startedAt } : {}),
       ...(input.state === 'done' && input.evidence ? { evidence: input.evidence } : {}),
       ...(input.state === 'doing' && input.source && (input.source.log || input.source.url) ? { source: input.source } : {}),
+      ...(input.state === 'doing' && input.background === true ? { background: true } : {}),
     },
   ].slice(-300)
 }
@@ -724,20 +770,41 @@ export type FileFact = { path: string; isFound: boolean; isInside: boolean; mtim
 export type EvidenceCheck = { isOk: true; evidence: Evidence } | { isOk: false; reason: string }
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i
-const TEXT_EXT = /\.(txt|log|md|json|csv|tsv|html?|xml|ya?ml|out)$/i
+const VIDEO_EXT = /\.(mp4|webm|mov)$/i
+const DOCUMENT_EXT = /\.(html|pdf)$/i
 
-// The kind a piece of evidence is drawn as, by its name: a picture, text, or a file to open.
-export const evidenceKind = (path: string): EvidenceFile['kind'] => (IMAGE_EXT.test(path) ? 'image' : TEXT_EXT.test(path) ? 'text' : 'other')
+// The kind a piece of evidence is shown as, by its name: a picture is drawn; a video or a page (html, pdf) is opened.
+// null: nothing a person looks at — code, text, settings, a script — so it is not evidence.
+export const evidenceKind = (path: string): EvidenceFile['kind'] | null =>
+  IMAGE_EXT.test(path) ? 'image' : VIDEO_EXT.test(path) ? 'video' : DOCUMENT_EXT.test(path) ? 'document' : null
 
 // A command output is kept to this many characters: enough to see the result, not the whole log.
 const OUTPUT_ROOM = 1200
 
-// Whether a step's "done" carries real proof: project files made or changed after the step began, or a command's output.
-// No proof, a missing file, a file outside the project, or one older than the step's start is refused with what to send.
-export const judgeEvidence = (paths: readonly string[], output: string | undefined, facts: readonly FileFact[], startedAt?: number): EvidenceCheck => {
+// Whether a step's "done" carries proof a person can look at. A file that is not a picture, a video or a page is
+// refused, whatever else comes with it. Then either a file is sent, or the step's plan line names pure functions
+// (functions) and that list is its proof; a command's output is kept and shown, but passes nothing by itself.
+// A missing file, a file outside the project, or one older than the step's start is refused with what to send.
+export const judgeEvidence = (
+  paths: readonly string[],
+  output: string | undefined,
+  facts: readonly FileFact[],
+  startedAt?: number,
+  functions: readonly string[] = [],
+): EvidenceCheck => {
   const text = (output ?? '').trim()
-  if (paths.length === 0 && !text) {
-    return { isOk: false, reason: '끝에는 증거가 필요합니다 — evidence 에 이 단계가 만든 프로젝트 안 파일(화면 · 결과), 또는 output 에 명령 출력 발췌를 함께 보내세요' }
+  const unseen = paths.find(path => evidenceKind(path) === null)
+  if (unseen !== undefined) {
+    return {
+      isOk: false,
+      reason: `증거는 눈으로 볼 수 있는 것만 받습니다 — 화면 사진 · 영상 · 차트(이미지 · html)를 붙이세요. 소스코드와 글 파일은 증거가 아닙니다: ${unseen} (받는 파일: png · jpg · jpeg · gif · webp · svg · mp4 · webm · mov · html · pdf)`,
+    }
+  }
+  if (paths.length === 0 && functions.length === 0) {
+    return {
+      isOk: false,
+      reason: '이 단계는 보여 줄 화면이 필요합니다 — 화면 사진 · 영상 · 차트를 evidence 로 붙이세요. 계획의 이 단계 줄에 순수 함수 이름이 없어 함수 목록은 증거가 되지 못하고, output 만으로는 끝낼 수 없습니다',
+    }
   }
   const files: EvidenceFile[] = []
   for (const path of paths) {
@@ -747,10 +814,33 @@ export const judgeEvidence = (paths: readonly string[], output: string | undefin
     if (startedAt !== undefined && fact.mtimeMs < startedAt) {
       return { isOk: false, reason: `단계 시작 전에 생긴 파일입니다(옛 파일): ${path} — 이 단계에서 만들거나 바꾼 결과를 보내세요` }
     }
-    files.push({ path, size: fact.size, kind: evidenceKind(path) })
+    files.push({ path, size: fact.size, kind: evidenceKind(path) ?? 'image' })
   }
 
   return { isOk: true, evidence: { files, ...(text ? { output: text.slice(-OUTPUT_ROOM) } : {}) } }
+}
+
+export type ProofView = { files: EvidenceFile[]; output: string; note: string; isMissing: boolean }
+
+// What a finished step shows as its proof: the files a person can look at (a record kept by an older version may
+// name a source file — that one is left out, so no button opens code), the command output, and one line when no
+// file stands — the step's pure functions are its proof (functions: the names its plan line gives), or it has none
+// (isMissing).
+export const proofView = (evidence: Evidence | undefined, functions: readonly string[]): ProofView => {
+  const files = (evidence?.files ?? []).flatMap(file => {
+    const kind = evidenceKind(file.path)
+
+    return kind ? [{ ...file, kind }] : []
+  })
+  const isMissing = files.length === 0 && functions.length === 0
+  const note =
+    files.length > 0
+      ? ''
+      : isMissing
+        ? '증거 없음 — 이 단계는 끝 보고에 볼 수 있는 증거가 붙지 않았습니다'
+        : `화면이 없는 단계 — 순수 함수 ${functions.length}개가 증거입니다: ${functions.join(' · ')}`
+
+  return { files, output: evidence?.output ?? '', note, isMissing }
 }
 
 // A running step's live view: the last lines of its log as a person would see them, and how far along it is when a
@@ -781,6 +871,33 @@ export const imageSvg = (base64: string, path: string, width = 320, height = 200
   const mime = ext === 'jpg' ? 'jpeg' : ext === 'svg' ? 'svg+xml' : ext
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><image href="data:image/${mime};base64,${base64}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet"/></svg>`
+}
+
+// The box a proof picture is drawn in when a person asks to see it large: wider than a pane, so the surface draws
+// it at the pane's whole width.
+export const BIG_WIDTH = 1280
+export const BIG_HEIGHT = 800
+
+// A proof file the pane can draw itself: a picture small enough.
+export const isDrawable = (file: EvidenceFile) => file.kind === 'image' && file.size <= IMAGE_DRAW_BYTES
+
+// The place (among a step's proof files) of the picture shown large now — null when nothing was asked, another plan
+// or step is in view, or that place holds nothing the pane can draw.
+export const bigIndexOf = (big: BigProof | null, slug: string, step: number | null, files: readonly EvidenceFile[]): number | null => {
+  if (!big || step === null || big.plan !== slug || big.step !== step) return null
+  const file = files[big.index]
+
+  return file && isDrawable(file) ? big.index : null
+}
+
+// The next (1) or the one before (-1) among the pictures the pane can draw, going round; the same place when it is
+// the only one.
+export const turnPicture = (index: number, files: readonly EvidenceFile[], delta: 1 | -1): number => {
+  const places = files.flatMap((file, i) => (isDrawable(file) ? [i] : []))
+  const at = places.indexOf(index)
+  if (at < 0 || places.length === 0) return index
+
+  return places[(at + delta + places.length) % places.length] as number
 }
 
 // Steps reported done within this of each other were reported together; the gap says nothing of the work.
@@ -815,8 +932,9 @@ export const buildStepPrompt = (plans: readonly Plan[], tool = STEP_TOOL): strin
   return [
     `SCV step signal (scv-dashboard mod): while you implement one of this project's SCV plans, report each step of its Suggested path with the ${tool} tool`,
     '— state "doing" when you start a step, "done" when you finish it, "blocked" with a one-line reason in note when you cannot go on.',
-    'A "done" needs proof: evidence (project files this step made or changed — a screenshot, a result file) and/or output (the command output excerpt that shows the result); without it the tool refuses.',
-    'A "doing" for long-running work names log (the project file it writes) and url (a page showing its progress) so the pane shows its real progress.',
+    'A "done" needs proof a person can look at: evidence — project files this step made or changed that show the result (a screenshot, a video, a chart as an image or html: png jpg jpeg gif webp svg, mp4 webm mov, html pdf). Any other file (source code, text, settings, a script) is refused.',
+    'A step whose plan line names pure functions (— `fn`, `fn`) may finish with no file: that list is its proof and stays in the pane. A step that names none needs a file. output (the command output excerpt that shows the result) is shown beside the proof but passes nothing by itself.',
+    'A "doing" for work that runs behind the conversation sets background: true and names log (the project file it writes) and url (a page showing its progress), so the pane says 진행 중(백그라운드) and shows its real progress.',
     "Steps are numbered as in the plan's Suggested path, starting at 1. It only updates the SCV pane and changes no file.",
     'If the tool is listed as deferred, load it with ToolSearch first.',
     `Open plans (scv/promote): ${open.map(plan => `${plan.slug} (${plan.steps.length} steps)`).join(', ')}.`,
@@ -1004,41 +1122,6 @@ export const formatDuration = (ms: number) => {
   return `${Math.floor(minutes / 60)}시간 ${minutes % 60}분`
 }
 
-// Splits on `separator` only outside parentheses: "a(x · y) · b" → ["a(x · y)", "b"].
-export const splitTopLevel = (text: string, separator: string) => {
-  const parts: string[] = []
-  let depth = 0
-  let from = 0
-  for (let i = 0; i < text.length; i += 1) {
-    if (text[i] === '(') depth += 1
-    if (text[i] === ')') depth = Math.max(0, depth - 1)
-    if (depth === 0 && text.startsWith(separator, i)) {
-      parts.push(text.slice(from, i))
-      from = i + separator.length
-      i = from - 1
-    }
-  }
-
-  return [...parts, text.slice(from)].map(part => part.trim()).filter(Boolean)
-}
-
-export const parseDreams = (text: string | null): Dreams | undefined => {
-  if (!text) return undefined
-  try {
-    const raw = JSON.parse(text) as { date?: string; summary?: string; report?: string }
-    const parts = splitTopLevel((raw.summary ?? '').replace(/^\[SCV 드림\]\s*/, ''), ' · ')
-    const date = raw.date?.match(/^(\d{4})(\d{2})(\d{2})$/)
-
-    return {
-      date: date ? `${date[1] ?? ''}-${date[2] ?? ''}-${date[3] ?? ''}` : raw.date ?? '',
-      items: parts.filter(part => !part.startsWith('보고서')),
-      reportPath: raw.report ?? null,
-    }
-  } catch {
-    return undefined
-  }
-}
-
 export const NODE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#6e7681', yourTurn: '#a371f7' }
 
 // One step's node as a small picture: a traffic-light circle, and below it the line to the next step
@@ -1141,8 +1224,8 @@ export const barColor = (stages: readonly Stage[], blocks: readonly Block[]) =>
 export const MIRROR_MARK = 'SCV-MIRROR'
 
 // What a viewer's press asks the working session to do on its own side: put the plan's next command in its prompt
-// box, or open its dreams report. The working session works the command out from its own state, never from the message.
-export type MirrorAct = { do: 'fill'; slug: string } | { do: 'open-report' }
+// box. The working session works the command out from its own state, never from the message.
+export type MirrorAct = { do: 'fill'; slug: string }
 
 export type MirrorMessage =
   | { kind: 'hello'; address: string }
@@ -1164,7 +1247,6 @@ export const mirrorText = (message: MirrorMessage) =>
 const parseAct = (json: string): MirrorAct | null => {
   try {
     const act = JSON.parse(json) as { do?: unknown; slug?: unknown }
-    if (act.do === 'open-report') return { do: 'open-report' }
     if (act.do === 'fill' && typeof act.slug === 'string' && act.slug) return { do: 'fill', slug: act.slug }
   } catch {
     // not JSON
@@ -1842,12 +1924,82 @@ export type LightSettings = { isOn: boolean; percent: number }
 
 export const DEFAULT_LIGHT: LightSettings = { isOn: true, percent: 50 }
 
+// The ends of the bar the mark moves on, and how far one press moves it.
+export const LIGHT_MIN = 10
+export const LIGHT_MAX = 95
+export const LIGHT_STEP = 5
+
 // What the store kept, read back: anything of another shape is the default (on, at 50%).
 export const parseLight = (kept: unknown): LightSettings => {
   const one = (kept ?? {}) as { isOn?: unknown; percent?: unknown }
-  const percent = typeof one.percent === 'number' && one.percent >= 10 && one.percent <= 95 ? Math.round(one.percent) : DEFAULT_LIGHT.percent
+  const percent = typeof one.percent === 'number' && one.percent >= LIGHT_MIN && one.percent <= LIGHT_MAX ? Math.round(one.percent) : DEFAULT_LIGHT.percent
 
   return { isOn: typeof one.isOn === 'boolean' ? one.isOn : DEFAULT_LIGHT.isOn, percent }
+}
+
+// The mark put at another place on the bar: on a whole step, never past the bar's ends.
+export const moveLight = (settings: LightSettings, percent: number): LightSettings => ({
+  ...settings,
+  percent: Math.min(LIGHT_MAX, Math.max(LIGHT_MIN, Math.round(percent / LIGHT_STEP) * LIGHT_STEP)),
+})
+
+// The bar as a picture: the filled part is how full the conversation is now (red once it is at the mark), the
+// knob is where the mark stands.
+export const lightBarSvg = (mark: number, fill: number | null, width = 180, height = 18): string => {
+  const pad = 8
+  const span = width - pad * 2
+  const xOf = (percent: number) => (pad + (span * Math.min(100, Math.max(0, percent))) / 100).toFixed(1)
+  const mid = height / 2
+  const track = `<rect x="${pad}" y="${mid - 2}" width="${span}" height="4" rx="2" fill="#8b949e" fill-opacity="0.4"/>`
+  const full = fill === null ? '' : `<rect x="${pad}" y="${mid - 2}" width="${(Number(xOf(fill)) - pad).toFixed(1)}" height="4" rx="2" fill="${fill >= mark ? '#f85149' : '#4f8cff'}"/>`
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${track}${full}<circle cx="${xOf(mark)}" cy="${mid}" r="6" fill="#e3b341" stroke="#ffffff" stroke-width="1.5"/></svg>`
+}
+
+// ── where the session works: its folder and branch (pane 0.5.0) ──────────────────
+
+// isBranch: false for a commit checked out with no branch (its first seven letters stand as the name).
+export type BranchNow = { name: string; isBranch: boolean }
+export type Place = { home: string | null; branch: BranchNow | null }
+
+export const NO_PLACE: Place = { home: null, branch: null }
+
+// The branch a repository's HEAD file names ('ref: refs/heads/<name>'), or the commit it holds with no branch.
+export const branchOfHead = (text: string | null | undefined): BranchNow | null => {
+  const line = ((text ?? '').trim().split('\n')[0] ?? '').trim()
+  const named = /^ref: refs\/heads\/(.+)$/.exec(line)?.[1]
+  if (named) return { name: named, isBranch: true }
+
+  return /^[0-9a-f]{7,64}$/.test(line) ? { name: line.slice(0, 7), isBranch: false } : null
+}
+
+// Where a '.git' file points ('gitdir: <path>', as a worktree has), read against the folder that holds it.
+export const gitDirOf = (text: string | null | undefined, dir: string): string | null => {
+  const path = /^gitdir: (.+)$/m.exec(text ?? '')?.[1]?.trim()
+  if (!path) return null
+
+  return path.startsWith('/') ? path : `${dir}/${path}`
+}
+
+// The local branches `git branch --format=%(refname:short)` printed, one a line (the line for no branch left out).
+export const parseBranches = (stdout: string): string[] => [
+  ...new Set(
+    stdout
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line !== '' && !line.startsWith('(')),
+  ),
+]
+
+// A folder as a person reads it: the home folder is '~'.
+export const shortPath = (path: string, home: string | null | undefined): string => (home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path)
+
+// The line the pane shows after a press to change the branch: done, or git's own first reason for refusing.
+export const switchNote = (input: { from: string | null; to: string; exitCode: number | null; stderr: string }) => {
+  if (input.exitCode === 0) return `브랜치를 바꿈: ${input.from ?? '(없음)'} → ${input.to}`
+  const why = input.stderr.split('\n').map(line => line.trim()).find(line => line !== '') ?? ''
+
+  return `브랜치를 바꾸지 못함${why ? ` — ${cutLine(why, 160)}` : ''}`
 }
 
 const LIGHT_GAP_MS = 5 * 60_000

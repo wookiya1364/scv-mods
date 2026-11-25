@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
+import type { AgentState, BigProof, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
 import type { FileFact, MirrorAct } from './model'
 import {
   STEP_TOOL,
@@ -26,8 +26,13 @@ import {
   buildAlertText,
   buildStepPrompt,
   checkSignal,
+  BIG_HEIGHT,
+  BIG_WIDTH,
+  bigIndexOf,
   IMAGE_DRAW_BYTES,
   imageSvg,
+  isDrawable,
+  turnPicture,
   judgeEvidence,
   lastSignalOf,
   liveOf,
@@ -46,9 +51,11 @@ import {
   logWork,
   mergeMarks,
   signalAnswer,
+  backgroundSteps,
+  doingWord,
+  proofView,
   mergeTests,
   nextAction,
-  parseDreams,
   parsePlans,
   parseTestOutput,
   permissionWaitOf,
@@ -60,8 +67,7 @@ import {
   extractMarked,
   parseCatalog,
   recordFunctions,
-  stageFunctions,
-  doneFunctions,
+  stepFunctionView,
   firstClause,
   functionBullet,
   usedNames,
@@ -120,6 +126,15 @@ import {
   lightNote,
   paneSections,
   parseLight,
+  moveLight,
+  lightBarSvg,
+  LIGHT_STEP,
+  NO_PLACE,
+  branchOfHead,
+  gitDirOf,
+  parseBranches,
+  shortPath,
+  switchNote,
   recordTail,
   resumeBrief,
   DEFAULT_LIGHT,
@@ -129,7 +144,7 @@ import {
   submitWithGear,
   usedGear,
 } from './model'
-import type { AskMode, ConfirmStop, JobEnd, LightSettings, RunPlan } from './model'
+import type { AskMode, BranchNow, ConfirmStop, JobEnd, LightSettings, Place, RunPlan, StepFunctionView } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -139,13 +154,13 @@ const REFRESH_MS = 3000
 const MIRROR_GAP_MS = 10_000
 const MIRROR_MISSES = 3
 
-const snapshot = atom({ plugin: 'scv-dashboard', key: 'snapshot' } as const, { plans: [], dreamsText: null, cwd: '', root: '' } as Snapshot)
+const snapshot = atom({ plugin: 'scv-dashboard', key: 'snapshot' } as const, { plans: [], cwd: '', root: '' } as Snapshot)
 const chosen = atom({ plugin: 'scv-dashboard', key: 'chosen' } as const, null as string | null)
 // The plan the working session has in view, for a viewer that has not picked one itself.
 const hostInView = atom({ plugin: 'scv-dashboard', key: 'host-in-view' } as const, null as string | null)
 
 const chosenSlug = async ($: Api) => (await read($, chosen)) ?? (await read($, hostInView))
-const expanded = atom({ plugin: 'scv-dashboard', key: 'expanded' } as const, { steps: false, tests: false, blocks: true, dreams: false } as Expanded)
+const expanded = atom({ plugin: 'scv-dashboard', key: 'expanded' } as const, { steps: false, tests: false, blocks: true } as Expanded)
 const runs = atom({ plugin: 'scv-dashboard', key: 'runs' } as const, [])
 const waiting = atom({ plugin: 'scv-dashboard', key: 'waiting' } as const, null as string | null)
 // The work turns left running (a command in the background, a watch, a terminal tab's command) until its end is heard.
@@ -185,6 +200,11 @@ const drawnHint = { name: null as string | null }
 const light = atom({ plugin: 'scv-dashboard', key: 'light' } as const, DEFAULT_LIGHT as LightSettings)
 const lightSaid = atom({ plugin: 'scv-dashboard', key: 'lightSaid' } as const, null as string | null)
 const LIGHT_KEY = 'scv-dashboard:light'
+// Where the session works: the person's home folder (to write a folder as '~/…') and the branch checked out.
+const place = atom({ plugin: 'scv-dashboard', key: 'place' } as const, NO_PLACE as Place)
+// The branches to pick from, while the person has the branch line open; and what the last change came to.
+const branchPick = atom({ plugin: 'scv-dashboard', key: 'branchPick' } as const, null as string[] | null)
+const placeNote = atom({ plugin: 'scv-dashboard', key: 'placeNote' } as const, null as string | null)
 const lightRun = { pending: false, kind: 'summary' as 'records' | 'summary', lastAt: 0 }
 // What the summarizer is told when the records cannot stand in (no conversation record in this project).
 const LIGHT_INSTRUCTIONS =
@@ -247,6 +267,8 @@ const fitGear = async ($: Api, text: string) => {
   if ((await read($, gearHint)) !== name) await update($, gearHint, () => name)
 }
 const focusStep = atom({ plugin: 'scv-dashboard', key: 'focusStep' } as const, null as number | null)
+// The proof picture a person pressed to see large; while it stands, the pane draws that picture alone.
+const bigProof = atom({ plugin: 'scv-dashboard', key: 'bigProof' } as const, null as BigProof | null)
 const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
 // The functions each step made and called, by `<plan>#<step index>`; kept per project like the step signals.
 const stepFunctions = atom({ plugin: 'scv-dashboard', key: 'stepFunctions' } as const, {} as Record<string, StepFunctions>)
@@ -315,14 +337,8 @@ const readSources = async ($: Api, cwd: string): Promise<Omit<Snapshot, 'root'>>
   const active = await readPlans($, `${scv}/promote`, false)
   const plans = active.length > 0 ? active : (await readPlans($, `${scv}/archive`, true)).sort((a, b) => b.slug.localeCompare(a.slug))
 
-  const dreamsText = await readText($, `${scv}/dreams/latest.json`)
-  const report = parseDreams(dreamsText)?.reportPath
-  const reportHtml = report ? await readText($, report.startsWith('/') ? report : `${cwd ? `${cwd}/` : ''}${report}`) : null
-
   return {
     plans,
-    dreamsText,
-    reportHtml,
     cwd,
     catalog: await readCatalog($, `${scv}/core/catalog/pure`),
     settingsText: await readText($, `${scv}/scv_settings.json`),
@@ -388,6 +404,50 @@ const loadRuns = async ($: Api, project: string) => {
   await update($, runs, () => (Array.isArray(kept) ? (kept as TestRun[]) : []))
 }
 
+// The branch checked out where the session works, read from the repository's own HEAD file (no command run):
+// the nearest folder at or above the session's that holds one; a worktree's '.git' file is followed.
+const readBranch = async ($: Api, root: string): Promise<BranchNow | null> => {
+  if (!root.startsWith('/')) return null
+  for (const dir of ancestorsOf(root)) {
+    const head = await readText($, `${dir}/.git/HEAD`)
+    if (head) return branchOfHead(head)
+    const linked = gitDirOf(await readText($, `${dir}/.git`), dir)
+    if (linked) return branchOfHead(await readText($, `${linked}/HEAD`))
+  }
+
+  return null
+}
+
+const readPlace = async ($: Api, root: string) => {
+  const home = (await read($, place)).home ?? (await $.env.get('HOME').catch(() => undefined)) ?? null
+  const branch = await readBranch($, root)
+  await update($, place, () => ({ home, branch }))
+}
+
+// A press on the branch line: the local branches are listed to pick from; a second press folds the list.
+const openBranches = async ($: Api) => {
+  if (await read($, branchPick)) return void (await update($, branchPick, () => null))
+  const root = (await read($, snapshot)).root
+  const ran = await $.process.run(['git', 'branch', '--format=%(refname:short)'], { ...(root ? { cwd: root } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+  const names = ran?.exitCode === 0 ? parseBranches(ran.stdout) : []
+  if (names.length === 0) return void (await update($, placeNote, () => '브랜치 목록을 읽지 못함'))
+  await update($, placeNote, () => null)
+  await update($, branchPick, () => names)
+}
+
+// A branch picked: git changes to it (git itself refuses when a file not yet committed would be lost). Never
+// while a turn runs — the work under way was started on the branch it found.
+const switchBranch = async ($: Api, to: string) => {
+  const from = (await read($, place)).branch?.name ?? null
+  await update($, branchPick, () => null)
+  if (to === from) return
+  if ((await read($, live)).isWorking) return void (await update($, placeNote, () => '턴이 도는 중에는 브랜치를 바꾸지 않음 — 턴이 끝난 뒤 다시 눌러 주세요'))
+  const root = (await read($, snapshot)).root
+  const ran = await $.process.run(['git', 'switch', to], { ...(root ? { cwd: root } : {}), timeoutMs: 30_000 }).catch(() => undefined)
+  await refresh($).catch(() => undefined)
+  await update($, placeNote, () => switchNote({ from, to, exitCode: ran ? ran.exitCode : null, stderr: ran?.stderr ?? '' }))
+}
+
 const refresh = async ($: Api) => {
   const at = await $.clock.now()
   // A viewer session draws the working session's state, so its own files are not read; only its clock moves.
@@ -411,6 +471,7 @@ const refresh = async ($: Api) => {
   await update($, snapshot, () => next)
   await update($, now, () => at)
   await loadSignals($, next.cwd)
+  await readPlace($, root)
   await checkUsage($, at)
   const plan = await planInView($)
   if (plan) {
@@ -458,29 +519,6 @@ const fillPrompt = async ($: Api, command: string) => {
   return filled.isFilled
 }
 
-// Opens this session's dreams report on this computer; the note says so when it could not.
-// A viewer opens the copy the working session sent, on its own device: the file itself lives on the other computer.
-const openMirroredReport = async ($: Api, html: string | null | undefined) => {
-  if (!html) return void update($, note, () => '작업 세션이 보고서를 아직 보내지 않았습니다')
-  const opened = await $.process
-    .run(['sh', '-c', 'f="$(mktemp -d)/scv-report.html" && printf %s "$1" > "$f" && { xdg-open "$f" || open "$f"; }', 'sh', html])
-    .catch(() => undefined)
-  await update($, note, () => (opened?.exitCode === 0 ? null : '보고서를 이 기기에서 열지 못했습니다'))
-}
-
-const openReport = async ($: Api) => {
-  const shot = await read($, snapshot)
-  if (await read($, mirror)) return openMirroredReport($, shot.reportHtml)
-  const path = parseDreams(shot.dreamsText)?.reportPath
-  if (!path) return
-  const full = path.startsWith('/') ? path : `${shot.cwd}/${path}`
-  for (const opener of ['xdg-open', 'open']) {
-    const opened = await $.process.run([opener, full]).catch(() => undefined)
-    if (opened?.exitCode === 0) return void update($, note, () => null)
-  }
-  await update($, note, () => `보고서를 열지 못했습니다: ${full}`)
-}
-
 // Opens a file or page the way the system opens it (a picture viewer, the browser); the note says when it could not.
 const openThing = async ($: Api, target: string) => {
   for (const opener of ['xdg-open', 'open']) {
@@ -500,11 +538,11 @@ const logTail = async ($: Api, full: string) => {
 }
 
 // A picture sent as evidence, drawn when small enough; null leaves it to the open button.
-const evidencePicture = async ($: Api, full: string, size: number) => {
+const evidencePicture = async ($: Api, full: string, size: number, width?: number, height?: number) => {
   if (size > IMAGE_DRAW_BYTES) return null
   const bytes = (await $.fs.read(full, { as: 'bytes' }).catch(() => undefined)) as { base64?: string } | undefined
 
-  return bytes?.base64 ? imageSvg(bytes.base64, full) : null
+  return bytes?.base64 ? imageSvg(bytes.base64, full, width, height) : null
 }
 
 // What a step's writing made and called, kept with the step: functions under a marker are made; known functions (the
@@ -546,7 +584,7 @@ const STEP_TOOL_NAME = new RegExp(`^${STEP_TOOL}$`)
 const STEP_TOOL_SPEC = {
   name: 'scv_step',
   description:
-    "Report a step of an SCV plan's Suggested path so the SCV pane shows real progress: state doing (started), done (finished) or blocked (cannot go on — give the reason in note). done needs proof: evidence (project files this step made or changed — a screenshot, a result file) and/or output (an excerpt of a command's output, e.g. the test result); a done without it, or with a file outside the project or older than the step's start, is refused. doing may name log (a project file the running work writes) and url (a page that shows its progress) — the pane shows the log's last lines and a button for the page. Steps worked on at the same time are each reported doing; the answer names every step now in progress. Changes no file.",
+    "Report a step of an SCV plan's Suggested path so the SCV pane shows real progress: state doing (started), done (finished) or blocked (cannot go on — give the reason in note). done needs proof a person can look at: evidence, project files this step made or changed that show the result — a picture (png, jpg, jpeg, gif, webp, svg), a video (mp4, webm, mov) or a page to open (html, pdf). Any other file (source code, text, settings, a script) is refused, and so is a file outside the project or older than the step's start. A step whose plan line names pure functions (— `fn`, `fn`) may be done with no file: that function list is its proof and stays in the pane. A step that names none must send a file. output (an excerpt of a command's output) is shown beside the proof but passes nothing by itself. doing takes background: true for work that runs behind the conversation, and may name log (a project file the running work writes) and url (a page that shows its progress) — the pane then says 진행 중(백그라운드), shows the log's last lines and a button for the page; a doing with log or url counts as background work too. Steps worked on at the same time are each reported doing; the answer names every step now in progress, those in the background apart. Changes no file.",
   inputSchema: {
     type: 'object',
     properties: {
@@ -554,8 +592,9 @@ const STEP_TOOL_SPEC = {
       step: { type: 'integer', minimum: 1, description: "The step's number in the plan's Suggested path, starting at 1" },
       state: { type: 'string', enum: ['doing', 'done', 'blocked'] },
       note: { type: 'string', description: 'One line; the reason when state is blocked' },
-      evidence: { type: 'array', items: { type: 'string' }, description: 'done: project files this step made or changed (screenshot, result file), relative to the project or absolute' },
-      output: { type: 'string', description: "done: an excerpt of a command's output that shows the result (e.g. the test summary)" },
+      evidence: { type: 'array', items: { type: 'string' }, description: 'done: project files this step made or changed that a person can look at — picture, video, html or pdf — relative to the project or absolute; source code and text files are refused' },
+      output: { type: 'string', description: "done: an excerpt of a command's output that shows the result (e.g. the test summary); shown, but not enough by itself" },
+      background: { type: 'boolean', description: 'doing: true when the work runs behind the conversation (a background command, a long job); the pane says 진행 중(백그라운드)' },
       log: { type: 'string', description: 'doing: a project file the running work writes, read for its last lines and progress' },
       url: { type: 'string', description: 'doing: a page that shows the progress (opened by a button, never read)' },
     },
@@ -663,6 +702,7 @@ const mirrorState = async ($: Api) => ({
   since: await read($, since),
   limits: await read($, limits),
   contextFill: await read($, contextFill),
+  place: await read($, place),
   hostName: sessionName(await sessionFiles($), await $.session.id()),
   inView: (await planInView($))?.slug ?? null,
 })
@@ -701,6 +741,7 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, since, () => state.since ?? null)
   await update($, limits, () => state.limits ?? [])
   await update($, contextFill, () => (typeof state.contextFill === 'number' ? state.contextFill : null))
+  await update($, place, () => (state.place && typeof state.place === 'object' ? state.place : NO_PLACE))
   await update($, hostInView, () => (typeof state.inView === 'string' ? state.inView : null))
   const at = await $.clock.now()
   const name = typeof state.hostName === 'string' ? state.hostName : (mirrored.name ?? null)
@@ -743,7 +784,6 @@ const pushMirror = async ($: Api) => {
 // one this session works out for that plan itself — the message names the plan, never the command.
 const takeAct = async ($: Api, address: string, act: MirrorAct) => {
   if (!(address in (await read($, viewers)))) return
-  if (act.do === 'open-report') return openReport($)
   const command = (await actionInView($, act.slug))?.command
   if (!command) return
   const isFilled = await fillPrompt($, command)
@@ -1512,22 +1552,28 @@ export const register: Register = on => {
     const before = Array.isArray(stored) ? (stored as StepSignal[]) : await read($, signals)
     const checked = checkSignal(asked, plans, before)
     if (!checked.isOk) return { deny: checked.reason }
+    const plan = plans.find(one => one.slug === asked.plan)
     let proof: Evidence | undefined
     if (asked.state === 'done') {
       const open = lastSignalOf(before, asked.plan, asked.step)
       const startedAt = open && open.state !== 'done' ? (open.startedAt ?? open.at) : undefined
-      const judged = judgeEvidence(paths, output, await fileFacts($, shot.cwd, paths), startedAt)
+      // The pure functions the step's plan line names: with them, the step may end with no file.
+      const named = plan?.steps[asked.step - 1]?.refs ?? []
+      const judged = judgeEvidence(paths, output, await fileFacts($, shot.cwd, paths), startedAt, named)
       if (!judged.isOk) return { deny: judged.reason }
       proof = judged.evidence
     }
 
-    const kept = applySignal(before, { ...asked, ...(proof ? { evidence: proof } : {}), ...(asked.state === 'doing' ? { source } : {}) }, await $.clock.now())
+    const kept = applySignal(
+      before,
+      { ...asked, ...(proof ? { evidence: proof } : {}), ...(asked.state === 'doing' ? { source, ...(input.background === true ? { background: true } : {}) } : {}) },
+      await $.clock.now(),
+    )
     await $.store.set(signalsKey(shot.cwd), kept).catch(() => undefined)
     await update($, signals, () => kept)
     await update($, startedSteps, started => nextStarted(started, asked))
-    const plan = plans.find(one => one.slug === asked.plan)
 
-    return { result: signalAnswer(asked, plan && deriveStages(mergeMarks(plan, kept)).stages) }
+    return { result: signalAnswer(asked, plan && deriveStages(mergeMarks(plan, kept)).stages, backgroundSteps(kept, asked.plan)) }
   }))
 
   on('tool.call', async ($, e, next) => {
@@ -1618,7 +1664,6 @@ export const register: Register = on => {
     const board = await read($, jobs)
     const finished = await read($, doneLog)
     const allRuns = await read($, runs)
-    const dreams = parseDreams(shot.dreamsText)
     const message = await read($, note)
     const mirrored = await read($, mirror)
     // Asks the working session once more, when the person presses; what came of it is said in a toast.
@@ -1653,8 +1698,6 @@ export const register: Register = on => {
       const copied = await $.ui.copy({ text: command, surface: e.surface }).catch(() => ({ isCopied: false }))
       await update($, note, () => (copied.isCopied ? `입력창에 못 넣어 복사함: ${command}` : `입력창에 못 넣음 — ${command}`))
     }
-
-    const openDreamsReport = () => openReport($)
 
     const card = (children: RenderChildren, color = '#30363d') => (
       <Box flexDirection="column" borderStyle="round" borderColor={color} paddingX={1} marginBottom={1}>
@@ -1845,15 +1888,49 @@ export const register: Register = on => {
 
     const lightState = await read($, light)
     const lightLine = await read($, lightSaid)
-    const switchLight = async () => {
-      const next = await update($, light, one => ({ ...one, isOn: !one.isOn }))
-      await $.store.set(LIGHT_KEY, next).catch(() => undefined)
-    }
-    // A row only for a value this session has; with neither there is no card (nothing to say yet).
+    const fillNow = await read($, contextFill)
+    const keepLight = async (next: LightSettings) => void (await $.store.set(LIGHT_KEY, next).catch(() => undefined))
+    const switchLight = async () => keepLight(await update($, light, one => ({ ...one, isOn: !one.isOn })))
+    // ◀ · ▶: the mark one step down or up the bar.
+    const stepLight = async (by: number) => keepLight(await update($, light, one => moveLight(one, one.percent + by)))
+    const where = await read($, place)
+    const picking = await read($, branchPick)
+    const whereNote = await read($, placeNote)
+    const folder = shot.root ? shortPath(shot.root, where.home) : null
+    const branchLabel = where.branch ? (where.branch.isBranch ? where.branch.name : `${where.branch.name} (브랜치 없음)`) : null
+    // The folder and branch the session works in, then context · usage; a row only for a value this session has.
     const limitsCard = () =>
-      usage || context
+      usage || context || folder
         ? card(
             <Box flexDirection="column">
+              {folder ? (
+                <Box flexDirection="row" gap={1}>
+                  <Text bold>폴더</Text>
+                  <Text dimColor>{folder}</Text>
+                </Box>
+              ) : null}
+              {branchLabel ? (
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Text bold>브랜치</Text>
+                  {mirrored ? <Text dimColor>{branchLabel}</Text> : <Button key="branch-open" label={`${branchLabel} ${picking ? '▴' : '▾'}`} onPress={() => void openBranches($).catch(() => undefined)} />}
+                </Box>
+              ) : null}
+              {picking && !mirrored ? (
+                <Box flexDirection="column">
+                  {Select ? (
+                    <Select
+                      key="branch-pick"
+                      label="바꿀 브랜치"
+                      options={picking.map(value => ({ value }))}
+                      {...(where.branch?.isBranch && picking.includes(where.branch.name) ? { value: where.branch.name } : {})}
+                      onSelect={(value: string) => void switchBranch($, value).catch(() => undefined)}
+                    />
+                  ) : (
+                    picking.slice(0, 12).map((name, i) => <Button key={`branch-to-${i}`} label={name} onPress={() => void switchBranch($, name).catch(() => undefined)} />)
+                  )}
+                </Box>
+              ) : null}
+              {whereNote ? <Text dimColor>{whereNote}</Text> : null}
               {context ? (
                 <Box flexDirection="row" gap={1}>
                   <Text bold>컨텍스트</Text>
@@ -1868,10 +1945,18 @@ export const register: Register = on => {
               ) : null}
               {context ? (
                 <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-                  <Text dimColor>{lightState.isOn ? `대화가 길어지면(${lightState.percent}%) 자동으로 가볍게 함` : '대화가 길어져도 그대로 둠'}</Text>
+                  <Text dimColor>{lightState.isOn ? `컨텍스트가 ${lightState.percent}% 를 넘으면 자동으로 요약함 — 비우지 않음` : '대화가 길어져도 그대로 둠'}</Text>
                   <Box flexDirection="row">
                     {mirrored ? [] : [<Button key="light-toggle" label={lightState.isOn ? '끄기' : '켜기'} onPress={() => void switchLight().catch(() => undefined)} />]}
                   </Box>
+                </Box>
+              ) : null}
+              {context && lightState.isOn && !mirrored ? (
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Button key="light-down" label="◀" onPress={() => void stepLight(-LIGHT_STEP).catch(() => undefined)} />
+                  {Svg ? <Svg source={lightBarSvg(lightState.percent, fillNow)} alt={`요약 기준 ${lightState.percent}% · 지금 ${context}`} /> : null}
+                  <Button key="light-up" label="▶" onPress={() => void stepLight(LIGHT_STEP).catch(() => undefined)} />
+                  <Text dimColor>{`기준 ${lightState.percent}%`}</Text>
                 </Box>
               ) : null}
               {lightLine ? <Text dimColor>{lightLine}</Text> : null}
@@ -1997,7 +2082,6 @@ export const register: Register = on => {
           <Text dimColor>이 폴더에 진행 중인 SCV 계획이 없습니다. /scv:promote 로 계획을 만들면 여기에 보입니다.</Text>
           <Text dimColor>{`확인한 곳: ${shot.cwd || '(작업 폴더 모름)'}/scv/promote`}</Text>
           {nowCard(null)}
-          {dreamsPart()}
         </Box>
       )
     }
@@ -2008,7 +2092,10 @@ export const register: Register = on => {
     const rows = mergeTests(plan, run)
     const blocks = findBlocks(derived.stages, run, asked, asking, halted)
     const turn = turnStateOf({ isWorking: state.isWorking, hasEnded: state.hasEnded === true, blocks, agents: team.length, background: state.background === true, jobs: board.jobs.length + board.extra })
-    const stages = applyTurn(applyBlocks(derived.stages, blocks), turn)
+    // The steps running behind the conversation: such a step stays in progress when the turn ends, and says so.
+    const behind = backgroundSteps(reported, plan.slug)
+    const stages = applyTurn(applyBlocks(derived.stages, blocks), turn, behind)
+    const wordOf = (state: StageState, i: number) => (state === 'doing' ? doingWord(behind.includes(i + 1)) : STATE_LABEL[state])
     // Steps worked on at the same time are all 'here'; the one opened by default is the step this session's work
     // goes to (the last it said it started), else the first of them.
     const isHere = (state: StageState | undefined) => state === 'doing' || state === 'blocked' || state === 'yourTurn'
@@ -2019,23 +2106,59 @@ export const register: Register = on => {
     const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
     const catalog = shot.catalog ?? {}
     const functionLog = await read($, stepFunctions)
-    const did = focused === null ? undefined : functionLog[`${plan.slug}#${focused}`]
-    // The plan's other steps that made functions, so a call to one says which step made it.
-    const earlier = stages.flatMap((_, i) => {
-      const found = i === focused ? undefined : functionLog[`${plan.slug}#${i}`]
-
-      return found && found.made.length > 0 ? [{ step: i + 1, made: found.made }] : []
-    })
-    const builds = focusedStage ? stageFunctions(focusedStage, plan.pipeline, catalog, earlier.flatMap(one => one.made).concat(did?.made ?? [])) : []
+    // Each step's functions: what it builds, what it made and used. Only the step in focus shows them, in its
+    // detail under the flow — finished or not. A line of the flow is the step's sentence and its state, nothing more.
+    const viewOf = (i: number) => stepFunctionView(i, stages, plan.slug, plan.pipeline, catalog, functionLog)
+    const focusedView = focused === null ? null : viewOf(focused)
+    const did = focusedView?.did
+    const builds = focusedView?.builds ?? []
     const callsOpen = await read($, showCalls)
     const focusedSignal = focused === null ? undefined : lastSignalOf(await read($, signals), plan.slug, focused + 1)
     const fullOf = (path: string) => (path.startsWith('/') ? path : `${shot.cwd}/${path}`)
-    const proof = focusedStage?.state === 'done' ? focusedSignal?.evidence : undefined
+    // A finished step's proof: only what a person can look at. A picture is drawn; a video or a page gets a button.
+    const proof = focusedStage?.state === 'done' ? proofView(focusedSignal?.evidence, focusedStage.refs) : null
     const pictures = proof ? await Promise.all(proof.files.map(file => (file.kind === 'image' ? evidencePicture($, fullOf(file.path), file.size) : Promise.resolve(null)))) : []
-    const texts = proof ? await Promise.all(proof.files.map(file => (file.kind === 'text' ? readText($, fullOf(file.path)).then(t => (t ?? '').slice(0, 600)) : Promise.resolve('')))) : []
+    // The picture a person pressed to see large, drawn in place of the whole pane until they close it.
+    const bigAt = proof ? bigIndexOf(await read($, bigProof), plan.slug, focused, proof.files) : null
+    const bigFile = proof && bigAt !== null ? proof.files[bigAt] : undefined
+    const bigPicture = bigFile ? await evidencePicture($, fullOf(bigFile.path), bigFile.size, BIG_WIDTH, BIG_HEIGHT) : null
     const liveSource = focusedStage && isHere(focusedStage.state) && focusedSignal?.state !== 'done' ? focusedSignal?.source : undefined
     const liveView = liveSource?.log ? liveOf((await logTail($, fullOf(liveSource.log))) ?? '') : null
-    const done = doneFunctions(did, builds.map(line => line.name), catalog, earlier)
+    const done = focusedView?.done ?? { made: [], used: [] }
+    // 하는 일: one bullet per function, with what it does. 이 단계에서 한 일: the two lists, each with its count.
+    // Drawn the same in a step's detail and on a finished step's line.
+    const buildsPart = (lines: StepFunctionView['builds']) =>
+      lines.map(line => (
+        <Box flexDirection="column">
+          <Text>{functionBullet(line.name, line.kind)}</Text>
+          {line.role ? (
+            <Box paddingLeft={4}>
+              <Text dimColor>{firstClause(line.role)}</Text>
+            </Box>
+          ) : null}
+        </Box>
+      ))
+    const didPart = (lists: StepFunctionView['done']) =>
+      (
+        [
+          ['새로 만듦', lists.made],
+          ['가져다 씀', lists.used],
+        ] as const
+      ).map(([title, list]) => (
+        <Box flexDirection="column">
+          <Text>{`${title} ${list.length}`}</Text>
+          {list.map(one => (
+            <Box flexDirection="column">
+              <Text>{functionBullet(one.name)}</Text>
+              {one.detail ? (
+                <Box paddingLeft={4}>
+                  <Text dimColor>{one.detail}</Text>
+                </Box>
+              ) : null}
+            </Box>
+          ))}
+        </Box>
+      ))
     const count = countStages(stages)
     // Step times from Claude's signals survive a new session; the times seen in this session are the fallback.
     const durations = stepDurationsFromSignals(reported, plan.slug)
@@ -2057,25 +2180,26 @@ export const register: Register = on => {
       : null
     const agentRows = agentLines(team, at, formatDuration)
 
-    function dreamsPart() {
-      return card(
-        <>
-          <Text bold>드림</Text>
-          {dreams ? (
-            <>
-              <Text dimColor>{dreams.date}</Text>
-              <Text>{dreams.items[0] ?? '요약 없음'}</Text>
-              {open.dreams && dreams.items.slice(1).map(item => <Text>· {item}</Text>)}
-              <Box flexDirection="row" gap={1}>
-                <Button key="dreams-toggle" label={open.dreams ? '개선점 접기' : '개선점 펼치기'} onPress={toggle('dreams')} />
-                {dreams.reportPath && <Button key="dreams-report" label="보고서 열기" onPress={() => void openDreamsReport()} />}
-              </Box>
-              {message && !isActionNote(message) && <Text color="#f85149">{message}</Text>}
-            </>
-          ) : (
-            <Text dimColor>아직 드림 없음 — /scv:dreams 로 만들 수 있습니다.</Text>
-          )}
-        </>,
+    if (Svg && proof && bigFile && bigPicture && bigAt !== null && focusedStage && focused !== null) {
+      const shown = proof.files.filter(isDrawable)
+      const closeBig = () => void update($, bigProof, () => null)
+      const turn = (delta: 1 | -1) => () => void update($, bigProof, () => ({ plan: plan.slug, step: focused, index: turnPicture(bigAt, proof.files, delta) }))
+
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text bold>{`증거 크게 보기 — ${focused + 1}. ${focusedStage.name}`}</Text>
+            <Button key="big-close" label="✕ 닫기" onPress={closeBig} />
+          </Box>
+          <Svg source={bigPicture} alt={`증거 그림 크게 ${bigFile.path}`} />
+          <Text dimColor>{shown.length > 1 ? `${bigFile.path} (${shown.indexOf(bigFile) + 1}/${shown.length})` : bigFile.path}</Text>
+          <Box flexDirection="row" gap={1}>
+            {shown.length > 1 ? <Button key="big-prev" label="◀ 이전" onPress={turn(-1)} /> : null}
+            {shown.length > 1 ? <Button key="big-next" label="다음 ▶" onPress={turn(1)} /> : null}
+            <Button key="big-open" label="새 창으로 열기" onPress={() => void openThing($, fullOf(bigFile.path))} />
+            <Button key="big-back" label="돌아가기" onPress={closeBig} />
+          </Box>
+        </Box>
       )
     }
 
@@ -2124,7 +2248,7 @@ export const register: Register = on => {
                   {Svg ? (
                     <Svg
                       source={nodeIconSvg(stage.state, stages[i + 1]?.state ?? null)}
-                      alt={`${i + 1}단계 ${STATE_LABEL[stage.state]}`}
+                      alt={`${i + 1}단계 ${wordOf(stage.state, i)}`}
                       width={22}
                       height={44}
                     />
@@ -2136,7 +2260,7 @@ export const register: Register = on => {
                       {`${i + 1}. ${stage.name}`}
                     </Button>
                     <Text color={STATE_COLOR[stage.state]}>
-                      {isHere(stage.state) ? `${STATE_LABEL[stage.state]}  ◀ 지금 여기` : STATE_LABEL[stage.state]}
+                      {isHere(stage.state) ? `${wordOf(stage.state, i)}  ◀ 지금 여기` : wordOf(stage.state, i)}
                     </Text>
                   </Box>
                 </Box>
@@ -2145,19 +2269,10 @@ export const register: Register = on => {
             <Text dimColor>{`완료 ${count.done} · 진행 ${count.doing} · 막힘 ${count.blocked} · 대기 ${count.waiting} — 단계를 누르면 자세히`}</Text>
             {focusedStage && focused !== null ? (
               <Box flexDirection="column" borderStyle="round" borderColor={STATE_COLOR[focusedStage.state]} paddingX={1} marginTop={1}>
-                <Text bold color={STATE_COLOR[focusedStage.state]}>{`${focused + 1}. ${focusedStage.name} — ${STATE_LABEL[focusedStage.state]}`}</Text>
+                <Text bold color={STATE_COLOR[focusedStage.state]}>{`${focused + 1}. ${focusedStage.name} — ${wordOf(focusedStage.state, focused)}`}</Text>
                 <Text bold>하는 일</Text>
                 {builds.length > 0 ? (
-                  builds.map(line => (
-                    <Box flexDirection="column">
-                      <Text>{functionBullet(line.name, line.kind)}</Text>
-                      {line.role ? (
-                        <Box paddingLeft={4}>
-                          <Text dimColor>{firstClause(line.role)}</Text>
-                        </Box>
-                      ) : null}
-                    </Box>
-                  ))
+                  buildsPart(builds)
                 ) : (
                   <Box flexDirection="column">
                     <Text>순수함수 없음</Text>
@@ -2166,25 +2281,22 @@ export const register: Register = on => {
                     </Box>
                   </Box>
                 )}
-                {focusedStage.state === 'done' ? (
+                {proof ? (
                   <Box flexDirection="column" marginTop={1}>
                     <Text bold>증거</Text>
-                    {proof && (proof.files.length > 0 || proof.output) ? (
+                    {proof.files.map((file, i) => (
                       <Box flexDirection="column">
-                        {proof.files.map((file, i) => (
-                          <Box flexDirection="column">
-                            {Svg && pictures[i] ? <Svg source={pictures[i] as string} alt={`증거 그림 ${file.path}`} width={320} height={200} /> : null}
-                            {file.kind === 'text' && texts[i] ? <Text dimColor>{texts[i]}</Text> : null}
-                            <Button key={`evidence-${i}`} plain onPress={() => void openThing($, fullOf(file.path))}>
-                              {`▸ ${file.path} 열기`}
-                            </Button>
-                          </Box>
-                        ))}
-                        {proof.output ? <Text dimColor>{proof.output}</Text> : null}
+                        {Svg && pictures[i] ? <Svg source={pictures[i] as string} alt={`증거 그림 ${file.path}`} width={320} height={200} /> : null}
+                        {Svg && pictures[i] && focused !== null ? (
+                          <Button key={`evidence-big-${i}`} label="⤢ 크게 보기" onPress={() => void update($, bigProof, () => ({ plan: plan.slug, step: focused, index: i }))} />
+                        ) : null}
+                        <Button key={`evidence-${i}`} plain onPress={() => void openThing($, fullOf(file.path))}>
+                          {`▸ ${file.path} 열기`}
+                        </Button>
                       </Box>
-                    ) : (
-                      <Text color="#f85149">증거 없음 — 이 단계는 끝 보고에 증거가 붙지 않았습니다</Text>
-                    )}
+                    ))}
+                    {proof.note ? <Text color={proof.isMissing ? '#f85149' : undefined}>{proof.note}</Text> : null}
+                    {proof.output ? <Text dimColor>{proof.output}</Text> : null}
                   </Box>
                 ) : null}
                 {focusedStage && isHere(focusedStage.state) ? (
@@ -2215,26 +2327,7 @@ export const register: Register = on => {
                   <Text bold>이 단계에서 한 일</Text>
                 </Box>
                 {did || work.length > 0 ? (
-                  (
-                    [
-                      ['새로 만듦', done.made],
-                      ['가져다 씀', done.used],
-                    ] as const
-                  ).map(([title, list]) => (
-                    <Box flexDirection="column">
-                      <Text>{`${title} ${list.length}`}</Text>
-                      {list.map(one => (
-                        <Box flexDirection="column">
-                          <Text>{functionBullet(one.name)}</Text>
-                          {one.detail ? (
-                            <Box paddingLeft={4}>
-                              <Text dimColor>{one.detail}</Text>
-                            </Box>
-                          ) : null}
-                        </Box>
-                      ))}
-                    </Box>
-                  ))
+                  didPart(done)
                 ) : (
                   <Text dimColor>기록 없음 — Claude가 이 세션에서 단계 시작을 알린 뒤의 작업만 셉니다</Text>
                 )}
@@ -2246,10 +2339,11 @@ export const register: Register = on => {
                 {callsOpen ? work.map(entry => <Text dimColor>{`${entry.tool}${entry.target ? `: ${entry.target}` : ''}`}</Text>) : null}
               </Box>
             ) : null}
+            {message && !isActionNote(message) ? <Text color="#f85149">{message}</Text> : null}
           </>,
         )}
 
-        <Button key="more-toggle" label={open.more ? '접기 — 진행률 · 시험 결과 · 드림 · 변경 이력' : '더 보기 — 진행률 · 시험 결과 · 드림 · 변경 이력'} onPress={() => void toggleMore().catch(() => undefined)} />
+        <Button key="more-toggle" label={open.more ? '접기 — 진행률 · 시험 결과 · 변경 이력' : '더 보기 — 진행률 · 시험 결과 · 변경 이력'} onPress={() => void toggleMore().catch(() => undefined)} />
         {open.more ? (
           <Box flexDirection="column" marginTop={1}>
         {returnLine(plan, plans) ? <Text dimColor>{returnLine(plan, plans)}</Text> : null}
@@ -2362,8 +2456,6 @@ export const register: Register = on => {
               rows.map(row => <Text color={RESULT_COLOR[row.result]}>{`${row.id} ${row.name} — ${RESULT_LABEL[row.result]}`}</Text>)}
           </>,
         )}
-
-        {dreamsPart()}
           </Box>
         ) : null}
       </Box>
