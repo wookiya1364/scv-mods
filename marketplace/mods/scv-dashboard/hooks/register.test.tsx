@@ -2868,7 +2868,7 @@ test('parallel-steps T8 사용자 차례 · 답 기다림은 진행 중인 단�
 })
 
 // ── step evidence: '끝'에는 증거 · 누르면 증거와 실제 진행 (계획 20261117-wookiya1364-checks-not-comments 4단계) ─────────
-import { backgroundSteps, doingWord, evidenceKind, isBackgroundSignal, judgeEvidence, keptFunctions, liveOf, proofView, signalAnswer, stepFunctionView } from './model'
+import { backgroundSteps, bigIndexOf, doingWord, evidenceKind, isBackgroundSignal, isDrawable, judgeEvidence, keptFunctions, liveOf, proofView, signalAnswer, stepFunctionView, turnPicture } from './model'
 
 // Three steps: the first names the pure functions it builds; the other two name none, so they have a screen to show.
 const MIXED = ['순수부 만들기 — `fa`, `fb`', '화면 그리기', '훈련 돌리기']
@@ -3047,6 +3047,73 @@ test('step-evidence T20 옛 기록에 남은 소스 파일 증거는 여는 버�
   expect(proofView({ files: [{ path: 'a.ts', size: 1, kind: 'image' }, { path: 'b.mp4', size: 2, kind: 'image' }] }, [])).toEqual({ files: [{ path: 'b.mp4', size: 2, kind: 'video' }], output: '', note: '', isMissing: false })
   expect(proofView(undefined, ['fa'])).toEqual({ files: [], output: '', note: '화면이 없는 단계 — 순수 함수 1개가 증거입니다: fa', isMissing: false })
   expect(proofView(undefined, []).isMissing).toBe(true)
+})
+
+test('step-evidence T21 증거 그림의 크게 보기를 누르면 창 전체가 그 그림이 되고, 닫으면 단계 흐름으로 돌아온다', async ($, on) => {
+  const { store, processes } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
+  evidenceFiles(on, { '/work/shot.png': { base64: 'iVBORw0KGgo=', mtimeMs: 1 }, '/work/chart.svg': { base64: 'PHN2Zy8+', mtimeMs: 1 }, '/work/run.mp4': { base64: 'AA', mtimeMs: 1 } })
+  store.set('signals:/work', [
+    { plan: 'a', step: 2, state: 'done', note: '', at: 1, evidence: { files: [{ path: 'shot.png', size: 12, kind: 'image' }, { path: 'run.mp4', size: 2, kind: 'video' }, { path: 'chart.svg', size: 8, kind: 'image' }] } },
+  ])
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'step-2' })
+  // 그림에만 크게 보기가 붙는다 — 영상은 여는 버튼뿐
+  expect(await ui.find({ type: 'Button', key: 'evidence-big-0' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'evidence-big-1' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'evidence-big-2' })).toBeDefined()
+  const small = (await ui.findAll({ type: 'Svg' })).map(one => String(one.props.source ?? ''))
+  expect(small.some(source => source.includes('width="1280"'))).toBe(false)
+
+  await ui.press({ key: 'evidence-big-0' })
+  let drawn = await drawnText($)
+  expect(drawn).toContain('증거 크게 보기 — 2. 화면 그리기')
+  expect(drawn).toContain('shot.png (1/2)')
+  expect(drawn).not.toContain('단계 흐름')
+  const big = await ui.findAll({ type: 'Svg' })
+  expect(big.length).toBe(1)
+  expect(String(big[0]?.props.source ?? '')).toContain('width="1280" height="800"')
+  expect(String(big[0]?.props.source ?? '')).toContain('data:image/png;base64,iVBORw0KGgo=')
+  expect(big[0]?.props.width).toBeUndefined()
+
+  // 다음은 영상을 건너뛰어 둘째 그림으로, 한 번 더 누르면 처음으로 돈다
+  await ui.press({ key: 'big-next' })
+  drawn = await drawnText($)
+  expect(drawn).toContain('chart.svg (2/2)')
+  expect(drawn).toContain('data:image/svg+xml;base64,PHN2Zy8+')
+  await ui.press({ key: 'big-next' })
+  expect(await drawnText($)).toContain('shot.png (1/2)')
+  await ui.press({ key: 'big-prev' })
+  expect(await drawnText($)).toContain('chart.svg (2/2)')
+  await ui.press({ key: 'big-open' })
+  expect(processes.some(argv => argv.includes('/work/chart.svg'))).toBe(true)
+
+  await ui.press({ key: 'big-close' })
+  drawn = await drawnText($)
+  expect(drawn).toContain('단계 흐름')
+  expect(drawn).not.toContain('증거 크게 보기')
+  expect(drawn).toContain('▸ shot.png 열기')
+  // 크게 본 채로 다른 단계를 고르면 크게 보기는 풀린다
+  await ui.press({ key: 'evidence-big-2' })
+  expect(await drawnText($)).toContain('증거 크게 보기')
+  await ui.press({ key: 'big-back' })
+  await ui.press({ key: 'step-1' })
+  expect(await drawnText($)).not.toContain('증거 크게 보기')
+  await ui.unmount()
+
+  // 순수: 어느 그림을 크게 보는지, 다음 · 이전
+  const files = [{ path: 'a.png', size: 1, kind: 'image' }, { path: 'b.mp4', size: 1, kind: 'video' }, { path: 'c.svg', size: 1, kind: 'image' }, { path: 'd.png', size: 200 * 1024, kind: 'image' }] as const
+  expect(files.map(isDrawable)).toEqual([true, false, true, false])
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 2 }, 'a', 1, files)).toBe(2)
+  expect(bigIndexOf(null, 'a', 1, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 0 }, 'b', 1, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 0 }, 'a', 2, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 0 }, 'a', null, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 1 }, 'a', 1, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 3 }, 'a', 1, files)).toBeNull()
+  expect(bigIndexOf({ plan: 'a', step: 1, index: 9 }, 'a', 1, files)).toBeNull()
+  expect([turnPicture(0, files, 1), turnPicture(2, files, 1), turnPicture(0, files, -1), turnPicture(1, files, 1)]).toEqual([2, 0, 2, 1])
+  expect(turnPicture(0, [files[0]], 1)).toBe(0)
 })
 
 test('step-evidence T21 끝난 단계에도 함수 목록이 그대로 보인다 — 누르지 않아도, 다음 단계로 넘어가도, 모두 끝나도', async ($, on) => {

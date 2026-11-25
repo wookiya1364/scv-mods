@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
+import type { AgentState, BigProof, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
 import type { FileFact, MirrorAct } from './model'
 import {
   STEP_TOOL,
@@ -26,8 +26,13 @@ import {
   buildAlertText,
   buildStepPrompt,
   checkSignal,
+  BIG_HEIGHT,
+  BIG_WIDTH,
+  bigIndexOf,
   IMAGE_DRAW_BYTES,
   imageSvg,
+  isDrawable,
+  turnPicture,
   judgeEvidence,
   lastSignalOf,
   liveOf,
@@ -249,6 +254,8 @@ const fitGear = async ($: Api, text: string) => {
   if ((await read($, gearHint)) !== name) await update($, gearHint, () => name)
 }
 const focusStep = atom({ plugin: 'scv-dashboard', key: 'focusStep' } as const, null as number | null)
+// The proof picture a person pressed to see large; while it stands, the pane draws that picture alone.
+const bigProof = atom({ plugin: 'scv-dashboard', key: 'bigProof' } as const, null as BigProof | null)
 const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
 // The functions each step made and called, by `<plan>#<step index>`; kept per project like the step signals.
 const stepFunctions = atom({ plugin: 'scv-dashboard', key: 'stepFunctions' } as const, {} as Record<string, StepFunctions>)
@@ -473,11 +480,11 @@ const logTail = async ($: Api, full: string) => {
 }
 
 // A picture sent as evidence, drawn when small enough; null leaves it to the open button.
-const evidencePicture = async ($: Api, full: string, size: number) => {
+const evidencePicture = async ($: Api, full: string, size: number, width?: number, height?: number) => {
   if (size > IMAGE_DRAW_BYTES) return null
   const bytes = (await $.fs.read(full, { as: 'bytes' }).catch(() => undefined)) as { base64?: string } | undefined
 
-  return bytes?.base64 ? imageSvg(bytes.base64, full) : null
+  return bytes?.base64 ? imageSvg(bytes.base64, full, width, height) : null
 }
 
 // What a step's writing made and called, kept with the step: functions under a marker are made; known functions (the
@@ -2010,6 +2017,10 @@ export const register: Register = on => {
     // A finished step's proof: only what a person can look at. A picture is drawn; a video or a page gets a button.
     const proof = focusedStage?.state === 'done' ? proofView(focusedSignal?.evidence, focusedStage.refs) : null
     const pictures = proof ? await Promise.all(proof.files.map(file => (file.kind === 'image' ? evidencePicture($, fullOf(file.path), file.size) : Promise.resolve(null)))) : []
+    // The picture a person pressed to see large, drawn in place of the whole pane until they close it.
+    const bigAt = proof ? bigIndexOf(await read($, bigProof), plan.slug, focused, proof.files) : null
+    const bigFile = proof && bigAt !== null ? proof.files[bigAt] : undefined
+    const bigPicture = bigFile ? await evidencePicture($, fullOf(bigFile.path), bigFile.size, BIG_WIDTH, BIG_HEIGHT) : null
     const liveSource = focusedStage && isHere(focusedStage.state) && focusedSignal?.state !== 'done' ? focusedSignal?.source : undefined
     const liveView = liveSource?.log ? liveOf((await logTail($, fullOf(liveSource.log))) ?? '') : null
     const done = focusedView?.done ?? { made: [], used: [] }
@@ -2067,6 +2078,29 @@ export const register: Register = on => {
         )
       : null
     const agentRows = agentLines(team, at, formatDuration)
+
+    if (Svg && proof && bigFile && bigPicture && bigAt !== null && focusedStage && focused !== null) {
+      const shown = proof.files.filter(isDrawable)
+      const closeBig = () => void update($, bigProof, () => null)
+      const turn = (delta: 1 | -1) => () => void update($, bigProof, () => ({ plan: plan.slug, step: focused, index: turnPicture(bigAt, proof.files, delta) }))
+
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text bold>{`증거 크게 보기 — ${focused + 1}. ${focusedStage.name}`}</Text>
+            <Button key="big-close" label="✕ 닫기" onPress={closeBig} />
+          </Box>
+          <Svg source={bigPicture} alt={`증거 그림 크게 ${bigFile.path}`} />
+          <Text dimColor>{shown.length > 1 ? `${bigFile.path} (${shown.indexOf(bigFile) + 1}/${shown.length})` : bigFile.path}</Text>
+          <Box flexDirection="row" gap={1}>
+            {shown.length > 1 ? <Button key="big-prev" label="◀ 이전" onPress={turn(-1)} /> : null}
+            {shown.length > 1 ? <Button key="big-next" label="다음 ▶" onPress={turn(1)} /> : null}
+            <Button key="big-open" label="새 창으로 열기" onPress={() => void openThing($, fullOf(bigFile.path))} />
+            <Button key="big-back" label="돌아가기" onPress={closeBig} />
+          </Box>
+        </Box>
+      )
+    }
 
     return (
       <Box flexDirection="column">
@@ -2160,6 +2194,9 @@ export const register: Register = on => {
                     {proof.files.map((file, i) => (
                       <Box flexDirection="column">
                         {Svg && pictures[i] ? <Svg source={pictures[i] as string} alt={`증거 그림 ${file.path}`} width={320} height={200} /> : null}
+                        {Svg && pictures[i] && focused !== null ? (
+                          <Button key={`evidence-big-${i}`} label="⤢ 크게 보기" onPress={() => void update($, bigProof, () => ({ plan: plan.slug, step: focused, index: i }))} />
+                        ) : null}
                         <Button key={`evidence-${i}`} plain onPress={() => void openThing($, fullOf(file.path))}>
                           {`▸ ${file.path} 열기`}
                         </Button>

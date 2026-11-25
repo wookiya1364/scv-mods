@@ -40,6 +40,9 @@ export type Stage = { name: string; state: StageState; refs: string[]; role?: st
 // to open) and/or a command's output. A step with no file stands on the pure functions its plan line names.
 export type EvidenceFile = { path: string; size: number; kind: 'image' | 'video' | 'document' }
 export type Evidence = { files: EvidenceFile[]; output?: string }
+// The proof picture a person asked to see large: the plan, the step's place in its flow (from 0) and the file's place
+// among that step's proof files.
+export type BigProof = { plan: string; step: number; index: number }
 
 // Where a running step's real progress can be seen: a log file in the project and/or a page to open.
 export type StepSource = { log?: string; url?: string }
@@ -202,6 +205,7 @@ declare module 'claude-code' {
       gearsAll: boolean
       gearRecent: string[]
       focusStep: number | null
+      bigProof: BigProof | null
       stepLog: Record<string, WorkEntry[]>
       stepFunctions: Record<string, StepFunctions>
       showCalls: boolean

@@ -3,6 +3,7 @@
 
 import type {
   AgentState,
+  BigProof,
   Block,
   Catalog,
   DoneEntry,
@@ -875,6 +876,33 @@ export const imageSvg = (base64: string, path: string, width = 320, height = 200
   const mime = ext === 'jpg' ? 'jpeg' : ext === 'svg' ? 'svg+xml' : ext
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><image href="data:image/${mime};base64,${base64}" width="${width}" height="${height}" preserveAspectRatio="xMidYMid meet"/></svg>`
+}
+
+// The box a proof picture is drawn in when a person asks to see it large: wider than a pane, so the surface draws
+// it at the pane's whole width.
+export const BIG_WIDTH = 1280
+export const BIG_HEIGHT = 800
+
+// A proof file the pane can draw itself: a picture small enough.
+export const isDrawable = (file: EvidenceFile) => file.kind === 'image' && file.size <= IMAGE_DRAW_BYTES
+
+// The place (among a step's proof files) of the picture shown large now — null when nothing was asked, another plan
+// or step is in view, or that place holds nothing the pane can draw.
+export const bigIndexOf = (big: BigProof | null, slug: string, step: number | null, files: readonly EvidenceFile[]): number | null => {
+  if (!big || step === null || big.plan !== slug || big.step !== step) return null
+  const file = files[big.index]
+
+  return file && isDrawable(file) ? big.index : null
+}
+
+// The next (1) or the one before (-1) among the pictures the pane can draw, going round; the same place when it is
+// the only one.
+export const turnPicture = (index: number, files: readonly EvidenceFile[], delta: 1 | -1): number => {
+  const places = files.flatMap((file, i) => (isDrawable(file) ? [i] : []))
+  const at = places.indexOf(index)
+  if (at < 0 || places.length === 0) return index
+
+  return places[(at + delta + places.length) % places.length] as number
 }
 
 // Steps reported done within this of each other were reported together; the gap says nothing of the work.
