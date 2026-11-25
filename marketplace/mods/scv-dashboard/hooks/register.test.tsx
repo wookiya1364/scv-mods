@@ -4411,3 +4411,799 @@ test('direct T16 결과를 대화에 붙이기는 누를 때만 — 입력창에
   expect(kit.spawns).toHaveLength(1)
   await ui.unmount()
 })
+
+// ── after pane 0.5.0: the word dictionary card ─────────────────────────────────────────
+import { MIRROR_ACTS, actLabel, fromMirrorLine, checkWord, formsLine, isActText, parseAct, parseWords, wireTail, wordLine, wordsAddArgv, wordsCommand, wordsFold, wordsFormKind, wordsRemoveArgv, wordsSaid } from './model'
+
+const WORDS_SH = `${CORE_DIR}/scripts/words.sh`
+const WORDS_TSV = ['# 피할 말\t바꿀 말\t변형\t메모', '', '재다\t측정하다\t잰, 재서, 재 본\t단위가 있는 값에', '돌리다\t실행하다\t\t', '까먹다\t잊다\t까먹은, 까먹어서\t'].join('\n')
+// a project with SCV installed and this dictionary file (null: no file yet)
+const wordsKit = (on: On, words: string | null = WORDS_TSV, opts: { isInstalled?: boolean } = {}) => {
+  const kit = engine(on, {})
+  withProject(kit, opts)
+  if (words !== null) kit.extra['scv/words/WORDS.tsv'] = words
+
+  return kit
+}
+const wordsRuns = (kit: { runs: { argv: string[]; cwd?: string }[] }) => kit.runs.filter(one => one.argv[1]?.endsWith('/scripts/words.sh'))
+const hasInput = async (ui: { find: (q: { type: 'Input'; key: string }) => Promise<unknown> }, key: string) => Boolean(await ui.find({ type: 'Input', key }))
+
+test('words T1 순수부 — 사전 읽기 · 접기 · 저장 전 검사 · 명령의 낱말 · 본체가 한 말', () => {
+  expect(parseWords(WORDS_TSV)).toEqual([
+    { avoid: '재다', use: '측정하다', forms: ['잰', '재서', '재 본'], note: '단위가 있는 값에' },
+    { avoid: '돌리다', use: '실행하다', forms: [], note: '' },
+    { avoid: '까먹다', use: '잊다', forms: ['까먹은', '까먹어서'], note: '' },
+  ])
+  expect(parseWords(null)).toEqual([])
+  // the avoided word is the key (a later line replaces); a line without both words is skipped
+  expect(parseWords('재다\t측정\r\n재다\t계측\t잰\n빈말\t\n\t없음\n한 칸뿐\n  # 들여 쓴 주석\t x')).toEqual([{ avoid: '재다', use: '계측', forms: ['잰'], note: '' }])
+  expect(wordLine({ avoid: '재다', use: '측정하다' })).toBe('재다 → 측정하다')
+  expect(formsLine({ forms: ['잰', '재서'] })).toBe('잰 · 재서')
+  expect(formsLine({ forms: [] })).toBe(null)
+  const ten = parseWords(Array.from({ length: 10 }, (_, i) => `말${i}\t바꿈${i}`).join('\n'))
+  expect(wordsFold(ten, false).shown).toHaveLength(8)
+  expect(wordsFold(ten, false).hidden).toBe(2)
+  expect(wordsFold(ten, true).hidden).toBe(0)
+
+  expect(checkWord({ avoid: ' 재다 ', use: '측정하다', forms: '잰 ,재서,, 재 본' })).toEqual({ isOk: true, word: { avoid: '재다', use: '측정하다', forms: '잰, 재서, 재 본' } })
+  expect(checkWord({ avoid: '', use: '측정' })).toEqual({ isOk: false, reason: '저장하지 않음 — 피할 말과 바꿀 말을 모두 적어 주세요' })
+  expect(checkWord({ avoid: '재\t다', use: '측정' }).isOk).toBe(false)
+  expect(checkWord({ avoid: '재다', use: '측\n정' }).isOk).toBe(false)
+  expect(checkWord({ avoid: '재다', use: '재다' }).isOk).toBe(false)
+  expect(checkWord({ avoid: '가'.repeat(81), use: '측정' }).isOk).toBe(false)
+  expect(checkWord({ avoid: 7, use: '측정' }).isOk).toBe(false)
+
+  // every typed text is one word of the command, after its own flag
+  expect(wordsAddArgv(CORE_DIR, { avoid: '재다', use: '측정하다', forms: '' })).toEqual(['bash', WORDS_SH, 'add', '--avoid', '재다', '--use', '측정하다'])
+  expect(wordsAddArgv(CORE_DIR, { avoid: '재다', use: '측정하다', forms: '잰, 재서' }, '메모')).toEqual(['bash', WORDS_SH, 'add', '--avoid', '재다', '--use', '측정하다', '--forms', '잰, 재서', '--note', '메모'])
+  expect(wordsRemoveArgv(CORE_DIR, '재다')).toEqual(['bash', WORDS_SH, 'remove', '재다'])
+  expect(wordsCommand({ avoid: '재다', use: '측정하다' })).toBe('/scv:words add 재다 → 측정하다')
+
+  expect(wordsSaid({ exitCode: 0, stdout: 'WORDS_SAVED: 재다 → 측정하다\n', stderr: '' })).toEqual({ kind: 'done', line: '저장함: 재다 → 측정하다' })
+  expect(wordsSaid({ exitCode: 0, stdout: 'WORDS_REMOVED: 재다\n', stderr: '' })).toEqual({ kind: 'done', line: '지움: 재다' })
+  expect(wordsSaid({ exitCode: 2, stdout: '', stderr: 'WORDS_ERROR: 탭은 넣을 수 없음\n' })).toEqual({ kind: 'error', line: '사전을 바꾸지 못함 — 탭은 넣을 수 없음' })
+  expect(wordsSaid({ exitCode: 1, stdout: 'WORDS_ERROR: 없는 말\n', stderr: '' }).kind).toBe('error')
+  // an SCV without the command (no such file, or it prints something else), or a run that never started
+  expect(wordsSaid({ exitCode: 127, stdout: '', stderr: 'bash: words.sh: No such file or directory\n' })).toEqual({ kind: 'none' })
+  expect(wordsSaid({ exitCode: 0, stdout: '사용법: …\n', stderr: '' })).toEqual({ kind: 'none' })
+  expect(wordsSaid({ exitCode: 1, stdout: 'WORDS_SAVED: 재다 → 측정\n', stderr: '' })).toEqual({ kind: 'none' })
+  expect(wordsSaid(undefined)).toEqual({ kind: 'none' })
+
+  // where the card takes a new entry: its own form, the slash command (no field here), a line (no field, a mirror)
+  expect(wordsFormKind({ controls: true, input: true, isMirror: false })).toBe('form')
+  expect(wordsFormKind({ controls: true, input: true, isMirror: true })).toBe('form')
+  expect(wordsFormKind({ controls: true, input: false, isMirror: false })).toBe('command')
+  expect(wordsFormKind({ controls: true, input: false, isMirror: true })).toBe('none')
+  expect(wordsFormKind({ controls: false, input: true, isMirror: true })).toBe('hidden')
+  expect(paneSections({ plan: false, blocks: false, project: true, words: true })).toEqual(['limits', 'askMode', 'gears', 'words'])
+  expect(paneSections({ plan: true, blocks: false, project: false, words: true })).toEqual(['limits', 'steps', 'more'])
+})
+
+test('words T2 사전이 비어도 칸이 있다 — 무엇을 위한 것인지 한 줄과 예, 그리고 넣는 칸', async ($, on) => {
+  wordsKit(on, null)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const drawn = await drawnText($)
+
+  expect(await text(ui, /^낱말 사전/)).toBe('낱말 사전 0')
+  expect(drawn).toContain('예: 재다 → 측정하다')
+  expect(drawn.indexOf('저장해 둔 일(기어)')).toBeLessThan(drawn.indexOf('낱말 사전 0'))
+  expect(await hasInput(ui, 'words-avoid-0')).toBe(true)
+  expect(await hasInput(ui, 'words-use-0')).toBe(true)
+  expect(await hasInput(ui, 'words-forms-0')).toBe(true)
+  expect(await labelOf(ui, 'words-save')).toBe('저장')
+  expect((await ui.find({ type: 'Input', key: 'words-avoid-0' }))?.props.label).toBe('피할 말')
+  expect((await ui.find({ type: 'Input', key: 'words-use-0' }))?.props.label).toBe('바꿀 말')
+  expect((await ui.find({ type: 'Input', key: 'words-forms-0' }))?.props.label).toBe('변형(쉼표로)')
+  await ui.unmount()
+})
+
+test('words T3 낱말마다 한 줄 — 피할 말 → 바꿀 말, 아래에 변형. 변형이 없으면 Claude 가 채운다고 하고 채우기는 입력창에 명령을 넣는다', async ($, on) => {
+  wordsKit(on)
+  const { fills } = promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const drawn = await drawnText($)
+
+  expect(await text(ui, /^낱말 사전/)).toBe('낱말 사전 3')
+  expect(await text(ui, /^재다 →/)).toBe('재다 → 측정하다')
+  expect(await text(ui, /^잰 ·/)).toBe('잰 · 재서 · 재 본')
+  expect(await text(ui, /^돌리다 →/)).toBe('돌리다 → 실행하다')
+  expect(await text(ui, /^변형 없음/)).toBe('변형 없음 — Claude 가 채움')
+  expect(drawn).not.toContain('피할 말\\t')
+  expect(drawn).not.toContain('단위가 있는 값에')
+  // only the entry without forms has the button
+  expect(await has(ui, 'words-fill-0')).toBe(false)
+  expect(await labelOf(ui, 'words-fill-1')).toBe('채우기')
+  expect(await labelOf(ui, 'words-edit-0')).toBe('고치기')
+  expect(await labelOf(ui, 'words-remove-0')).toBe('지우기')
+  await ui.press({ key: 'words-fill-1' })
+  expect(fills).toEqual([{ text: '/scv:words fill', mode: 'replace' }])
+  expect(await text(ui, /^입력창에 넣음: \/scv:words fill/)).toBe('입력창에 넣음: /scv:words fill — 보내면 Claude 가 빈 변형을 채웁니다')
+  await ui.unmount()
+})
+
+test('words T4 저장 — 본체의 사전 명령을 프로젝트 폴더에서, 적은 글은 낱말 하나씩의 값으로 부르고, 한 말을 칸에 보인다', async ($, on) => {
+  const kit = wordsKit(on, null)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // quotes, a semicolon, a command substitution: each still one word after its flag
+  const avoid = '재"다; rm -rf x'
+  const use = "측정 '하다' $(id)"
+  await ui.input({ key: 'words-avoid-0', text: avoid, kind: 'change' })
+  await ui.input({ key: 'words-use-0', text: use, kind: 'change' })
+  kit.proc.stdout = `WORDS_SAVED: ${avoid} → ${use}\n`
+  kit.extra['scv/words/WORDS.tsv'] = `${avoid}\t${use}\t\t\n`
+  await ui.press({ key: 'words-save' })
+  await settle()
+
+  expect(wordsRuns(kit)).toHaveLength(1)
+  expect(wordsRuns(kit)[0]?.argv).toEqual(['bash', WORDS_SH, 'add', '--avoid', avoid, '--use', use])
+  expect(wordsRuns(kit)[0]?.cwd).toBe('/work')
+  expect(await text(ui, /^저장함/)).toBe(`저장함: ${avoid} → ${use}`)
+  // read again: the entry is listed, and the form is a new, empty one
+  expect(await text(ui, /^낱말 사전/)).toBe('낱말 사전 1')
+  expect(await hasInput(ui, 'words-avoid-0')).toBe(false)
+  expect(await hasInput(ui, 'words-avoid-1')).toBe(true)
+  // with forms, saved by Enter in the last field: the list goes as one word, tidied
+  await ui.input({ key: 'words-avoid-1', text: '돌리다', kind: 'change' })
+  await ui.input({ key: 'words-use-1', text: '실행하다' })
+  kit.proc.stdout = 'WORDS_SAVED: 돌리다 → 실행하다\n'
+  await ui.input({ key: 'words-forms-1', text: '돌린 ,돌려서,, 돌리는' })
+  await settle()
+  expect(wordsRuns(kit)).toHaveLength(2)
+  expect(wordsRuns(kit)[1]?.argv).toEqual(['bash', WORDS_SH, 'add', '--avoid', '돌리다', '--use', '실행하다', '--forms', '돌린, 돌려서, 돌리는'])
+  await ui.unmount()
+})
+
+test('words T5 본체가 거절하면 그 이유를 보이고 적은 글은 남는다 — 빈 칸이면 아예 부르지 않는다', async ($, on) => {
+  const kit = wordsKit(on)
+  const { fills } = promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(wordsRuns(kit)).toHaveLength(0)
+  expect(await text(ui, /^저장하지 않음/)).toBe('저장하지 않음 — 피할 말과 바꿀 말을 모두 적어 주세요')
+
+  await ui.input({ key: 'words-avoid-0', text: '재다', kind: 'change' })
+  await ui.input({ key: 'words-use-0', text: '계측하다', kind: 'change' })
+  kit.procEnd.exitCode = 2
+  kit.procEnd.stderr = 'WORDS_ERROR: 바꿀 말이 다른 낱말의 피할 말입니다\n'
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(wordsRuns(kit)).toHaveLength(1)
+  expect(await text(ui, /^사전을 바꾸지 못함/)).toBe('사전을 바꾸지 못함 — 바꿀 말이 다른 낱말의 피할 말입니다')
+  // refused: nothing goes to the prompt box, and the form is the same one
+  expect(fills).toHaveLength(0)
+  expect(await hasInput(ui, 'words-avoid-0')).toBe(true)
+  await ui.unmount()
+})
+
+test('words T6 지우기는 그 자리에서 한 번 묻는다 — 취소면 아무것도 부르지 않고, 지우기면 본체 명령으로 지운다', async ($, on) => {
+  const kit = wordsKit(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'words-remove-0' })
+  expect(await text(ui, /^지울까요/)).toBe('지울까요?')
+  expect(await labelOf(ui, 'words-remove-yes')).toBe('지우기')
+  expect(await labelOf(ui, 'words-remove-no')).toBe('취소')
+  // the asked entry's own buttons are gone while it is asked about
+  expect(await has(ui, 'words-remove-0')).toBe(false)
+  await ui.press({ key: 'words-remove-no' })
+  expect(wordsRuns(kit)).toHaveLength(0)
+  expect(await drawnText($)).not.toContain('지울까요?')
+
+  await ui.press({ key: 'words-remove-0' })
+  kit.proc.stdout = 'WORDS_REMOVED: 재다\n'
+  kit.extra['scv/words/WORDS.tsv'] = WORDS_TSV.split('\n').filter(line => !line.startsWith('재다')).join('\n')
+  await ui.press({ key: 'words-remove-yes' })
+  await settle()
+  expect(wordsRuns(kit)).toHaveLength(1)
+  expect(wordsRuns(kit)[0]?.argv).toEqual(['bash', WORDS_SH, 'remove', '재다'])
+  expect(wordsRuns(kit)[0]?.cwd).toBe('/work')
+  expect(await text(ui, /^지움/)).toBe('지움: 재다')
+  expect(await text(ui, /^낱말 사전/)).toBe('낱말 사전 2')
+  expect(await drawnText($)).not.toContain('재다 → 측정하다')
+  await ui.unmount()
+})
+
+test('words T7 본체를 못 찾거나 사전 명령이 없는 옛 본체면 입력창에 명령을 넣고 그렇게 말한다', async ($, on) => {
+  const kit = wordsKit(on, null, { isInstalled: false })
+  const { fills } = promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.input({ key: 'words-avoid-0', text: '재다', kind: 'change' })
+  await ui.input({ key: 'words-use-0', text: '측정하다', kind: 'change' })
+  await ui.press({ key: 'words-save' })
+  await settle()
+
+  expect(wordsRuns(kit)).toHaveLength(0)
+  expect(fills).toEqual([{ text: '/scv:words add 재다 → 측정하다', mode: 'replace' }])
+  expect(await text(ui, /^바로 저장하지 못해/)).toBe('바로 저장하지 못해 입력창에 넣음: /scv:words add 재다 → 측정하다')
+  await ui.unmount()
+})
+
+test('words T7b 옛 본체 — 명령이 돌았지만 저장했다는 말이 없으면 입력창으로 넘긴다(지우기도)', async ($, on) => {
+  const kit = wordsKit(on)
+  const { fills } = promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  kit.procEnd.exitCode = 127
+  kit.procEnd.stderr = `bash: ${WORDS_SH}: No such file or directory\n`
+  await ui.input({ key: 'words-avoid-0', text: '살피다', kind: 'change' })
+  await ui.input({ key: 'words-use-0', text: '확인하다', kind: 'change' })
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(wordsRuns(kit)).toHaveLength(1)
+  expect(fills).toEqual([{ text: '/scv:words add 살피다 → 확인하다', mode: 'replace' }])
+
+  await ui.press({ key: 'words-remove-0' })
+  await ui.press({ key: 'words-remove-yes' })
+  await settle()
+  expect(fills[1]).toEqual({ text: '/scv:words remove 재다', mode: 'replace' })
+  expect(await text(ui, /^바로 지우지 못해/)).toBe('바로 지우지 못해 입력창에 넣음: /scv:words remove 재다')
+  await ui.unmount()
+})
+
+test('words T8 여덟 줄까지 보이고 나머지는 N개 더 보기 — 고치기는 그 낱말을 칸에 열고, 메모는 남고, 피할 말을 바꾸면 옛 줄은 지운다', async ($, on) => {
+  const many = Array.from({ length: 11 }, (_, i) => `말${i}\t바꿈${i}\t변형${i}\t${i === 2 ? '남길 메모' : ''}`).join('\n')
+  const kit = wordsKit(on, many)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^말7 →/)).toBe('말7 → 바꿈7')
+  expect(await text(ui, /^말8 →/)).toBeUndefined()
+  expect(await labelOf(ui, 'words-all')).toBe('3개 더 보기')
+  await ui.press({ key: 'words-all' })
+  expect(await text(ui, /^말10 →/)).toBe('말10 → 바꿈10')
+  expect(await has(ui, 'words-all')).toBe(false)
+
+  // 고치기: the entry's own words are in the fields
+  await ui.press({ key: 'words-edit-2' })
+  expect(await text(ui, /^고치기 —/)).toBe('고치기 — 말2 → 바꿈2')
+  expect((await ui.find({ type: 'Input', key: 'words-avoid-1' }))?.props.value).toBe('말2')
+  expect((await ui.find({ type: 'Input', key: 'words-use-1' }))?.props.value).toBe('바꿈2')
+  expect((await ui.find({ type: 'Input', key: 'words-forms-1' }))?.props.value).toBe('변형2')
+  // saved as it stands: nothing is run
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(wordsRuns(kit)).toHaveLength(0)
+  expect(await text(ui, /^바뀐 것이 없어/)).toBe('바뀐 것이 없어 그대로 둠')
+  // the other word changed: the same key is saved again, with its note
+  await ui.press({ key: 'words-edit-2' })
+  await ui.input({ key: 'words-use-3', text: '새 바꿈', kind: 'change' })
+  kit.proc.stdout = 'WORDS_SAVED: 말2 → 새 바꿈\n'
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(wordsRuns(kit).map(one => one.argv.slice(2))).toEqual([['add', '--avoid', '말2', '--use', '새 바꿈', '--forms', '변형2', '--note', '남길 메모']])
+  // the avoided word changed: the new entry goes in, then the old one is taken out
+  await ui.press({ key: 'words-edit-2' })
+  await ui.input({ key: 'words-avoid-5', text: '새말', kind: 'change' })
+  kit.proc.stdout = 'WORDS_SAVED: 새말 → 바꿈2\n'
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(wordsRuns(kit).slice(1).map(one => one.argv.slice(2))).toEqual([['add', '--avoid', '새말', '--use', '바꿈2', '--forms', '변형2', '--note', '남길 메모'], ['remove', '말2']])
+  // 취소 leaves the form empty again
+  await ui.press({ key: 'words-edit-0' })
+  expect(await labelOf(ui, 'words-edit-cancel')).toBe('취소')
+  await ui.press({ key: 'words-edit-cancel' })
+  expect(await text(ui, /^낱말 추가$/)).toBe('낱말 추가')
+  await ui.unmount()
+})
+
+// ── after pane 0.5.0: the mirror can press things ────────────────────────────────
+
+// What a working session that takes presses sends: its project as read, its switches and notes, its gear state.
+const HOST_STATE = (over: Record<string, unknown> = {}, shot: Record<string, unknown> = {}) => ({
+  snapshot: { plans: [{ slug: 'p', isArchived: false, ...PLANNED().p }], cwd: '/host', root: '/host', settingsText: '{"SCV_ASK_MODE":"all"}', gearsText: DIRECT, wordsText: WORDS_TSV, core: '/host/scv-core', gearWaits: 0, ...shot },
+  contextFill: 40,
+  place: { home: '/home/h', branch: { name: 'main', isBranch: true } },
+  acts: MIRROR_ACTS,
+  light: { isOn: true, percent: 50 },
+  lightSaid: null,
+  branchPick: null,
+  placeNote: null,
+  paneNote: null,
+  wordsNote: null,
+  gearRuns: {},
+  gearForms: {},
+  gearOpen: null,
+  gearAsks: {},
+  gearRecent: [],
+  gearLive: [],
+  ...over,
+})
+const hostSends = ($: Engine, state: unknown) => $.session.receive({ origin: { kind: 'peer' }, text: envelope(mirrorText({ kind: 'state', body: JSON.stringify(state) })) })
+// a viewer session whose working session takes presses, with that session's state drawn
+const startPresser = async ($: Engine, on: On, over: Record<string, unknown> = {}) => {
+  const env = await startViewer($, on)
+  await hostSends($, HOST_STATE(over))
+
+  return env
+}
+// the acts this session sent to the working session, as their JSON
+const actsOf = (env: { sent: { to: string; text: string }[] }) =>
+  env.sent.filter(one => one.text.startsWith('SCV-MIRROR ACT session_viewer ')).map(one => one.text.replace('SCV-MIRROR ACT session_viewer ', ''))
+const WAITING = '작업 세션에 보냄 — 반영을 기다림'
+
+test('mirror-press T1 ACT 는 칸마다 모양을 검사한다 — 모르는 일 · 빠진 칸 · 기어 이름이 아닌 글 · 사전에 못 넣는 글은 버린다', () => {
+  const ok = (act: unknown) => parseAct(JSON.stringify(act))
+  expect(ok({ do: 'fill', slug: 'p' })).toEqual({ do: 'fill', slug: 'p' })
+  expect(ok({ do: 'askMode', to: 'ends' })).toEqual({ do: 'askMode', to: 'ends' })
+  expect(ok({ do: 'askMode', to: 'sometimes' })).toBeNull()
+  expect(ok({ do: 'lightSwitch', isOn: false })).toEqual({ do: 'lightSwitch', isOn: false })
+  expect(ok({ do: 'lightSwitch', isOn: 'no' })).toBeNull()
+  expect(ok({ do: 'lightMark', percent: 65 })).toEqual({ do: 'lightMark', percent: 65 })
+  expect(ok({ do: 'lightMark', percent: 500 })).toBeNull()
+  expect(ok({ do: 'lightMark', percent: '65' })).toBeNull()
+  expect(ok({ do: 'gearPress', name: 'tidy', canType: true })).toEqual({ do: 'gearPress', name: 'tidy', canType: true })
+  expect(ok({ do: 'gearPress', name: '../x', canType: true })).toBeNull()
+  expect(ok({ do: 'gearPress', name: 'tidy; rm -rf x', canType: true })).toBeNull()
+  expect(ok({ do: 'gearPress', name: 'tidy' })).toBeNull()
+  // values: argument names of SCV's own shape, each a text; anything else drops the whole act
+  expect(ok({ do: 'gearSubmit', name: 'ci-all', values: { os: 'linux; echo "x"' }, input: '자료' })).toEqual({ do: 'gearSubmit', name: 'ci-all', values: { os: 'linux; echo "x"' }, input: '자료' })
+  expect(ok({ do: 'gearSubmit', name: 'ci-all', values: { 'os --flag': 'x' }, input: '' })).toBeNull()
+  expect(ok({ do: 'gearSubmit', name: 'ci-all', values: { os: 7 }, input: '' })).toBeNull()
+  expect(ok({ do: 'gearSubmit', name: 'ci-all', values: ['os=linux'], input: '' })).toBeNull()
+  expect(ok({ do: 'gearSubmit', name: 'ci-all', values: { os: 'a'.repeat(2001) }, input: '' })).toBeNull()
+  expect(ok({ do: 'gearSubmit', name: 'ci-all', values: {} })).toBeNull()
+  expect(ok({ do: 'gearConfirm', name: 'ship', isYes: true })).toEqual({ do: 'gearConfirm', name: 'ship', isYes: true })
+  expect(ok({ do: 'gearConfirm', name: 'ship', isYes: 'yes' })).toBeNull()
+  expect(ok({ do: 'gearStop', name: 'tidy' })).toEqual({ do: 'gearStop', name: 'tidy' })
+  expect(ok({ do: 'branchList', isOpen: true })).toEqual({ do: 'branchList', isOpen: true })
+  expect(ok({ do: 'branchPick', to: 'feat/x' })).toEqual({ do: 'branchPick', to: 'feat/x' })
+  expect(ok({ do: 'branchPick', to: '--orphan' })).toBeNull()
+  expect(ok({ do: 'branchPick', to: 'a b' })).toBeNull()
+  expect(ok({ do: 'wordsSave', avoid: ' 재다 ', use: '측정하다', forms: '잰,재서', was: null })).toEqual({ do: 'wordsSave', avoid: '재다', use: '측정하다', forms: '잰, 재서', was: null })
+  expect(ok({ do: 'wordsSave', avoid: '재\t다', use: '측정하다', forms: '', was: null })).toBeNull()
+  expect(ok({ do: 'wordsSave', avoid: '재다', use: '', forms: '', was: null })).toBeNull()
+  expect(ok({ do: 'wordsSave', avoid: '재다', use: '측정', forms: '', was: 7 })).toBeNull()
+  expect(ok({ do: 'wordsRemove', avoid: '재다' })).toEqual({ do: 'wordsRemove', avoid: '재다' })
+  expect(ok({ do: 'wordsRemove', avoid: '재\n다' })).toBeNull()
+  // nothing else a message carried goes on
+  expect(ok({ do: 'gearStop', name: 'tidy', argv: ['rm', '-rf', '/'] })).toEqual({ do: 'gearStop', name: 'tidy' })
+  expect(ok({ do: 'shell', command: 'id' })).toBeNull()
+  expect(ok(['gearStop'])).toBeNull()
+  expect(parseAct('{not json')).toBeNull()
+
+  // a delivery with the mark of an act that parses to none is still told apart from a plain message
+  expect(isActText(envelope('SCV-MIRROR ACT session_v {"do":"shell"}'))).toBe(true)
+  expect(isActText(envelope('그냥 메시지'))).toBe(false)
+  expect(actLabel({ do: 'askMode', to: 'ends' })).toBe('묻기 방식 → 처음 · 끝에만 묻기')
+  expect(actLabel({ do: 'gearConfirm', name: 'ship', isYes: false })).toBe('기어 확인 — ship: 취소')
+  expect(actLabel({ do: 'wordsSave', avoid: '재다', use: '측정하다', forms: '', was: null })).toBe('낱말 저장 — 재다 → 측정하다')
+  // what the working session's pane keeps: what was pressed in the mirror, and when (17:40 in Seoul)
+  expect(fromMirrorLine({ do: 'gearStop', name: 'tidy' }, Date.parse('2026-10-23T08:40:00Z'), KST)).toBe('거울에서: 기어 멈춤 — tidy · 17:40')
+  // a run's output goes to a viewer as the lines a card shows
+  expect(wireTail(Array.from({ length: 40 }, (_, i) => `줄 ${i + 1}`).join('\n')).split('\n')).toHaveLength(12)
+  expect(wireTail('a\n\u001b[32mRELEASE_OK\u001b[0m\n')).toBe('a\nRELEASE_OK')
+})
+
+test('mirror-press T2 누를 수 있다고 말하지 않은 작업 세션(옛 버전)의 상태에는 버튼이 없고, 말한 상태에는 버튼과 안내 한 줄이 있다', async ($, on) => {
+  await startViewer($, on)
+  const { acts: _acts, ...old } = HOST_STATE()
+  await hostSends($, old)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const before = await drawnText($)
+
+  // the cards are drawn as before, with nothing to press
+  expect(before).toContain('묻기 방식')
+  expect(before).toContain('저장해 둔 일(기어) 5')
+  expect(before).toContain('낱말 사전 3')
+  expect(before).not.toContain('여기서 누르면')
+  for (const key of ['ask-mode-switch', 'light-toggle', 'light-up', 'branch-open', 'gear-run-tidy', 'words-remove-0', 'words-edit-0', 'words-save']) expect(await has(ui, key)).toBe(false)
+  expect(await hasInput(ui, 'words-avoid-0')).toBe(false)
+
+  await hostSends($, HOST_STATE())
+  expect(await text(ui, /^여기서 누르면/)).toBe('여기서 누르면 작업 세션에 메시지 한 줄이 남습니다.')
+  for (const key of ['ask-mode-switch', 'light-toggle', 'light-up', 'light-down', 'branch-open', 'gear-run-tidy', 'words-remove-0', 'words-edit-0', 'words-save']) expect(await has(ui, key)).toBe(true)
+  // what only the working session's own prompt box can take stays off the mirror
+  for (const key of ['gear-use-review', 'words-fill-1']) expect(await has(ui, key)).toBe(false)
+  await ui.unmount()
+})
+
+test('mirror-press T3 거울에서 묻기 방식 · 자동 요약 · 기준 · 브랜치를 누르면 작업 세션으로 ACT 가 가고, 여기서는 아무것도 돌지 않는다', async ($, on) => {
+  const env = await startPresser($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const ranBefore = env.runs.length
+
+  await ui.press({ key: 'ask-mode-switch' })
+  expect(actsOf(env)).toEqual(['{"do":"askMode","to":"ends"}'])
+  expect(env.sent.at(-1)?.to).toContain('session_host')
+  expect(await text(ui, /^작업 세션에 보냄/)).toBe(WAITING)
+  // the working session's answer: its state as it then stands — the waiting line goes, its own line shows
+  await hostSends($, HOST_STATE({ paneNote: '묻기 방식을 바꿈 — 다음 메시지부터 처음 · 끝에만 묻기' }, { settingsText: '{"SCV_ASK_MODE":"ends"}' }))
+  const answered = await drawnText($)
+  expect(answered).not.toContain(WAITING)
+  expect(answered).toContain('묻기 방식을 바꿈 — 다음 메시지부터 처음 · 끝에만 묻기')
+  expect(await labelOf(ui, 'ask-mode-switch')).toBe('전부 묻기로 바꾸기')
+
+  await ui.press({ key: 'light-toggle' })
+  await ui.press({ key: 'light-up' })
+  await ui.press({ key: 'light-down' })
+  expect(actsOf(env).slice(1)).toEqual(['{"do":"lightSwitch","isOn":false}', '{"do":"lightMark","percent":55}', '{"do":"lightMark","percent":45}'])
+  // this session's own switch is not touched
+  expect(env.store.get('scv-dashboard:light')).toBeUndefined()
+  // the mark at the end of its bar: a press changes nothing there, so nothing is sent
+  await hostSends($, HOST_STATE({ light: { isOn: true, percent: 95 } }))
+  expect(await drawnText($)).toContain('기준 95%')
+  await ui.press({ key: 'light-up' })
+  expect(actsOf(env)).toHaveLength(4)
+
+  await ui.press({ key: 'branch-open' })
+  expect(actsOf(env).at(-1)).toBe('{"do":"branchList","isOpen":true}')
+  await hostSends($, HOST_STATE({ branchPick: ['main', 'feat/x'] }))
+  expect(((await ui.find({ type: 'Select', key: 'branch-pick' }))?.props.options as { value: string }[]).map(one => one.value)).toEqual(['main', 'feat/x'])
+  // the branch already checked out: nothing would change, nothing is sent
+  await ui.select({ key: 'branch-pick', value: 'main' })
+  await settle()
+  expect(actsOf(env)).toHaveLength(5)
+  await ui.select({ key: 'branch-pick', value: 'feat/x' })
+  await settle()
+  expect(actsOf(env).at(-1)).toBe('{"do":"branchPick","to":"feat/x"}')
+  // the working session decides: its answer line is shown as it is
+  await hostSends($, HOST_STATE({ placeNote: '턴이 도는 중에는 브랜치를 바꾸지 않음 — 턴이 끝난 뒤 다시 눌러 주세요' }))
+  expect(await drawnText($)).toContain('턴이 도는 중에는 브랜치를 바꾸지 않음')
+  await ui.press({ key: 'branch-open' })
+  expect(actsOf(env).at(-1)).toBe('{"do":"branchList","isOpen":true}')
+
+  // no command ran in this session for any of these presses (only its own address was looked up)
+  expect(env.runs.slice(ranBefore).every(one => one.argv[0] === 'sh')).toBe(true)
+  // a send that fails says so
+  env.delivery.isDelivered = false
+  await ui.press({ key: 'ask-mode-switch' })
+  expect(await text(ui, /^작업 세션에 못 보냄/)).toBe('작업 세션에 못 보냄: no such session')
+  await ui.unmount()
+})
+
+test('mirror-press T4 거울에서 기어 — 실행 · 값 정하기 · 밖으로 나가는 일의 확인 · 멈춤이 ACT 로 가고, 고른 값과 적은 글은 실행을 누를 때 한 번에 간다', async ($, on) => {
+  const env = await startPresser($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  await ui.press({ key: 'gear-run-tidy' })
+  expect(actsOf(env)).toEqual(['{"do":"gearPress","name":"tidy","canType":true}'])
+  expect(env.spawns).toHaveLength(0)
+  expect(await text(ui, /^작업 세션에 보냄/)).toBe(WAITING)
+  // it runs there: the card follows it, and 멈춤 goes there too
+  await hostSends($, HOST_STATE({ gearRuns: { tidy: { startedAt: 1_000_000, endedAt: null, tail: '치우는 중 1/3', exitCode: null, isStopped: false } }, gearLive: ['tidy'], gearOpen: 'tidy', gearRecent: ['tidy'] }))
+  const running = await drawnText($)
+  expect(running).toContain('· 돌리는 중')
+  expect(running).toContain('│ 치우는 중 1/3')
+  expect(running).not.toContain('끊김')
+  expect(await has(ui, 'gear-run-tidy')).toBe(false)
+  await ui.press({ key: 'gear-stop-tidy' })
+  expect(actsOf(env).at(-1)).toBe('{"do":"gearStop","name":"tidy"}')
+  // ended there: its result lines, and no button that would fill this session's own prompt box
+  await hostSends($, HOST_STATE({ gearRuns: { tidy: { startedAt: 1_000_000, endedAt: 1_002_000, tail: '치운 파일 3개', exitCode: 0, isStopped: false } }, gearOpen: 'tidy', gearRecent: ['tidy'] }))
+  expect(await text(ui, /^│ 치운/)).toBe('│ 치운 파일 3개')
+  expect(await has(ui, 'gear-paste-tidy')).toBe(false)
+  expect(await has(ui, 'gear-use-tidy')).toBe(false)
+
+  // values: the block the working session opened is drawn here; a pick stays here, and goes with the run
+  const sentBefore = actsOf(env).length
+  await hostSends($, HOST_STATE({ gearForms: { 'ci-all': { kind: 'values', from: 'card', picked: { os: 'mac' } } }, gearAsks: { 'ci-all': DIRECT_ASKS['ci-all'] }, gearOpen: 'ci-all', gearRecent: ['ci-all'] }))
+  expect(await labelOf(ui, 'gear-pick-ci-all-os-0')).toBe('● mac')
+  await ui.press({ key: 'gear-pick-ci-all-os-1' })
+  expect(await labelOf(ui, 'gear-pick-ci-all-os-1')).toBe('● linux')
+  expect(actsOf(env)).toHaveLength(sentBefore)
+  expect(await has(ui, 'gear-chat-ci-all')).toBe(false)
+  await ui.press({ key: 'gear-go-ci-all' })
+  expect(actsOf(env).at(-1)).toBe('{"do":"gearSubmit","name":"ci-all","values":{"os":"linux"},"input":""}')
+
+  // typed values and the data: typed here, sent once — never per keystroke
+  await hostSends($, HOST_STATE({ gearForms: { 'count-lines': { kind: 'values', from: 'card', picked: {} } }, gearAsks: { 'count-lines': DIRECT_ASKS['count-lines'] }, gearOpen: 'count-lines', gearRecent: ['count-lines'] }))
+  const typedBefore = actsOf(env).length
+  await ui.input({ key: 'gear-arg-count-lines-count', text: '7; rm -rf "x"', kind: 'change' })
+  await ui.input({ key: 'gear-input-count-lines', text: '첫 줄\n둘째 줄', kind: 'change' })
+  expect(actsOf(env)).toHaveLength(typedBefore)
+  await ui.press({ key: 'gear-go-count-lines' })
+  expect(JSON.parse(actsOf(env).at(-1) ?? '{}')).toEqual({ do: 'gearSubmit', name: 'count-lines', values: { count: '7; rm -rf "x"' }, input: '첫 줄\n둘째 줄' })
+  expect(env.spawns).toHaveLength(0)
+
+  // the question before a gear that reaches outside: 실행 · 취소 go there
+  const confirm = { kind: 'confirm', from: 'card', picked: {}, input: '', lines: ['밖으로 나가는 단계 1개 — [실행]을 누르기 전에는 아무것도 돌지 않음', '· push-tags — 태그를 원격에 올림'], teeth: ['push-tags'], wait: null, startedAt: 1_000_000 }
+  await hostSends($, HOST_STATE({ gearForms: { ship: confirm }, gearOpen: 'ship', gearRecent: ['ship'] }))
+  expect(await drawnText($)).toContain('· push-tags — 태그를 원격에 올림')
+  await ui.press({ key: 'gear-confirm-yes-ship' })
+  expect(actsOf(env).at(-1)).toBe('{"do":"gearConfirm","name":"ship","isYes":true}')
+  await ui.press({ key: 'gear-confirm-no-ship' })
+  expect(actsOf(env).at(-1)).toBe('{"do":"gearConfirm","name":"ship","isYes":false}')
+  // a gear whose block is open there: a press on its folded line only opens it here — nothing is sent
+  await ui.press({ key: 'gear-open-ship' })
+  const folded = actsOf(env).length
+  await ui.press({ key: 'gear-run-ship' })
+  expect(actsOf(env)).toHaveLength(folded)
+  expect(await has(ui, 'gear-confirm-yes-ship')).toBe(true)
+  expect(env.gearCalls).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('mirror-press T5 거울에서 낱말 — 저장은 적은 글이 누를 때 한 번에, 지우기는 물어본 뒤에 ACT 로 간다', async ($, on) => {
+  const env = await startPresser($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.input({ key: 'words-avoid-0', text: '살피다', kind: 'change' })
+  await ui.input({ key: 'words-use-0', text: '확인"하다"; x', kind: 'change' })
+  expect(actsOf(env)).toHaveLength(0)
+  await ui.press({ key: 'words-save' })
+  await settle()
+
+  expect(actsOf(env).map(one => JSON.parse(one))).toEqual([{ do: 'wordsSave', avoid: '살피다', use: '확인"하다"; x', forms: '', was: null }])
+  expect(await text(ui, /^작업 세션에 보냄/)).toBe(WAITING)
+  expect(wordsRuns(env)).toHaveLength(0)
+  // a draft that could not be an entry is not sent
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(actsOf(env)).toHaveLength(1)
+  expect(await text(ui, /^저장하지 않음/)).toBe('저장하지 않음 — 피할 말과 바꿀 말을 모두 적어 주세요')
+  // 고치기 with nothing changed sends nothing; a change goes with the entry's key
+  await ui.press({ key: 'words-edit-0' })
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(actsOf(env)).toHaveLength(1)
+  await ui.press({ key: 'words-edit-0' })
+  await ui.input({ key: 'words-use-4', text: '계측하다', kind: 'change' })
+  await ui.press({ key: 'words-save' })
+  await settle()
+  expect(JSON.parse(actsOf(env).at(-1) ?? '{}')).toEqual({ do: 'wordsSave', avoid: '재다', use: '계측하다', forms: '잰, 재서, 재 본', was: '재다' })
+
+  await ui.press({ key: 'words-remove-0' })
+  expect(actsOf(env)).toHaveLength(2)
+  await ui.press({ key: 'words-remove-no' })
+  expect(actsOf(env)).toHaveLength(2)
+  await ui.press({ key: 'words-remove-0' })
+  await ui.press({ key: 'words-remove-yes' })
+  await settle()
+  expect(actsOf(env).at(-1)).toBe('{"do":"wordsRemove","avoid":"재다"}')
+  expect(wordsRuns(env)).toHaveLength(0)
+  // the working session's own line after it did the work
+  await hostSends($, HOST_STATE({ wordsNote: '지움: 재다' }, { wordsText: WORDS_TSV.split('\n').filter(line => !line.startsWith('재다')).join('\n') }))
+  const after = await drawnText($)
+  expect(after).toContain('지움: 재다')
+  expect(after).toContain('낱말 사전 2')
+  expect(after).not.toContain(WAITING)
+  await ui.unmount()
+})
+
+// ── the working session does what a mirror pressed ──
+
+// a working session (the gears above, SCV installed, the dictionary) that session_viewer mirrors
+const hostKit = async ($: Engine, on: On) => {
+  const kit = directKit(on)
+  kit.extra['scv/words/WORDS.tsv'] = WORDS_TSV
+  await start($)
+  await $.session.receive(hello())
+
+  return kit
+}
+const actFrom = ($: Engine, act: unknown, address = 'session_viewer') =>
+  $.session.receive({ origin: { kind: 'peer' as const }, text: envelope(`SCV-MIRROR ACT ${address} ${JSON.stringify(act)}`) })
+// the state sent last, as the viewer reads it
+const lastSent = (kit: { sent: { to: string; text: string }[] }) => {
+  const parsed = parseMirror(kit.sent.at(-1)?.text ?? '')
+
+  return (parsed?.kind === 'state' ? JSON.parse(parsed.body) : {}) as Record<string, any>
+}
+
+test('mirror-act T1 작업 세션은 시청자의 ACT 를 자기 버튼과 같은 함수로 하고, 상태를 바로 보내고, 자기 칸에 거울에서 온 일을 적는다', async ($, on) => {
+  const kit = await hostKit($, on)
+  expect(kit.sent).toHaveLength(1)
+  expect(lastSent(kit).acts).toBe(MIRROR_ACTS)
+
+  kit.extra['scv/scv_settings.json'] = '{"SCV_ASK_MODE":"ends"}'
+  const got = await actFrom($, { do: 'askMode', to: 'ends' })
+  expect(got.consumed).toBe('scv mirror act')
+  const ran = kit.runs.filter(one => one.argv[1]?.endsWith('/ask-mode.sh'))
+  expect(ran).toHaveLength(1)
+  expect(ran[0]?.argv).toEqual(['bash', `${CORE_DIR}/scripts/ask-mode.sh`, 'ends'])
+  expect(ran[0]?.cwd).toBe('/work')
+  // answered at once — no 10-second gap, though the clock has not moved since the first send
+  expect(kit.sent).toHaveLength(2)
+  expect(kit.sent[1]?.to).toContain('session_viewer')
+  expect(lastSent(kit).paneNote).toBe('묻기 방식을 바꿈 — 다음 메시지부터 처음 · 끝에만 묻기')
+  expect(lastSent(kit).snapshot.settingsText).toBe('{"SCV_ASK_MODE":"ends"}')
+  const drawn = await drawnText($)
+  expect(drawn).toContain('거울에서: 묻기 방식 → 처음 · 끝에만 묻기')
+  // the same act again changes nothing: no command, but the viewer still gets its answer
+  await actFrom($, { do: 'askMode', to: 'ends' })
+  expect(kit.runs.filter(one => one.argv[1]?.endsWith('/ask-mode.sh'))).toHaveLength(1)
+  expect(kit.sent).toHaveLength(3)
+
+  await actFrom($, { do: 'lightSwitch', isOn: false })
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
+  await actFrom($, { do: 'lightMark', percent: 67 })
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 65 })
+  expect(lastSent(kit).light).toEqual({ isOn: false, percent: 65 })
+  expect(await drawnText($)).toContain('거울에서: 요약 기준 → 65%')
+  expect(kit.sent).toHaveLength(5)
+})
+
+test('mirror-act T2 시청자가 아닌 세션의 ACT, 모양이 틀린 ACT, 이 세션에 없는 기어 · 브랜치 · 낱말은 아무것도 하지 않는다 — 모델에도 가지 않는다', async ($, on) => {
+  const kit = await hostKit($, on)
+  const calls = () => kit.runs.filter(one => one.argv[0] !== 'sh').length + kit.spawns.length
+  const before = calls()
+
+  // not a viewer of this session: taken off the conversation, nothing done, nothing sent back
+  const stranger = await actFrom($, { do: 'askMode', to: 'ends' }, 'session_other')
+  expect(stranger.consumed).toBe('scv mirror act')
+  expect(calls()).toBe(before)
+  expect(kit.sent).toHaveLength(1)
+  expect(kit.store.get('scv-dashboard:light')).toBeUndefined()
+  await actFrom($, { do: 'gearPress', name: 'tidy', canType: true }, 'session_other')
+  expect(kit.spawns).toHaveLength(0)
+
+  // malformed or unknown: dropped — and never passed on to the model
+  for (const bad of [{ do: 'gearPress', name: '../x', canType: true }, { do: 'shell', command: 'id' }, { do: 'gearSubmit', name: 'ci-all', values: { 'os; id': 'x' }, input: '' }, { do: 'branchPick', to: '--orphan' }]) {
+    const got = await actFrom($, bad)
+    expect(got.consumed).toBe('scv mirror act (unknown)')
+  }
+  expect(calls()).toBe(before)
+  // well-formed, but a name this session does not list itself
+  await actFrom($, { do: 'gearPress', name: 'no-such-gear', canType: true })
+  await actFrom($, { do: 'gearStop', name: 'no-such-gear' })
+  await actFrom($, { do: 'wordsRemove', avoid: '없는 말' })
+  expect(kit.spawns).toHaveLength(0)
+  expect(wordsRuns(kit)).toHaveLength(0)
+  expect(lastSent(kit).wordsNote).toBe('지우지 않음 — 사전에 없는 말: 없는 말')
+  kit.proc.stdout = 'main\nfeat/x\n'
+  await actFrom($, { do: 'branchPick', to: 'feat/none' })
+  expect(kit.processes.some(argv => argv[1] === 'switch')).toBe(false)
+  expect(lastSent(kit).placeNote).toBe('브랜치를 바꾸지 않음 — 이 저장소에 없는 이름: feat/none')
+  // a plain message from another session still reaches the model
+  const plain = await $.session.receive({ origin: { kind: 'peer' }, text: envelope('안녕') })
+  expect(plain.consumed).toBeUndefined()
+})
+
+test('mirror-act T3 거울에서 온 기어 실행 — 바로 돌리기 · 값 받아 돌리기 · 확인 · 멈춤이 창의 버튼과 같은 명령으로 간다', async ($, on) => {
+  const kit = await hostKit($, on)
+  kit.extra['scv/gears/ship/GEAR.md'] = 'flow: tidy | push-tags\nin: none\nout: lines\n\n# ship\n'
+  kit.proc.stdout = '치운 파일 3개\n'
+  await actFrom($, { do: 'gearPress', name: 'tidy', canType: true })
+  await settle()
+  expect(kit.spawns).toEqual([{ argv: gearLaunchArgv(['bash', GEAR_SH, 'run', 'tidy']), cwd: '/work', input: '' }])
+  expect(kit.sent.length).toBeGreaterThan(1)
+  expect(await drawnText($)).toContain('거울에서: 기어 실행 — tidy')
+  expect(lastSent(kit).gearOpen).toBe('tidy')
+
+  // values: the press opens the block here (and in the state), the submit carries what the viewer set
+  await actFrom($, { do: 'gearPress', name: 'ci-all', canType: true })
+  expect(kit.spawns).toHaveLength(1)
+  expect(lastSent(kit).gearForms['ci-all']).toEqual({ kind: 'values', from: 'card', picked: { os: 'mac' } })
+  expect(lastSent(kit).gearAsks['ci-all']).toBe(DIRECT_ASKS['ci-all'])
+  await actFrom($, { do: 'gearSubmit', name: 'ci-all', values: { os: 'linux' }, input: '' })
+  await settle()
+  expect(kit.spawns[1]?.argv).toEqual(gearLaunchArgv(['bash', GEAR_SH, 'run', 'ci-all', 'os=linux']))
+  // a typed value is the value part of one word, the data goes in on standard input — and a name SCV did not list adds no word
+  const odd = '7; rm -rf "x" $(id)'
+  await actFrom($, { do: 'gearPress', name: 'count-lines', canType: true })
+  await actFrom($, { do: 'gearSubmit', name: 'count-lines', values: { count: odd, other: 'y' }, input: 'count=9; echo "$HOME"' })
+  await settle()
+  expect(kit.spawns[2]).toEqual({ argv: gearLaunchArgv(['bash', GEAR_SH, 'run', 'count-lines', `count=${odd}`]), cwd: '/work', input: 'count=9; echo "$HOME"' })
+  // a gear that needs typing, pressed from a surface with no field: handed to this session's prompt box, not run
+  await actFrom($, { do: 'gearPress', name: 'count-lines', canType: false })
+  expect(kit.spawns).toHaveLength(3)
+
+  // a gear that reaches outside: the question first; 취소 runs nothing; 실행 goes through SCV's own confirm record
+  await actFrom($, { do: 'gearPress', name: 'ship', canType: true })
+  expect(lastSent(kit).gearForms.ship.kind).toBe('confirm')
+  expect(lastSent(kit).gearForms.ship.lines).toContain('· push-tags — 태그를 원격에 올림')
+  expect(kit.spawns).toHaveLength(3)
+  await actFrom($, { do: 'gearConfirm', name: 'ship', isYes: false })
+  expect(kit.spawns).toHaveLength(3)
+  expect(lastSent(kit).paneNote).toBe('실행하지 않음 — 아무것도 돌지 않았습니다')
+  kit.spawnPlans.push({ pieces: [STOP_AT('ab12cd34', 2, 2, 'push-tags', '태그를 원격에 올림')], code: 11 }, { pieces: ['v1.0 올림\n'], code: 0 })
+  await actFrom($, { do: 'gearPress', name: 'ship', canType: true })
+  await actFrom($, { do: 'gearConfirm', name: 'ship', isYes: true })
+  await settle()
+  expect(kit.gearCalls.slice(-3)).toEqual(['spawn run ship', 'run confirm --question SCV 창에서 받은 답 [기어 확인 ab12cd34:2] --answer 실행', 'spawn resume ab12cd34'])
+  // a confirm for a gear with no question open does nothing
+  const calls = kit.gearCalls.length
+  await actFrom($, { do: 'gearConfirm', name: 'tidy', isYes: true })
+  expect(kit.gearCalls).toHaveLength(calls)
+
+  // 멈춤: a run under way is told to end, and the state says it was stopped
+  let open = () => {}
+  kit.spawnPlans.push({ pieces: ['받는 중 1/3\n'], gate: new Promise<void>(done => (open = done)), after: ['늦은 줄\n'], code: 0 })
+  await actFrom($, { do: 'gearPress', name: 'tidy', canType: true })
+  await settle()
+  expect(lastSent(kit).gearLive).toEqual(['tidy'])
+  expect(lastSent(kit).gearRuns.tidy.exitCode).toBe(null)
+  await actFrom($, { do: 'gearStop', name: 'tidy' })
+  expect(lastSent(kit).gearRuns.tidy.isStopped).toBe(true)
+  expect(lastSent(kit).gearLive).toEqual([])
+  expect(await drawnText($)).toContain('거울에서: 기어 멈춤 — tidy')
+  open()
+  await settle()
+})
+
+test('mirror-act T4 거울에서 온 브랜치 바꾸기 — 목록을 열고, 고르면 git 이 바꾸고, 턴이 도는 중이면 바꾸지 않고 그렇게 답한다', async ($, on) => {
+  turnEngine(on)
+  const kit = directKit(on)
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/main\n'
+  await start($)
+  await $.session.receive(hello())
+  kit.proc.stdout = 'main\nfeat/x\n'
+  await actFrom($, { do: 'branchList', isOpen: true })
+  expect(kit.processes.filter(argv => argv[0] === 'git')).toEqual([['git', 'branch', '--format=%(refname:short)']])
+  expect(kit.runs.find(one => one.argv[0] === 'git')?.cwd).toBe('/work')
+  expect(lastSent(kit).branchPick).toEqual(['main', 'feat/x'])
+  // asked to open what is open: nothing is listed again
+  const listed = kit.processes.filter(argv => argv[1] === 'branch').length
+  await actFrom($, { do: 'branchList', isOpen: true })
+  expect(kit.processes.filter(argv => argv[1] === 'branch')).toHaveLength(listed)
+
+  // not while a turn runs: the working session decides, and its line goes back
+  await $.turn.start({ text: '일', turnId: 't9' })
+  await actFrom($, { do: 'branchPick', to: 'feat/x' })
+  expect(kit.processes.some(argv => argv[1] === 'switch')).toBe(false)
+  expect(lastSent(kit).placeNote).toBe('턴이 도는 중에는 브랜치를 바꾸지 않음 — 턴이 끝난 뒤 다시 눌러 주세요')
+  await turnEnd($, 'answer', 1000)
+  await settle()
+
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/feat/x\n'
+  const got = await actFrom($, { do: 'branchPick', to: 'feat/x' })
+  expect(got.consumed).toBe('scv mirror act')
+  const switched = kit.runs.filter(one => one.argv[1] === 'switch')
+  expect(switched).toHaveLength(1)
+  expect(switched[0]?.argv).toEqual(['git', 'switch', 'feat/x'])
+  expect(switched[0]?.cwd).toBe('/work')
+  expect(lastSent(kit).placeNote).toBe('브랜치를 바꿈: main → feat/x')
+  expect(lastSent(kit).place.branch).toEqual({ name: 'feat/x', isBranch: true })
+  expect(lastSent(kit).branchPick).toBe(null)
+  expect(await drawnText($)).toContain('거울에서: 브랜치 → feat/x')
+  await actFrom($, { do: 'branchList', isOpen: false })
+  expect(lastSent(kit).branchPick).toBe(null)
+})
+
+test('mirror-act T5 거울에서 온 낱말 저장 · 지우기 — 본체의 사전 명령을 낱말 하나씩의 값으로 부르고, 한 말을 상태에 실어 보낸다', async ($, on) => {
+  const kit = await hostKit($, on)
+  expect(lastSent(kit).snapshot.wordsText).toBe(WORDS_TSV)
+  const use = '확인"하다"; rm -rf x'
+  kit.proc.stdout = `WORDS_SAVED: 살피다 → ${use}\n`
+  kit.extra['scv/words/WORDS.tsv'] = `${WORDS_TSV}\n살피다\t${use}\t\t`
+  await actFrom($, { do: 'wordsSave', avoid: '살피다', use, forms: '', was: null })
+
+  expect(wordsRuns(kit)).toHaveLength(1)
+  expect(wordsRuns(kit)[0]?.argv).toEqual(['bash', WORDS_SH, 'add', '--avoid', '살피다', '--use', use])
+  expect(wordsRuns(kit)[0]?.cwd).toBe('/work')
+  expect(lastSent(kit).wordsNote).toBe(`저장함: 살피다 → ${use}`)
+  expect(lastSent(kit).snapshot.wordsText).toContain('살피다')
+  expect(await drawnText($)).toContain('거울에서: 낱말 저장 — 살피다 →')
+
+  kit.proc.stdout = 'WORDS_REMOVED: 재다\n'
+  await actFrom($, { do: 'wordsRemove', avoid: '재다' })
+  expect(wordsRuns(kit)[1]?.argv).toEqual(['bash', WORDS_SH, 'remove', '재다'])
+  expect(lastSent(kit).wordsNote).toBe('지움: 재다')
+  // the script's refusal goes back as the card's line
+  kit.procEnd.exitCode = 2
+  kit.procEnd.stderr = 'WORDS_ERROR: 이미 바꿀 말로 쓰는 낱말\n'
+  await actFrom($, { do: 'wordsSave', avoid: '실행하다', use: '돌리다', forms: '', was: null })
+  expect(lastSent(kit).wordsNote).toBe('사전을 바꾸지 못함 — 이미 바꿀 말로 쓰는 낱말')
+})
+
+test('mirror-act T6 다른 세션을 거울로 보는 세션은 받은 ACT 를 하지 않는다 — 그 칸의 값은 제 것이 아니다', async ($, on) => {
+  const env = await startPresser($, on)
+  // a third session says hello to this viewer, then presses
+  await $.session.receive(hello('session_third'))
+  const before = env.runs.filter(one => one.argv[0] !== 'sh').length
+  const got = await actFrom($, { do: 'askMode', to: 'ends' }, 'session_third')
+
+  expect(got.consumed).toBe('scv mirror act')
+  expect(env.runs.filter(one => one.argv[0] !== 'sh')).toHaveLength(before)
+  expect(env.store.get('scv-dashboard:light')).toBeUndefined()
+})
+
+test('mirror-act T7 거울을 끄면 이 세션의 칸은 제 값으로 돌아온다 — 받아 둔 요약 기준 · 기어 상태를 쓰지 않는다', async ($, on) => {
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, tokens: 80000, percent: 40 }, rateLimits: [] } }) as never)
+  const env = await startPresser($, on, { light: { isOn: false, percent: 80 }, paneNote: '작업 세션의 한 줄', gearRuns: { tidy: { startedAt: 1, endedAt: 2, tail: '남의 결과', exitCode: 0, isStopped: false } }, gearOpen: 'tidy' })
+  expect(await drawnText($)).toContain('대화가 길어져도 그대로 둠')
+  expect(await drawnText($)).toContain('남의 결과')
+  env.store.set('scv-dashboard:light', { isOn: true, percent: 60 })
+  withProject(env, { index: DIRECT })
+  await $.command.run({ command: 'scv-mirror', args: 'stop' } as never)
+  const drawn = await drawnText($)
+
+  expect(drawn).toContain('컨텍스트가 60% 를 넘으면 자동으로 요약함')
+  expect(drawn).not.toContain('작업 세션의 한 줄')
+  expect(drawn).not.toContain('남의 결과')
+  expect(drawn).not.toContain('여기서 누르면')
+})

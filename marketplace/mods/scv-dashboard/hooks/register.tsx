@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { AgentState, BigProof, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, Viewers, WorkEntry } from '../types'
+import type { ActNote, AgentState, BigProof, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, ViewPicks, Viewers, WordsView, WorkEntry } from '../types'
 import type { FileFact, MirrorAct } from './model'
 import {
   STEP_TOOL,
@@ -143,8 +143,24 @@ import {
   pluginRoot,
   submitWithGear,
   usedGear,
+  MIRROR_ACTS,
+  fromMirrorLine,
+  isActText,
+  parseAct,
+  wireTail,
+  checkWord,
+  formsLine,
+  parseWords,
+  wordLine,
+  wordsAddArgv,
+  wordsCommand,
+  wordsFold,
+  wordsFormKind,
+  wordsRemoveArgv,
+  wordsRemoveCommand,
+  wordsSaid,
 } from './model'
-import type { AskMode, BranchNow, ConfirmStop, JobEnd, LightSettings, Place, RunPlan, StepFunctionView } from './model'
+import type { AskMode, BranchNow, ConfirmStop, JobEnd, LightSettings, Place, RunPlan, StepFunctionView, WordDraft } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -287,6 +303,28 @@ const limits = atom({ plugin: 'scv-dashboard', key: 'limits' } as const, [] as U
 const contextFill = atom({ plugin: 'scv-dashboard', key: 'contextFill' } as const, null as number | null)
 const mirror = atom({ plugin: 'scv-dashboard', key: 'mirror' } as const, null as Mirror | null)
 const viewers = atom({ plugin: 'scv-dashboard', key: 'viewers' } as const, {} as Viewers)
+// The word dictionary card: what SCV's command said after the last save or removal, and how the person left the card.
+const wordsNote = atom({ plugin: 'scv-dashboard', key: 'wordsNote' } as const, null as string | null)
+const NO_WORDS_VIEW: WordsView = { edit: null, asking: null, isAll: false, gen: 0 }
+const wordsView = atom({ plugin: 'scv-dashboard', key: 'wordsView' } as const, NO_WORDS_VIEW)
+// What the person typed into the dictionary form. Kept outside the drawn state, so a keystroke redraws nothing.
+const wordsTyped: { avoid?: string; use?: string; forms?: string } = {}
+const clearWordsTyped = () => {
+  delete wordsTyped.avoid
+  delete wordsTyped.use
+  delete wordsTyped.forms
+}
+// A viewer session: the acts its working session says it takes, the gear runs under way there, the values picked
+// here for a gear's block (they travel when the block is submitted), and the line after a press sent there.
+const hostActs = atom({ plugin: 'scv-dashboard', key: 'hostActs' } as const, 0)
+const hostLive = atom({ plugin: 'scv-dashboard', key: 'hostLive' } as const, [] as string[])
+const viewPicks = atom({ plugin: 'scv-dashboard', key: 'viewPicks' } as const, {} as ViewPicks)
+const actNote = atom({ plugin: 'scv-dashboard', key: 'actNote' } as const, null as ActNote | null)
+// The gear line the working session had open in the state taken last: its line opens here only when that changes,
+// so a line the viewer opened or folded stays as the viewer left it.
+const hostGear = { open: undefined as string | null | undefined }
+// A working session: what a mirror last had it do, as its own pane says it.
+const fromMirror = atom({ plugin: 'scv-dashboard', key: 'fromMirror' } as const, null as string | null)
 
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기', yourTurn: '사용자 차례' }
 const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○', yourTurn: '◉' }
@@ -343,6 +381,7 @@ const readSources = async ($: Api, cwd: string): Promise<Omit<Snapshot, 'root'>>
     catalog: await readCatalog($, `${scv}/core/catalog/pure`),
     settingsText: await readText($, `${scv}/scv_settings.json`),
     gearsText: await readText($, `${scv}/gears/INDEX.tsv`),
+    wordsText: await readText($, `${scv}/words/WORDS.tsv`),
     gearWaits: await countGearWaits($, `${scv}/journal/.gear-run`),
   }
 }
@@ -425,11 +464,16 @@ const readPlace = async ($: Api, root: string) => {
 }
 
 // A press on the branch line: the local branches are listed to pick from; a second press folds the list.
-const openBranches = async ($: Api) => {
-  if (await read($, branchPick)) return void (await update($, branchPick, () => null))
+const listBranches = async ($: Api) => {
   const root = (await read($, snapshot)).root
   const ran = await $.process.run(['git', 'branch', '--format=%(refname:short)'], { ...(root ? { cwd: root } : {}), timeoutMs: 15_000 }).catch(() => undefined)
-  const names = ran?.exitCode === 0 ? parseBranches(ran.stdout) : []
+
+  return ran?.exitCode === 0 ? parseBranches(ran.stdout) : []
+}
+
+const openBranches = async ($: Api) => {
+  if (await read($, branchPick)) return void (await update($, branchPick, () => null))
+  const names = await listBranches($)
   if (names.length === 0) return void (await update($, placeNote, () => '브랜치 목록을 읽지 못함'))
   await update($, placeNote, () => null)
   await update($, branchPick, () => names)
@@ -517,6 +561,82 @@ const fillPrompt = async ($: Api, command: string) => {
   const filled = await $.prompt.fill(planPromptFill(command, box.text)).catch(() => ({ isFilled: false }))
 
   return filled.isFilled
+}
+
+// A press switches the ask mode through SCV's own settings command, so the next message already follows it.
+// Where the plugin is not found (or the command fails), the command goes into the prompt box instead.
+const switchAskMode = async ($: Api, next: AskMode) => {
+  const shot = await read($, snapshot)
+  const ran = shot.core
+    ? await $.process.run(['bash', `${shot.core}/scripts/ask-mode.sh`, next], { ...(shot.cwd ? { cwd: shot.cwd } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+    : undefined
+  if (ran?.exitCode === 0) {
+    await refresh($)
+    const forced = /^ENV_VALUE: (.+)$/m.exec(ran.stdout)?.[1]
+
+    return void (await update($, paneNote, () => (forced ? `설정은 바꿨지만 환경 변수가 먼저임: ${forced}` : `묻기 방식을 바꿈 — 다음 메시지부터 ${askModeView(next).name}`)))
+  }
+  const command = `/scv:ask-mode ${next}`
+  const filled = await fillPrompt($, command)
+  await update($, paneNote, () => (filled ? `바로 바꾸지 못해 입력창에 넣음: ${command}` : `바꾸지 못함 — 입력창에 ${command} 를 넣어 보내 주세요`))
+}
+
+// The auto-summary switch and its mark, changed and kept across sessions.
+const setLight = async ($: Api, change: (one: LightSettings) => LightSettings) => {
+  const next = await update($, light, change)
+  await $.store.set(LIGHT_KEY, next).catch(() => undefined)
+}
+
+// ── the word dictionary (after 0.5.0) ──────────────────────────────────────────────
+
+const runWords = ($: Api, shot: Snapshot, argv: string[]) =>
+  $.process.run(argv, { ...(shot.cwd ? { cwd: shot.cwd } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+
+// 저장: the entry goes in through SCV's own dictionary command, each typed text one word of the command (never a
+// shell text), in the project folder; the card then says what the command said. An entry opened with 고치기 keeps
+// its note, and when its avoided word was changed the old entry goes once the new one is in. Where SCV is not
+// found or has no such command, the slash command goes into the prompt box instead. Whether the entry was saved.
+const saveWord = async ($: Api, draft: WordDraft, was: string | null): Promise<boolean> => {
+  const checked = checkWord(draft)
+  if (!checked.isOk) {
+    await update($, wordsNote, () => checked.reason)
+
+    return false
+  }
+  const word = checked.word
+  const shot = await read($, snapshot)
+  const entries = parseWords(shot.wordsText)
+  const note = entries.find(one => one.avoid === (was ?? word.avoid))?.note ?? ''
+  const said = wordsSaid(shot.core ? await runWords($, shot, wordsAddArgv(shot.core, word, note)) : undefined)
+  if (said.kind === 'none') {
+    const command = wordsCommand(word)
+    const filled = await fillPrompt($, command)
+    await update($, wordsNote, () => (filled ? `바로 저장하지 못해 입력창에 넣음: ${command}` : `저장하지 못함 — 입력창에 ${command} 를 넣어 보내 주세요`))
+
+    return false
+  }
+  if (said.kind === 'done' && shot.core && was && was !== word.avoid && entries.some(one => one.avoid === was)) {
+    await runWords($, shot, wordsRemoveArgv(shot.core, was))
+  }
+  await refresh($).catch(() => undefined)
+  await update($, wordsNote, () => said.line)
+
+  return said.kind === 'done'
+}
+
+// 지우기, after its question: only an entry the dictionary holds, through SCV's own command; else the slash command.
+const removeWord = async ($: Api, avoid: string) => {
+  const shot = await read($, snapshot)
+  if (!parseWords(shot.wordsText).some(one => one.avoid === avoid)) return void (await update($, wordsNote, () => `지우지 않음 — 사전에 없는 말: ${avoid}`))
+  const said = wordsSaid(shot.core ? await runWords($, shot, wordsRemoveArgv(shot.core, avoid)) : undefined)
+  if (said.kind === 'none') {
+    const command = wordsRemoveCommand(avoid)
+    const filled = await fillPrompt($, command)
+
+    return void (await update($, wordsNote, () => (filled ? `바로 지우지 못해 입력창에 넣음: ${command}` : `지우지 못함 — 입력창에 ${command} 를 넣어 보내 주세요`)))
+  }
+  await refresh($).catch(() => undefined)
+  await update($, wordsNote, () => said.line)
 }
 
 // Opens a file or page the way the system opens it (a picture viewer, the browser); the note says when it could not.
@@ -705,10 +825,82 @@ const mirrorState = async ($: Api) => ({
   place: await read($, place),
   hostName: sessionName(await sessionFiles($), await $.session.id()),
   inView: (await planInView($))?.slug ?? null,
+  // After 0.5.0: what a viewer needs to draw the controls it may press, and what came of a press. acts: the acts this
+  // session takes. A run's output goes as the lines a card shows; what SCV said each gear needs goes without the
+  // gear index it was read under (the snapshot has that text already).
+  acts: MIRROR_ACTS,
+  light: await read($, light),
+  lightSaid: await read($, lightSaid),
+  branchPick: await read($, branchPick),
+  placeNote: await read($, placeNote),
+  paneNote: await read($, paneNote),
+  wordsNote: await read($, wordsNote),
+  gearRuns: await read($, gearRuns).then(all => Object.fromEntries(Object.entries(all).map(([name, run]) => [name, { ...run, tail: wireTail(run.tail) }]))),
+  gearForms: await read($, gearForms),
+  gearOpen: await read($, gearOpen),
+  gearAsks: await read($, gearAsks).then(async kept => (kept.index === ((await read($, snapshot)).gearsText ?? null) ? kept.byName : {})),
+  gearRecent: await read($, gearRecent),
+  gearLive: [...liveRuns.keys()],
 })
 
 // sentAt: the working session's clock when it sent; a version before it sends none.
 type MirrorState = Awaited<ReturnType<typeof mirrorState>> & { sentAt?: number }
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+const textOrNull = (value: unknown) => (typeof value === 'string' ? value : null)
+
+// What a working session that takes presses sends with its state, taken as it stands there: the switches and notes
+// of its cards, its gear runs and the blocks open under its gears. A state without the mark (an older working
+// session) changes none of these — and this viewer then shows no control to press.
+const takeControls = async ($: Api, state: Partial<MirrorState>) => {
+  const acts = typeof state.acts === 'number' ? state.acts : 0
+  await update($, hostActs, () => acts)
+  if (acts < MIRROR_ACTS) return
+  await update($, light, () => parseLight(state.light))
+  await update($, lightSaid, () => textOrNull(state.lightSaid))
+  await update($, branchPick, () => (Array.isArray(state.branchPick) ? state.branchPick.filter((one): one is string => typeof one === 'string') : null))
+  await update($, placeNote, () => textOrNull(state.placeNote))
+  await update($, paneNote, () => textOrNull(state.paneNote))
+  await update($, wordsNote, () => textOrNull(state.wordsNote))
+  await update($, gearRuns, () => (isRecord(state.gearRuns) ? (state.gearRuns as Record<string, GearRun>) : {}))
+  await update($, gearForms, () => (isRecord(state.gearForms) ? (state.gearForms as Record<string, GearForm>) : {}))
+  await update($, gearAsks, () => ({ index: state.snapshot?.gearsText ?? null, byName: isRecord(state.gearAsks) ? (state.gearAsks as Record<string, string>) : {} }))
+  await update($, gearRecent, () => (Array.isArray(state.gearRecent) ? state.gearRecent.filter((one): one is string => typeof one === 'string') : []))
+  await update($, hostLive, () => (Array.isArray(state.gearLive) ? state.gearLive.filter((one): one is string => typeof one === 'string') : []))
+  const open = textOrNull(state.gearOpen)
+  if (hostGear.open !== open) {
+    hostGear.open = open
+    await update($, gearOpen, () => open)
+  }
+  // a block that is gone there (run, answered, closed) takes the values picked for it here with it
+  const blocks = await read($, gearForms)
+  await update($, viewPicks, picks => (Object.keys(picks).every(name => blocks[name]?.kind === 'values') ? picks : Object.fromEntries(Object.entries(picks).filter(([name]) => blocks[name]?.kind === 'values'))))
+}
+
+// A viewer session lets go of what it drew of a working session's cards: before another session's state is asked
+// for, and when the mirror is switched off (then its own switch and gear list come back from its store).
+const dropControls = async ($: Api, isOwnAgain: boolean) => {
+  hostGear.open = undefined
+  await update($, hostActs, () => 0)
+  await update($, hostLive, () => [])
+  await update($, viewPicks, () => ({}))
+  await update($, actNote, () => null)
+  await update($, gearRuns, () => ({}))
+  await update($, gearForms, () => ({}))
+  await update($, gearOpen, () => null)
+  await update($, gearAsks, () => ({ index: null, byName: {} }))
+  await update($, branchPick, () => null)
+  await update($, placeNote, () => null)
+  await update($, paneNote, () => null)
+  await update($, wordsNote, () => null)
+  await update($, lightSaid, () => null)
+  await update($, wordsView, () => NO_WORDS_VIEW)
+  clearWordsTyped()
+  typedValues.clear()
+  if (!isOwnAgain) return
+  const keptLight = await $.store.get(LIGHT_KEY).catch(() => undefined)
+  await update($, light, () => parseLight(keptLight))
+}
 
 // Takes a state another session sent, while this session is mirroring; anything else is dropped.
 // A state sent before the newest one taken (one held up on the way) is dropped too, so it cannot draw an older plan.
@@ -743,51 +935,112 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, contextFill, () => (typeof state.contextFill === 'number' ? state.contextFill : null))
   await update($, place, () => (state.place && typeof state.place === 'object' ? state.place : NO_PLACE))
   await update($, hostInView, () => (typeof state.inView === 'string' ? state.inView : null))
+  await takeControls($, state)
+  // the answer to a press sent from here has come (or a newer state has): the line that waited for it goes
+  await update($, actNote, () => null)
   const at = await $.clock.now()
   const name = typeof state.hostName === 'string' ? state.hostName : (mirrored.name ?? null)
   if (mirrored.at === 0) $.ui.toast(`SCV: ${hostLabel(mirrored.host, name)} 의 상태를 받았습니다`)
   await update($, mirror, value => (value ? { ...value, at, name, ...(sentAt !== undefined ? { hostAt: sentAt } : {}) } : value))
 }
 
-// Sends the state to each viewer when it changed and the gap passed (isMirrorDue); a viewer that keeps failing is let go.
-// The viewers live in the session's state, so a reload of the mod keeps sending to them.
-let isPushing = false
+// One pass: the state to each viewer when it changed and the gap passed (isMirrorDue); a viewer that keeps failing
+// is let go. answerTo: a viewer whose press was just done here — it is sent the state now, changed or not and
+// whatever the gap, so its pane shows what came of the press.
+const pushPass = async ($: Api, answerTo?: string) => {
+  const state = await mirrorState($)
+  const body = JSON.stringify(state)
+  const at = await $.clock.now()
+  // The send time rides along but is not compared, so an unchanged state is still not sent again.
+  const wire = JSON.stringify({ ...state, sentAt: at })
+  for (const [address, last] of Object.entries(await read($, viewers))) {
+    if (address !== answerTo && !isMirrorDue(last, body, at, MIRROR_GAP_MS)) continue
+    const sent = await $.session
+      .send({ to: { sessionId: address }, text: mirrorText({ kind: 'state', body: wire }) })
+      .catch((error: unknown) => ({ isDelivered: false as const, reason: String(error) }))
+    await update($, viewers, value => {
+      const { [address]: current, ...rest } = value
+      if (!current) return value
+      if (sent.isDelivered) return { ...rest, [address]: { sent: body, at, misses: 0 } }
 
-const pushMirror = async ($: Api) => {
-  if (isPushing || Object.keys(await read($, viewers)).length === 0) return
-  isPushing = true
-  try {
-    const state = await mirrorState($)
-    const body = JSON.stringify(state)
-    const at = await $.clock.now()
-    // The send time rides along but is not compared, so an unchanged state is still not sent again.
-    const wire = JSON.stringify({ ...state, sentAt: at })
-    for (const [address, last] of Object.entries(await read($, viewers))) {
-      if (!isMirrorDue(last, body, at, MIRROR_GAP_MS)) continue
-      const sent = await $.session
-        .send({ to: { sessionId: address }, text: mirrorText({ kind: 'state', body: wire }) })
-        .catch((error: unknown) => ({ isDelivered: false as const, reason: String(error) }))
-      await update($, viewers, value => {
-        const { [address]: current, ...rest } = value
-        if (!current) return value
-        if (sent.isDelivered) return { ...rest, [address]: { sent: body, at, misses: 0 } }
-
-        return current.misses + 1 >= MIRROR_MISSES ? rest : { ...rest, [address]: { ...current, misses: current.misses + 1 } }
-      })
-    }
-  } finally {
-    isPushing = false
+      return current.misses + 1 >= MIRROR_MISSES ? rest : { ...rest, [address]: { ...current, misses: current.misses + 1 } }
+    })
   }
 }
 
-// Does what a viewer pressed, on this side: only for a viewer this session sends to, and the command to fill is the
-// one this session works out for that plan itself — the message names the plan, never the command.
+// Sends the state to the viewers, one pass at a time: a call made while a pass runs waits for it and then makes its
+// own, so a viewer that just asked (or just pressed) is never left out because the timer's pass was under way.
+// While a pass already waits its turn, a call that carries no answer adds none — that pass sends what is due.
+// The viewers live in the session's state, so a reload of the mod keeps sending to them.
+let pushChain: Promise<unknown> = Promise.resolve()
+let pushesWaiting = 0
+
+const pushMirror = ($: Api, answerTo?: string): Promise<void> => {
+  if (pushesWaiting > 0 && !answerTo) return pushChain.then(() => undefined)
+  pushesWaiting += 1
+  const pass = pushChain.then(async () => {
+    pushesWaiting -= 1
+    if (Object.keys(await read($, viewers)).length > 0) await pushPass($, answerTo)
+  })
+  pushChain = pass.catch(() => undefined)
+
+  return pass
+}
+
+// What a viewer pressed, done on this side with the functions this session's own buttons call. Every name is one
+// this session lists itself (a gear of its index, a branch of its repository, an entry of its dictionary); a value
+// only ever becomes a value — the value part of one command word, a field after its flag, or standard input.
+const doAct = async ($: Api, act: Exclude<MirrorAct, { do: 'fill' }>) => {
+  const shot = await read($, snapshot)
+  const isListed = (name: string) => parseGears(shot.gearsText).some(one => one.name === name)
+  switch (act.do) {
+    case 'askMode':
+      return parseAskMode(shot.settingsText) === act.to ? undefined : switchAskMode($, act.to)
+    case 'lightSwitch':
+      return setLight($, one => ({ ...one, isOn: act.isOn }))
+    case 'lightMark':
+      return setLight($, one => moveLight(one, act.percent))
+    case 'gearPress':
+      return isListed(act.name) ? pressRun($, act.name, act.canType) : undefined
+    case 'gearSubmit':
+      return isListed(act.name) ? submitValues($, act.name, { values: act.values, input: act.input }) : undefined
+    case 'gearConfirm':
+      return isListed(act.name) ? answerConfirm($, act.name, act.isYes) : undefined
+    case 'gearStop':
+      return isListed(act.name) ? stopGear($, act.name) : undefined
+    case 'branchList':
+      return Boolean(await read($, branchPick)) === act.isOpen ? undefined : openBranches($)
+    case 'branchPick': {
+      const names = (await read($, branchPick)) ?? (await listBranches($))
+      if (!names.includes(act.to)) return void (await update($, placeNote, () => `브랜치를 바꾸지 않음 — 이 저장소에 없는 이름: ${act.to}`))
+
+      return switchBranch($, act.to)
+    }
+    case 'wordsSave':
+      return void (await saveWord($, { avoid: act.avoid, use: act.use, forms: act.forms }, act.was))
+    case 'wordsRemove':
+      return removeWord($, act.avoid)
+  }
+}
+
+// Does what a viewer pressed, on this side: only for a viewer this session sends to. For the next command the
+// message names the plan, never the command — this session works the command out for that plan itself. Any other
+// act is done by doAct, noted in this session's own pane, and answered at once with the state as it then stands.
+// A session that itself mirrors another draws that session's cards, so nothing there is its own to change.
 const takeAct = async ($: Api, address: string, act: MirrorAct) => {
   if (!(address in (await read($, viewers)))) return
-  const command = (await actionInView($, act.slug))?.command
-  if (!command) return
-  const isFilled = await fillPrompt($, command)
-  await update($, note, () => (isFilled ? `입력창에 넣음 (거울에서): ${command}` : `입력창에 못 넣음 — ${command}`))
+  if (act.do === 'fill') {
+    const command = (await actionInView($, act.slug))?.command
+    if (!command) return
+    const isFilled = await fillPrompt($, command)
+
+    return void (await update($, note, () => (isFilled ? `입력창에 넣음 (거울에서): ${command}` : `입력창에 못 넣음 — ${command}`)))
+  }
+  if (await read($, mirror)) return
+  await doAct($, act).catch(() => undefined)
+  const at = await $.clock.now()
+  await update($, fromMirror, () => fromMirrorLine(act, at, offsetAt(at)))
+  await pushMirror($, address)
 }
 
 // Asks the working session to send its state here; `previous` is the mirror as it stood, for a failed ask to put back.
@@ -801,6 +1054,7 @@ const askMirror = async ($: Api, host: string, isFresh = false) => {
   if (!isSame) {
     await update($, chosen, () => null)
     await update($, hostInView, () => null)
+    await dropControls($, false)
   }
   await update($, mirror, value => (isSame && value ? { ...value, askedAt: at, from: own.address } : { host, at: 0, askedAt: at, from: own.address }))
   const sent = await $.session.send({ to: { sessionId: host }, text: mirrorText({ kind: 'hello', address: own.address }) })
@@ -1107,15 +1361,16 @@ const pressGear = async ($: Api, name: string, from: GearFrom, canType: boolean)
 
 // 이 값으로 실행: the values as set — a button's pick, what was typed, else the value as it stood — then the run, or
 // first the question when the gear reaches outside.
-const submitValues = async ($: Api, name: string) => {
+const submitValues = async ($: Api, name: string, given?: { values: Record<string, string>; input: string }) => {
   const form = (await read($, gearForms))[name]
   const shot = await read($, snapshot)
   const gear = parseGears(shot.gearsText).find(one => one.name === name)
   const asked = await readGearAsk($, shot, name)
   if (!form || form.kind !== 'values' || !gear || !asked || !shot.core || liveRuns.has(name)) return
-  const typed = typedValues.get(name) ?? {}
+  // given: the values set in a viewer session's pane (picked and typed there), sent with its press
+  const typed = given ? given.values : (typedValues.get(name) ?? {})
   const chosen = Object.fromEntries(asked.args.filter(arg => arg.isOpen).map(arg => [arg.name, typed[arg.name] ?? form.picked[arg.name] ?? arg.value]))
-  const input = asked.hasInput ? (typed[DATA_FIELD] ?? '') : ''
+  const input = asked.hasInput ? (given ? given.input : (typed[DATA_FIELD] ?? '')) : ''
   const plan = runPlan({ mark: gear.mark, args: asked.args, hasInput: asked.hasInput, chosen, canType: true })
   if (plan === 'confirm') return openConfirm($, shot, name, form.from, chosen, input)
   const argv = plan === 'run' ? gearRunArgv(shot.core, name, chosen, asked.args) : null
@@ -1166,13 +1421,22 @@ const handToChat = async ($: Api, name: string, from: GearFrom) => {
 
 // Whether a run the state holds as under way really is: this copy of the module must hold its stream (a module
 // loaded again ended the child, and the state it left still says 'running').
-const isLiveRun = (name: string, run: GearRun | undefined) => run !== undefined && run.exitCode === null && !run.isStopped && liveRuns.has(name)
+// (isHeld: whether the stream is held — this copy's own, or, in a viewer session, as the working session says.)
+const isLiveRun = (name: string, run: GearRun | undefined, isHeld = liveRuns.has(name)) => run !== undefined && run.exitCode === null && !run.isStopped && isHeld
 
 // The lines a gear's card shows for its run; for one under way the time runs to the pane's clock.
-const runLines = (name: string, run: GearRun, at: number) =>
-  run.exitCode === null && !run.isStopped && !liveRuns.has(name)
+const runLines = (name: string, run: GearRun, at: number, isHeld = liveRuns.has(name)) =>
+  run.exitCode === null && !run.isStopped && !isHeld
     ? ['끊김 — 창이 다시 불리면서 이 실행도 끝났습니다']
     : runView({ tail: run.tail, elapsedMs: Math.max(0, (run.endedAt ?? at) - run.startedAt), exitCode: run.exitCode, isStopped: run.isStopped })
+
+// 실행, on the gear's own line: the pane runs the gear itself, with no model — at once, or after its values or
+// its question, which open under the line. A gear already running, or with such a block open, is shown
+// instead of started again; one that turns out to be Claude's to run goes into the prompt box.
+const pressRun = async ($: Api, name: string, canType: boolean) => {
+  if (liveRuns.has(name) || (await read($, gearForms))[name]) return void (await update($, gearOpen, () => name))
+  if ((await pressGear($, name, 'card', canType)) === 'chat') await handToChat($, name, 'card')
+}
 
 // 결과를 대화에 붙이기: a run's result lines into the prompt box, after what the person typed. Never sent.
 const pasteResult = async ($: Api, name: string) => {
@@ -1285,8 +1549,13 @@ export const register: Register = on => {
       if (mirrored) {
         const own = await ownAddress($)
         await $.session.send({ to: { sessionId: mirrored.host }, text: mirrorText({ kind: 'bye', address: own.address }) }).catch(() => undefined)
+        await dropControls($, true)
       }
       await refresh($).catch(() => undefined)
+      if (mirrored) {
+        const lately = await $.store.get(recentKey((await read($, snapshot)).cwd)).catch(() => undefined)
+        await update($, gearRecent, () => (Array.isArray(lately) ? lately.filter((one): one is string => typeof one === 'string') : []))
+      }
 
       return { text: mirrored ? `거울 끔 — 이 세션의 SCV 칸은 이제 이 폴더를 보여 줍니다.` : '거울이 켜져 있지 않습니다.' }
     }
@@ -1327,7 +1596,16 @@ export const register: Register = on => {
 
   // Mirror messages between sessions are taken here and never reach the model; every other delivery goes on.
   on('session.receive', async ($, e, next) => {
-    const message = e.origin.kind === 'peer' && !e.agentId ? parseMirror(e.text) : null
+    const isPeer = e.origin.kind === 'peer' && !e.agentId
+    const message = isPeer ? parseMirror(e.text) : null
+    // An act this version does not take (a newer viewer's, a broken one) is taken off the conversation too, and
+    // nothing is done; its sender, when it is a viewer, is sent the state so its pane does not wait for an answer.
+    if (!message && isPeer && isActText(e.text)) {
+      const from = /ACT (\S+) \{/.exec(e.text)?.[1] ?? ''
+      if (from in (await read($, viewers))) await pushMirror($, from)
+
+      return { consumed: 'scv mirror act (unknown)' }
+    }
     if (!message) return next(e)
     if (message.kind === 'hello') {
       const isNew = !(message.address in (await read($, viewers)))
@@ -1672,10 +1950,22 @@ export const register: Register = on => {
       const { sent } = await askMirror($, mirrored.host)
       $.ui.toast(sent.isDelivered ? 'SCV: 작업 세션에 다시 요청했습니다' : `SCV: 다시 요청을 보내지 못했습니다 — ${sent.reason}`)
     }
+    // The controls of the cards (ask mode, the summary switch, gears, branch, words): this session's own — or,
+    // mirroring, the working session's, pressed from here, when its state says it takes such presses.
+    const canAct = Boolean(mirrored) && (await read($, hostActs)) >= MIRROR_ACTS
+    const hasControls = !mirrored || canAct
+    const liveThere = await read($, hostLive)
+    const isHeld = (name: string) => (mirrored ? liveThere.includes(name) : liveRuns.has(name))
+    const sentLine = await read($, actNote)
+    const picksHere = await read($, viewPicks)
+    const cameFrom = await read($, fromMirror)
     const mirrorLine = mirrored ? (
-      <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-        <Text color="#4f8cff">{mirrorLineText({ host: mirrored.host, name: mirrored.name, receivedAt: mirrored.at, at, formatDuration })}</Text>
-        <Button key="mirror-ask" label="다시 요청" onPress={() => void askAgain().catch(() => undefined)} />
+      <Box flexDirection="column">
+        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+          <Text color="#4f8cff">{mirrorLineText({ host: mirrored.host, name: mirrored.name, receivedAt: mirrored.at, at, formatDuration })}</Text>
+          <Button key="mirror-ask" label="다시 요청" onPress={() => void askAgain().catch(() => undefined)} />
+        </Box>
+        {canAct && mirrored.at ? [<Text key="mirror-press-hint" dimColor>여기서 누르면 작업 세션에 메시지 한 줄이 남습니다.</Text>] : []}
       </Box>
     ) : null
 
@@ -1690,6 +1980,27 @@ export const register: Register = on => {
         .catch((error: unknown) => ({ isDelivered: false as const, reason: String(error) }))
       await update($, note, () => (sent.isDelivered ? sentNote : `작업 세션에 못 보냄: ${sent.reason}`))
     }
+
+    // Mirroring, a press on a card's control goes to the working session, which does it with its own functions and
+    // answers with its state; until that comes, the card says the press was sent (or that it could not be). The act
+    // is read back the way the working session will read it: one it would drop is not sent. Whether it was sent.
+    const pressAct = async (where: ActNote['where'], act: MirrorAct) => {
+      if (!mirrored) return false
+      const checked = parseAct(JSON.stringify(act))
+      if (!checked) {
+        await update($, actNote, () => ({ where, text: '보내지 않음 — 값이 너무 길거나 보낼 수 없는 글자가 있습니다' }))
+
+        return false
+      }
+      const own = await ownAddress($)
+      const sent = await $.session
+        .send({ to: { sessionId: mirrored.host }, text: mirrorText({ kind: 'act', address: own.address, act: checked }) })
+        .catch((error: unknown) => ({ isDelivered: false as const, reason: String(error) }))
+      await update($, actNote, () => ({ where, text: sent.isDelivered ? '작업 세션에 보냄 — 반영을 기다림' : `작업 세션에 못 보냄: ${sent.reason}` }))
+
+      return sent.isDelivered
+    }
+    const sentNote = (where: ActNote['where']) => (sentLine?.where === where ? [<Text key={`act-note-${where}`} dimColor>{sentLine.text}</Text>] : [])
 
     // The next command into the prompt box, keeping what the person typed; where the box will not take it, copied.
     const fillNext = async (command: string) => {
@@ -1752,30 +2063,12 @@ export const register: Register = on => {
     const askView = askModeView(parseAskMode(shot.settingsText))
     const openGear = await read($, gearOpen)
     const gearView = gearCatalog(parseGears(shot.gearsText), await read($, gearRecent), await read($, gearsAll))
-    const gearList = gearRows(gearView.shown, Boolean(shot.core) && !mirrored)
+    const gearList = gearRows(gearView.shown, Boolean(shot.core) && hasControls)
     const gearRan = await read($, gearRuns)
     const gearBlocks = await read($, gearForms)
     const asksKept = await read($, gearAsks)
     const askOf = (name: string) => (asksKept.index === (shot.gearsText ?? null) ? parseAsk(asksKept.byName[name]) : null)
     const paneMessage = await read($, paneNote)
-    const projectDir = shot.cwd || undefined
-
-    // A press switches the ask mode through SCV's own settings command, so the next message already follows it.
-    // Where the plugin is not found (or the command fails), the command goes into the prompt box instead.
-    const switchAskMode = async (next: AskMode) => {
-      const ran = shot.core
-        ? await $.process.run(['bash', `${shot.core}/scripts/ask-mode.sh`, next], { ...(projectDir ? { cwd: projectDir } : {}), timeoutMs: 15_000 }).catch(() => undefined)
-        : undefined
-      if (ran?.exitCode === 0) {
-        await refresh($)
-        const forced = /^ENV_VALUE: (.+)$/m.exec(ran.stdout)?.[1]
-
-        return void (await update($, paneNote, () => (forced ? `설정은 바꿨지만 환경 변수가 먼저임: ${forced}` : `묻기 방식을 바꿈 — 다음 메시지부터 ${askModeView(next).name}`)))
-      }
-      const command = `/scv:ask-mode ${next}`
-      const filled = await fillPrompt($, command)
-      await update($, paneNote, () => (filled ? `바로 바꾸지 못해 입력창에 넣음: ${command}` : `바꾸지 못함 — 입력창에 ${command} 를 넣어 보내 주세요`))
-    }
 
     // 대화로 · Claude 에게 시키기: the gear's command into the prompt box — sent, Claude asks for the values the
     // gear needs and runs it.
@@ -1783,20 +2076,33 @@ export const register: Register = on => {
     // SCV was asked for this gear's values and did not print them (an older SCV): the gear goes to the conversation.
     const isUnread = (name: string) => asksKept.index === (shot.gearsText ?? null) && asksKept.byName[name] === ''
 
-    // 실행, on the gear's own line: the pane runs the gear itself, with no model — at once, or after its values or
-    // its question, which open under the line. A gear already running, or with such a block open, is shown
-    // instead of started again; one that turns out to be Claude's to run goes into the prompt box.
-    const pressRun = async (name: string) => {
-      if (liveRuns.has(name) || (await read($, gearForms))[name]) return void (await update($, gearOpen, () => name))
-      if ((await pressGear($, name, 'card', Boolean(Input))) === 'chat') await useGear(name)
+    // 실행, on the gear's own line. Mirroring, the press goes to the working session — unless the gear already runs
+    // there or has its block open under its line: then the line is only opened here, and nothing is sent.
+    const pressRunHere = async (name: string) => {
+      if (!mirrored) return pressRun($, name, Boolean(Input))
+      await update($, gearOpen, () => name)
+      if (!isHeld(name) && !gearBlocks[name]) await pressAct('gears', { do: 'gearPress', name, canType: Boolean(Input) })
     }
 
-    const pickValue = (name: string, arg: string, value: string) =>
-      update($, gearForms, all => {
-        const form = all[name]
+    // 이 값으로 실행. Mirroring, what was picked and typed here travels with this one press, never per keystroke.
+    const submitHere = async (name: string) => {
+      if (!mirrored) return submitValues($, name)
+      const { [DATA_FIELD]: data, ...typedArgs } = typedValues.get(name) ?? {}
+      if (await pressAct('gears', { do: 'gearSubmit', name, values: { ...picksHere[name], ...typedArgs }, input: data ?? '' })) typedValues.delete(name)
+    }
 
-        return form?.kind === 'values' ? { ...all, [name]: { ...form, picked: { ...form.picked, [arg]: value } } } : all
-      })
+    const answerHere = async (name: string, isYes: boolean) => (mirrored ? void (await pressAct('gears', { do: 'gearConfirm', name, isYes })) : answerConfirm($, name, isYes))
+    const stopHere = async (name: string) => (mirrored ? void (await pressAct('gears', { do: 'gearStop', name })) : stopGear($, name))
+
+    // A choice button pressed: the block remembers it. Mirroring, the pick stays here until the block is submitted.
+    const pickValue = (name: string, arg: string, value: string) =>
+      mirrored
+        ? update($, viewPicks, all => ({ ...all, [name]: { ...all[name], [arg]: value } }))
+        : update($, gearForms, all => {
+            const form = all[name]
+
+            return form?.kind === 'values' ? { ...all, [name]: { ...form, picked: { ...form.picked, [arg]: value } } } : all
+          })
 
     // The values of a gear, set here: a row of buttons where its description lists the choices (the value now is
     // the one picked), a field for a value to type and for the data it reads, then the run — or Claude.
@@ -1819,7 +2125,7 @@ export const register: Register = on => {
                     {how.choices.map((choice, i) => (
                       <Button
                         key={`gear-pick-${name}-${arg.name}-${i}`}
-                        label={`${(form.picked[arg.name] ?? arg.value) === choice ? '●' : '○'} ${choice}`}
+                        label={`${(picksHere[name]?.[arg.name] ?? form.picked[arg.name] ?? arg.value) === choice ? '●' : '○'} ${choice}`}
                         onPress={() => void pickValue(name, arg.name, choice)}
                       />
                     ))}
@@ -1853,15 +2159,17 @@ export const register: Register = on => {
                   onInput={(value: string) => noteTyped(name, DATA_FIELD, value)}
                   onSubmit={(value: string) => {
                     noteTyped(name, DATA_FIELD, value)
-                    void submitValues($, name).catch(() => undefined)
+                    void submitHere(name).catch(() => undefined)
                   }}
                 />,
               ]
             : []}
-          {isTyped && !Input ? [<Text key="no-field" dimColor>이 화면에는 입력 칸이 없어 값을 적을 수 없습니다 — Claude 에게 맡기면 물어봅니다.</Text>] : []}
+          {isTyped && !Input
+            ? [<Text key="no-field" dimColor>{mirrored ? '이 화면에는 입력 칸이 없어 값을 적을 수 없습니다.' : '이 화면에는 입력 칸이 없어 값을 적을 수 없습니다 — Claude 에게 맡기면 물어봅니다.'}</Text>]
+            : []}
           <Box flexDirection="row" gap={1}>
-            {isTyped && !Input ? [] : [<Button key={`gear-go-${name}`} label="이 값으로 실행" variant="primary" onPress={() => void submitValues($, name).catch(() => undefined)} />]}
-            <Button key={`gear-chat-${name}`} label="Claude 에게 맡기기" onPress={() => void handToChat($, name, form.from).catch(() => undefined)} />
+            {isTyped && !Input ? [] : [<Button key={`gear-go-${name}`} label="이 값으로 실행" variant="primary" onPress={() => void submitHere(name).catch(() => undefined)} />]}
+            {mirrored ? [] : [<Button key={`gear-chat-${name}`} label="Claude 에게 맡기기" onPress={() => void handToChat($, name, form.from).catch(() => undefined)} />]}
           </Box>
         </Box>
       )
@@ -1875,8 +2183,8 @@ export const register: Register = on => {
           <Text key={`gear-ask-${name}-${i}`}>{line}</Text>
         ))}
         <Box flexDirection="row" gap={1}>
-          <Button key={`gear-confirm-yes-${name}`} label="실행" variant="primary" onPress={() => void answerConfirm($, name, true).catch(() => undefined)} />
-          <Button key={`gear-confirm-no-${name}`} label="취소" onPress={() => void answerConfirm($, name, false).catch(() => undefined)} />
+          <Button key={`gear-confirm-yes-${name}`} label="실행" variant="primary" onPress={() => void answerHere(name, true).catch(() => undefined)} />
+          <Button key={`gear-confirm-no-${name}`} label="취소" onPress={() => void answerHere(name, false).catch(() => undefined)} />
         </Box>
       </Box>
     )
@@ -1889,12 +2197,22 @@ export const register: Register = on => {
     const lightState = await read($, light)
     const lightLine = await read($, lightSaid)
     const fillNow = await read($, contextFill)
-    const keepLight = async (next: LightSettings) => void (await $.store.set(LIGHT_KEY, next).catch(() => undefined))
-    const switchLight = async () => keepLight(await update($, light, one => ({ ...one, isOn: !one.isOn })))
+    // Mirroring, each of these goes to the working session, with the value to end at; a press that would change
+    // nothing there (the mark at the end of its bar, the branch already checked out) sends nothing.
+    const switchLight = async () => (mirrored ? void (await pressAct('limits', { do: 'lightSwitch', isOn: !lightState.isOn })) : setLight($, one => ({ ...one, isOn: !one.isOn })))
     // ◀ · ▶: the mark one step down or up the bar.
-    const stepLight = async (by: number) => keepLight(await update($, light, one => moveLight(one, one.percent + by)))
+    const stepLight = async (by: number) => {
+      if (!mirrored) return setLight($, one => moveLight(one, one.percent + by))
+      const next = moveLight(lightState, lightState.percent + by).percent
+      if (next !== lightState.percent) await pressAct('limits', { do: 'lightMark', percent: next })
+    }
     const where = await read($, place)
     const picking = await read($, branchPick)
+    const pressBranches = async () => (mirrored ? void (await pressAct('limits', { do: 'branchList', isOpen: !picking })) : openBranches($))
+    const pickBranch = async (to: string) => {
+      if (!mirrored) return switchBranch($, to)
+      if (to !== where.branch?.name) await pressAct('limits', { do: 'branchPick', to })
+    }
     const whereNote = await read($, placeNote)
     const folder = shot.root ? shortPath(shot.root, where.home) : null
     const branchLabel = where.branch ? (where.branch.isBranch ? where.branch.name : `${where.branch.name} (브랜치 없음)`) : null
@@ -1912,10 +2230,10 @@ export const register: Register = on => {
               {branchLabel ? (
                 <Box flexDirection="row" gap={1} alignItems="center">
                   <Text bold>브랜치</Text>
-                  {mirrored ? <Text dimColor>{branchLabel}</Text> : <Button key="branch-open" label={`${branchLabel} ${picking ? '▴' : '▾'}`} onPress={() => void openBranches($).catch(() => undefined)} />}
+                  {hasControls ? <Button key="branch-open" label={`${branchLabel} ${picking ? '▴' : '▾'}`} onPress={() => void pressBranches().catch(() => undefined)} /> : <Text dimColor>{branchLabel}</Text>}
                 </Box>
               ) : null}
-              {picking && !mirrored ? (
+              {picking && hasControls ? (
                 <Box flexDirection="column">
                   {Select ? (
                     <Select
@@ -1923,10 +2241,10 @@ export const register: Register = on => {
                       label="바꿀 브랜치"
                       options={picking.map(value => ({ value }))}
                       {...(where.branch?.isBranch && picking.includes(where.branch.name) ? { value: where.branch.name } : {})}
-                      onSelect={(value: string) => void switchBranch($, value).catch(() => undefined)}
+                      onSelect={(value: string) => void pickBranch(value).catch(() => undefined)}
                     />
                   ) : (
-                    picking.slice(0, 12).map((name, i) => <Button key={`branch-to-${i}`} label={name} onPress={() => void switchBranch($, name).catch(() => undefined)} />)
+                    picking.slice(0, 12).map((name, i) => <Button key={`branch-to-${i}`} label={name} onPress={() => void pickBranch(name).catch(() => undefined)} />)
                   )}
                 </Box>
               ) : null}
@@ -1947,11 +2265,11 @@ export const register: Register = on => {
                 <Box flexDirection="row" justifyContent="space-between" alignItems="center">
                   <Text dimColor>{lightState.isOn ? `컨텍스트가 ${lightState.percent}% 를 넘으면 자동으로 요약함 — 비우지 않음` : '대화가 길어져도 그대로 둠'}</Text>
                   <Box flexDirection="row">
-                    {mirrored ? [] : [<Button key="light-toggle" label={lightState.isOn ? '끄기' : '켜기'} onPress={() => void switchLight().catch(() => undefined)} />]}
+                    {hasControls ? [<Button key="light-toggle" label={lightState.isOn ? '끄기' : '켜기'} onPress={() => void switchLight().catch(() => undefined)} />] : []}
                   </Box>
                 </Box>
               ) : null}
-              {context && lightState.isOn && !mirrored ? (
+              {context && lightState.isOn && hasControls ? (
                 <Box flexDirection="row" gap={1} alignItems="center">
                   <Button key="light-down" label="◀" onPress={() => void stepLight(-LIGHT_STEP).catch(() => undefined)} />
                   {Svg ? <Svg source={lightBarSvg(lightState.percent, fillNow)} alt={`요약 기준 ${lightState.percent}% · 지금 ${context}`} /> : null}
@@ -1960,25 +2278,28 @@ export const register: Register = on => {
                 </Box>
               ) : null}
               {lightLine ? <Text dimColor>{lightLine}</Text> : null}
+              {sentNote('limits')}
             </Box>,
             '#4f8cff',
           )
         : null
 
+    const pressAskMode = async () => (mirrored ? void (await pressAct('askMode', { do: 'askMode', to: askView.next })) : switchAskMode($, askView.next))
     const askCard = () =>
       card(
-        <>
+        <Box flexDirection="column">
           <Box flexDirection="row" justifyContent="space-between" alignItems="center">
             <Box flexDirection="row" gap={1}>
               <Text bold>묻기 방식</Text>
               <Text>{askView.name}</Text>
             </Box>
             <Box flexDirection="row">
-              {mirrored ? [] : [<Button key="ask-mode-switch" label={askView.nextLabel} onPress={() => void switchAskMode(askView.next).catch(() => undefined)} />]}
+              {hasControls ? [<Button key="ask-mode-switch" label={askView.nextLabel} onPress={() => void pressAskMode().catch(() => undefined)} />] : []}
             </Box>
           </Box>
           <Text dimColor>{askView.meaning}</Text>
-        </>,
+          {sentNote('askMode')}
+        </Box>,
       )
 
     // One line per gear — what it does, in plain words — and a press opens that gear alone: its name, the values to
@@ -1997,7 +2318,7 @@ export const register: Register = on => {
             const isOpen = openGear === row.name
             const run = gearRan[row.name]
             const form = gearBlocks[row.name]
-            const isRunning = isLiveRun(row.name, run)
+            const isRunning = isLiveRun(row.name, run, isHeld(row.name))
             const canRun = row.direct === 'run' && !isUnread(row.name)
 
             return (
@@ -2009,14 +2330,17 @@ export const register: Register = on => {
                     </Button>
                   </Box>
                   <Box flexDirection="row">
-                    {mirrored
+                    {!hasControls
                       ? []
                       : !canRun
-                        ? [<Button key={`gear-use-${row.name}`} label="대화로" onPress={() => void useGear(row.name).catch(() => undefined)} />]
+                        ? // a gear that goes to the conversation: that is the working session's own to start
+                          mirrored
+                          ? []
+                          : [<Button key={`gear-use-${row.name}`} label="대화로" onPress={() => void useGear(row.name).catch(() => undefined)} />]
                         : isRunning || (form && isOpen)
                           ? // running: 멈춤 is under the line; a block open under the line has its own buttons
                             []
-                          : [<Button key={`gear-run-${row.name}`} label="실행" onPress={() => void pressRun(row.name).catch(() => undefined)} />]}
+                          : [<Button key={`gear-run-${row.name}`} label="실행" onPress={() => void pressRunHere(row.name).catch(() => undefined)} />]}
                   </Box>
                 </Box>
                 {isOpen ? (
@@ -2031,11 +2355,11 @@ export const register: Register = on => {
                       : []}
                     {form?.kind === 'values' ? valuesBlock(row.name, form) : null}
                     {form?.kind === 'confirm' ? confirmBlock(row.name, form) : null}
-                    {(run ? runLines(row.name, run, at) : []).map((line, i) => (
+                    {(run ? runLines(row.name, run, at, isHeld(row.name)) : []).map((line, i) => (
                       <Text key={`gear-out-${row.name}-${i}`} dimColor>{`│ ${line}`}</Text>
                     ))}
-                    {isRunning ? [<Button key={`gear-stop-${row.name}`} label="멈춤" onPress={() => void stopGear($, row.name).catch(() => undefined)} />] : []}
-                    {run && !isRunning && run.exitCode !== 11
+                    {isRunning && hasControls ? [<Button key={`gear-stop-${row.name}`} label="멈춤" onPress={() => void stopHere(row.name).catch(() => undefined)} />] : []}
+                    {run && !isRunning && run.exitCode !== 11 && !mirrored
                       ? [<Button key={`gear-paste-${row.name}`} label="결과를 대화에 붙이기" onPress={() => void pasteResult($, row.name).catch(() => undefined)} />]
                       : []}
                   </Box>
@@ -2045,19 +2369,169 @@ export const register: Register = on => {
           })}
           {gearView.hidden > 0 ? [<Button key="gears-all" label={`${gearView.total}개 모두 보기`} onPress={() => void update($, gearsAll, () => true)} />] : []}
           {paneMessage ? <Text dimColor>{paneMessage}</Text> : null}
+          {sentNote('gears')}
+        </Box>,
+      )
+
+    // The word dictionary: an entry a line — the word to avoid, the word to use, its forms dim under them — then
+    // the form that adds one. Always shown where the project is read, also when the dictionary is empty.
+    const wordsOpen = await read($, wordsView)
+    const wordsLine = await read($, wordsNote)
+    const wordList = parseWords(shot.wordsText)
+    const wordFold = wordsFold(wordList, wordsOpen.isAll)
+    const editing = wordsOpen.edit ? wordList.find(one => one.avoid === wordsOpen.edit) : undefined
+    // an emptied form: nothing typed is kept, and its fields are drawn anew
+    const resetForm = () => {
+      clearWordsTyped()
+
+      return update($, wordsView, one => ({ ...one, edit: null, gen: one.gen + 1 }))
+    }
+    const editWord = (avoid: string) => {
+      clearWordsTyped()
+
+      return update($, wordsView, one => ({ ...one, edit: avoid, asking: null, gen: one.gen + 1 }))
+    }
+    // 저장: what the fields hold (for an entry being edited, its own words where nothing was typed). An edit that
+    // changes nothing runs and sends nothing. Mirroring, the typed words travel with this one press.
+    const saveHere = async () => {
+      const draft = { avoid: wordsTyped.avoid ?? editing?.avoid ?? '', use: wordsTyped.use ?? editing?.use ?? '', forms: wordsTyped.forms ?? editing?.forms.join(', ') ?? '' }
+      const was = editing?.avoid ?? null
+      const checked = checkWord(draft)
+      if (checked.isOk && editing && checked.word.avoid === editing.avoid && checked.word.use === editing.use && checked.word.forms === editing.forms.join(', ')) {
+        if (mirrored) await update($, actNote, () => ({ where: 'words' as const, text: '바뀐 것이 없어 보내지 않음' }))
+        else await update($, wordsNote, () => '바뀐 것이 없어 그대로 둠')
+
+        return void (await resetForm())
+      }
+      if (!mirrored) return void ((await saveWord($, draft, was)) && (await resetForm()))
+      if (!checked.isOk) return void (await update($, actNote, () => ({ where: 'words' as const, text: checked.reason })))
+      if (await pressAct('words', { do: 'wordsSave', ...checked.word, was })) await resetForm()
+    }
+    const askRemove = (avoid: string | null) => update($, wordsView, one => ({ ...one, asking: avoid }))
+    const removeHere = async (avoid: string) => {
+      await askRemove(null)
+      if (mirrored) return void (await pressAct('words', { do: 'wordsRemove', avoid }))
+      await removeWord($, avoid)
+    }
+    // A command of the dictionary into this session's prompt box, unsent; the card says what sending it does.
+    const fillWords = async (command: string, then: string) => {
+      const filled = await fillPrompt($, command)
+      await update($, wordsNote, () => (filled ? `입력창에 넣음: ${command.trim()} — ${then}` : `입력창에 못 넣음 — ${command.trim()}`))
+    }
+    const formKind = wordsFormKind({ controls: hasControls, input: Boolean(Input), isMirror: Boolean(mirrored) })
+    const wordsForm = () =>
+      formKind === 'hidden' ? null : formKind === 'form' && Input ? (
+        <Box flexDirection="column" marginTop={1}>
+          <Text bold>{editing ? `고치기 — ${wordLine(editing)}` : '낱말 추가'}</Text>
+          <Input
+            key={`words-avoid-${wordsOpen.gen}`}
+            label="피할 말"
+            placeholder="예: 재다"
+            value={editing?.avoid ?? ''}
+            submitLabel="값 넣기"
+            onInput={(value: string) => void (wordsTyped.avoid = value)}
+            onSubmit={(value: string) => void (wordsTyped.avoid = value)}
+          />
+          <Input
+            key={`words-use-${wordsOpen.gen}`}
+            label="바꿀 말"
+            placeholder="예: 측정하다"
+            value={editing?.use ?? ''}
+            submitLabel="값 넣기"
+            onInput={(value: string) => void (wordsTyped.use = value)}
+            onSubmit={(value: string) => void (wordsTyped.use = value)}
+          />
+          <Input
+            key={`words-forms-${wordsOpen.gen}`}
+            label="변형(쉼표로)"
+            placeholder="비워 두면 Claude 가 채움 — 예: 잰, 재서, 재 본"
+            value={editing ? editing.forms.join(', ') : ''}
+            submitLabel="저장"
+            onInput={(value: string) => void (wordsTyped.forms = value)}
+            onSubmit={(value: string) => {
+              wordsTyped.forms = value
+              void saveHere().catch(() => undefined)
+            }}
+          />
+          <Box flexDirection="row" gap={1}>
+            <Button key="words-save" label="저장" variant="primary" onPress={() => void saveHere().catch(() => undefined)} />
+            {editing ? [<Button key="words-edit-cancel" label="취소" onPress={() => void resetForm()} />] : []}
+          </Box>
+        </Box>
+      ) : formKind === 'none' ? (
+        <Text dimColor>이 화면에는 입력 칸이 없어 낱말을 추가할 수 없습니다 — 지우기는 됩니다.</Text>
+      ) : (
+        <Box flexDirection="row">
+          <Button key="words-add" label="낱말 추가 — 입력창에 /scv:words add" onPress={() => void fillWords('/scv:words add ', "뒤에 '피할 말 → 바꿀 말' 을 적어 보내 주세요").catch(() => undefined)} />
+        </Box>
+      )
+    const wordsCard = () =>
+      card(
+        <Box flexDirection="column">
+          <Text bold>{`낱말 사전 ${wordList.length}`}</Text>
+          {wordList.length === 0 ? (
+            <Text dimColor>피할 말과 바꿀 말을 적어 두면, Claude 가 그 말이나 그 변형을 쓰려 할 때 바꿀 말로 씁니다 — 예: 재다 → 측정하다 (잰 · 재 봤을 때 → 측정)</Text>
+          ) : (
+            <Text dimColor>Claude 가 왼쪽 말이나 그 변형을 쓰려 할 때 오른쪽 말로 바꿔 씁니다</Text>
+          )}
+          {wordFold.shown.map((entry, i) => {
+            const forms = formsLine(entry)
+            const isAsked = wordsOpen.asking === entry.avoid
+
+            return (
+              <Box key={`word-${i}`} flexDirection="column">
+                <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+                  <Box flexDirection="row" flexShrink={1}>
+                    <Text>{wordLine(entry)}</Text>
+                  </Box>
+                  <Box flexDirection="row" gap={1}>
+                    {hasControls && !isAsked
+                      ? [
+                          ...(Input ? [<Button key={`words-edit-${i}`} label="고치기" onPress={() => void editWord(entry.avoid)} />] : []),
+                          <Button key={`words-remove-${i}`} label="지우기" onPress={() => void askRemove(entry.avoid)} />,
+                        ]
+                      : []}
+                  </Box>
+                </Box>
+                {forms ? (
+                  <Box paddingLeft={2}>
+                    <Text dimColor>{forms}</Text>
+                  </Box>
+                ) : (
+                  <Box flexDirection="row" paddingLeft={2} gap={1} alignItems="center">
+                    <Text dimColor>변형 없음 — Claude 가 채움</Text>
+                    {mirrored ? [] : [<Button key={`words-fill-${i}`} label="채우기" onPress={() => void fillWords('/scv:words fill', '보내면 Claude 가 빈 변형을 채웁니다').catch(() => undefined)} />]}
+                  </Box>
+                )}
+                {isAsked && hasControls ? (
+                  <Box flexDirection="row" paddingLeft={2} gap={1} alignItems="center">
+                    <Text color="#e3b341">지울까요?</Text>
+                    <Button key="words-remove-yes" label="지우기" onPress={() => void removeHere(entry.avoid).catch(() => undefined)} />
+                    <Button key="words-remove-no" label="취소" onPress={() => void askRemove(null)} />
+                  </Box>
+                ) : null}
+              </Box>
+            )
+          })}
+          {wordFold.hidden > 0 ? [<Button key="words-all" label={`${wordFold.hidden}개 더 보기`} onPress={() => void update($, wordsView, one => ({ ...one, isAll: true }))} />] : []}
+          {wordsForm()}
+          {wordsLine ? <Text dimColor>{wordsLine}</Text> : null}
+          {sentNote('words')}
         </Box>,
       )
 
     // Always on top: context · usage, then ask mode and gears where this session's project is read.
     const hasProject = shot.settingsText !== undefined
     const topCards = (hasPlan: boolean, hasBlocks: boolean) => {
-      const sections = paneSections({ plan: hasPlan, blocks: hasBlocks, project: hasProject })
+      const sections = paneSections({ plan: hasPlan, blocks: hasBlocks, project: hasProject, words: shot.wordsText !== undefined })
 
       return (
         <Box flexDirection="column">
+          {!mirrored && cameFrom ? <Text dimColor>{cameFrom}</Text> : null}
           {sections.includes('limits') ? limitsCard() : null}
           {sections.includes('askMode') ? askCard() : null}
           {sections.includes('gears') ? gearsCard() : null}
+          {sections.includes('words') ? wordsCard() : null}
         </Box>
       )
     }

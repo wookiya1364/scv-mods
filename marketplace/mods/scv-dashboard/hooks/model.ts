@@ -1223,9 +1223,30 @@ export const barColor = (stages: readonly Stage[], blocks: readonly Block[]) =>
 
 export const MIRROR_MARK = 'SCV-MIRROR'
 
-// What a viewer's press asks the working session to do on its own side: put the plan's next command in its prompt
-// box. The working session works the command out from its own state, never from the message.
-export type MirrorAct = { do: 'fill'; slug: string }
+// What a viewer's press asks the working session to do on its own side, with the same functions its own buttons
+// call. A message names what to do and with which values, never a command: the working session works every command
+// out from its own state. fill: the plan's next command into its prompt box. askMode · lightSwitch · lightMark:
+// the value to end at (so one delivered twice changes nothing more). gearPress: a press on a gear's run button
+// (canType: the viewer's surface draws a field). gearSubmit: the values block's run, with what was picked and typed
+// in the viewer. gearConfirm: the answer before a step that reaches outside. branchList: the branch list open or
+// folded. wordsSave: a dictionary entry (was: the entry being edited, by its key). wordsRemove: one entry gone.
+export type MirrorAct =
+  | { do: 'fill'; slug: string }
+  | { do: 'askMode'; to: AskMode }
+  | { do: 'lightSwitch'; isOn: boolean }
+  | { do: 'lightMark'; percent: number }
+  | { do: 'gearPress'; name: string; canType: boolean }
+  | { do: 'gearSubmit'; name: string; values: Record<string, string>; input: string }
+  | { do: 'gearConfirm'; name: string; isYes: boolean }
+  | { do: 'gearStop'; name: string }
+  | { do: 'branchList'; isOpen: boolean }
+  | { do: 'branchPick'; to: string }
+  | { do: 'wordsSave'; avoid: string; use: string; forms: string; was: string | null }
+  | { do: 'wordsRemove'; avoid: string }
+
+// The acts a working session of this version takes; it says so in its state (`acts`), and a viewer shows its
+// controls only for a host that says at least this. 1 would be the fill act alone (a host that takes only that one says nothing).
+export const MIRROR_ACTS = 2
 
 export type MirrorMessage =
   | { kind: 'hello'; address: string }
@@ -1243,16 +1264,110 @@ export const mirrorText = (message: MirrorMessage) =>
       ? `${MIRROR_MARK} ACT ${message.address} ${escapeTags(JSON.stringify(message.act))}`
       : `${MIRROR_MARK} ${message.kind.toUpperCase()} ${message.address}`
 
-// An act this version knows, else null.
-const parseAct = (json: string): MirrorAct | null => {
-  try {
-    const act = JSON.parse(json) as { do?: unknown; slug?: unknown }
-    if (act.do === 'fill' && typeof act.slug === 'string' && act.slug) return { do: 'fill', slug: act.slug }
-  } catch {
-    // not JSON
-  }
+const ACT_VALUE_MAX = 2000
+const ACT_INPUT_MAX = 64 * 1024
+const ACT_VALUES_MAX = 32
+// a branch name as git prints it: one word, no control character, never an option
+const BRANCH_NAME = /^(?!-)[^\s\u0000-\u001f\u007f]{1,255}$/
 
-  return null
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+
+// The values a viewer set for a gear: argument names of the shape SCV gives them, each with a text (no NUL — a value
+// becomes the value part of one command word).
+const actValues = (value: unknown): Record<string, string> | null => {
+  if (!isRecord(value)) return null
+  const entries = Object.entries(value)
+  if (entries.length > ACT_VALUES_MAX) return null
+  const isFine = entries.every(([name, text]) => ARG_NAME.test(name) && typeof text === 'string' && text.length <= ACT_VALUE_MAX && !text.includes('\u0000'))
+
+  return isFine ? Object.fromEntries(entries as [string, string][]) : null
+}
+
+// An act this version knows with every field of the shape it must have, else null: an unknown act, a missing or
+// mistyped field, a name that is not a gear's, a word that could not be a dictionary entry — all dropped. The fields
+// are copied one by one, so nothing else a message carried goes on.
+export const parseAct = (json: string): MirrorAct | null => {
+  let act: unknown
+  try {
+    act = JSON.parse(json)
+  } catch {
+    return null
+  }
+  if (!isRecord(act)) return null
+  const gear = typeof act.name === 'string' && GEAR_NAME.test(act.name) ? act.name : null
+  switch (act.do) {
+    case 'fill':
+      return typeof act.slug === 'string' && act.slug ? { do: 'fill', slug: act.slug } : null
+    case 'askMode':
+      return act.to === 'all' || act.to === 'ends' ? { do: 'askMode', to: act.to } : null
+    case 'lightSwitch':
+      return typeof act.isOn === 'boolean' ? { do: 'lightSwitch', isOn: act.isOn } : null
+    case 'lightMark':
+      return typeof act.percent === 'number' && Number.isFinite(act.percent) && act.percent >= LIGHT_MIN && act.percent <= LIGHT_MAX
+        ? { do: 'lightMark', percent: act.percent }
+        : null
+    case 'gearPress':
+      return gear && typeof act.canType === 'boolean' ? { do: 'gearPress', name: gear, canType: act.canType } : null
+    case 'gearSubmit': {
+      const values = actValues(act.values)
+
+      return gear && values && typeof act.input === 'string' && act.input.length <= ACT_INPUT_MAX && !act.input.includes('\u0000')
+        ? { do: 'gearSubmit', name: gear, values, input: act.input }
+        : null
+    }
+    case 'gearConfirm':
+      return gear && typeof act.isYes === 'boolean' ? { do: 'gearConfirm', name: gear, isYes: act.isYes } : null
+    case 'gearStop':
+      return gear ? { do: 'gearStop', name: gear } : null
+    case 'branchList':
+      return typeof act.isOpen === 'boolean' ? { do: 'branchList', isOpen: act.isOpen } : null
+    case 'branchPick':
+      return typeof act.to === 'string' && BRANCH_NAME.test(act.to) ? { do: 'branchPick', to: act.to } : null
+    case 'wordsSave': {
+      const checked = checkWord({ avoid: act.avoid, use: act.use, forms: act.forms })
+      const was = act.was === null || act.was === undefined ? null : typeof act.was === 'string' && isWordText(act.was) ? act.was : undefined
+
+      return checked.isOk && was !== undefined ? { do: 'wordsSave', ...checked.word, was } : null
+    }
+    case 'wordsRemove':
+      return typeof act.avoid === 'string' && isWordText(act.avoid) ? { do: 'wordsRemove', avoid: act.avoid } : null
+    default:
+      return null
+  }
+}
+
+// A delivery that carries the mark of an act but none this version takes (a newer viewer's, a broken one): it is
+// taken off the conversation like any mirror message, and nothing is done.
+export const isActText = (text: string) => new RegExp(`${MIRROR_MARK} ACT \\S+ \\{`).test(text)
+
+// What the working session writes in its own pane after an act from a mirror: what was pressed there, in plain words.
+export const actLabel = (act: MirrorAct): string => {
+  switch (act.do) {
+    case 'fill':
+      return `입력창에 다음 명령 넣기 — ${act.slug}`
+    case 'askMode':
+      return `묻기 방식 → ${askModeView(act.to).name}`
+    case 'lightSwitch':
+      return `자동 요약 → ${act.isOn ? '켬' : '끔'}`
+    case 'lightMark':
+      return `요약 기준 → ${moveLight(DEFAULT_LIGHT, act.percent).percent}%`
+    case 'gearPress':
+      return `기어 실행 — ${act.name}`
+    case 'gearSubmit':
+      return `기어 값 정해 실행 — ${act.name}`
+    case 'gearConfirm':
+      return `기어 확인 — ${act.name}: ${act.isYes ? '실행' : '취소'}`
+    case 'gearStop':
+      return `기어 멈춤 — ${act.name}`
+    case 'branchList':
+      return `브랜치 목록 ${act.isOpen ? '열기' : '접기'}`
+    case 'branchPick':
+      return `브랜치 → ${act.to}`
+    case 'wordsSave':
+      return `낱말 저장 — ${act.avoid} → ${act.use}`
+    case 'wordsRemove':
+      return `낱말 지우기 — ${act.avoid}`
+  }
 }
 
 // A delivery that carries a mirror message, else null; the envelope around it (a cross-session tag) is left out.
@@ -1337,6 +1452,10 @@ export const sessionName = (files: string, sessionId: string) => {
 
 // How a viewer names the session it mirrors: its name and address together, or the address alone.
 export const hostLabel = (host: string, name?: string | null) => (name ? `${name} (${host})` : host)
+
+// The line a working session's pane keeps after an act from a mirror: what was pressed there, and when (the
+// person's own clock) — so a line left from hours ago does not read as something that just happened.
+export const fromMirrorLine = (act: MirrorAct, at: number, offsetMinutes: number) => `거울에서: ${actLabel(act)} · ${clockOf(at, offsetMinutes)}`
 
 // ── now view: what is being done now, what runs in the background, what just finished ──
 
@@ -1817,6 +1936,9 @@ export const stopLines = (stop: ConfirmStop): string[] => [
   ...(stop.script.length > STOP_SCRIPT_LINES ? [`  … 외 ${stop.script.length - STOP_SCRIPT_LINES}줄`] : []),
 ]
 
+// A run's output as it goes to a viewer: the lines a card can show and no more (the card shows the last twelve).
+export const wireTail = (tail: string) => shownLines(tail).slice(-RUN_LINES).join('\n')
+
 // What goes into the prompt box when the person asks for a run's result there: which gear, and its result lines.
 export const gearPaste = (name: string, lines: readonly string[]) => [`기어 ${name} 를 SCV 창에서 돌린 결과:`, ...lines].join('\n')
 
@@ -1838,13 +1960,16 @@ export const pluginRoot = (installedText: string | null | undefined, project: st
   }
 }
 
-export type PaneSection = 'limits' | 'askMode' | 'gears' | 'blocks' | 'steps' | 'more'
+export type PaneSection = 'limits' | 'askMode' | 'gears' | 'words' | 'blocks' | 'steps' | 'more'
 
 // The cards always shown, top to bottom; the rest sits under 'more'. Blocked work shows only when there is some,
-// the steps only with a plan, and ask mode · gears only where this session reads the project itself.
-export const paneSections = (has: { plan: boolean; blocks: boolean; project: boolean }): PaneSection[] => [
+// the steps only with a plan, and ask mode · gears only where this session reads the project itself. The word
+// dictionary comes after the gears where the project's dictionary was looked for (words: a state from a working
+// session that does not read it has none).
+export const paneSections = (has: { plan: boolean; blocks: boolean; project: boolean; words?: boolean }): PaneSection[] => [
   'limits',
   ...(has.project ? (['askMode', 'gears'] as const) : []),
+  ...(has.project && has.words ? (['words'] as const) : []),
   ...(has.plan && has.blocks ? (['blocks'] as const) : []),
   ...(has.plan ? (['steps', 'more'] as const) : []),
 ]
@@ -2064,4 +2189,121 @@ export const lightNote = (input: { kind: 'records' | 'summary' | 'skipped'; befo
     input.before !== null ? ` ${Math.round(input.before)}%${input.after !== null && input.after < input.before ? ` → ${Math.round(input.after)}%` : ''}` : ''
 
   return `${input.kind === 'records' ? '기록으로 바꿔 끼워 가볍게 함' : '요약해서 가볍게 함'}${size} · ${Math.max(1, Math.round(input.ms / 1000))}초`
+}
+
+// ── the word dictionary (after pane 0.5.0) ─────────────────────────────────────────
+// A project's own words: when Claude is about to use the avoided word or a form of it, it says the other word.
+// The file is scv/words/WORDS.tsv — a line per entry, four tab-separated fields: avoid · use · forms · note.
+
+export type WordEntry = { avoid: string; use: string; forms: string[]; note: string }
+
+// The forms of a word as written in one field: a comma-separated list, the empty ones left out.
+const splitForms = (text: string) =>
+  text
+    .split(',')
+    .map(one => one.trim())
+    .filter(Boolean)
+
+// The entries of the dictionary file: comment lines ('#') and empty lines are skipped, and so is a line without
+// both words. The avoided word is the key: a later line with the same one replaces the earlier.
+export const parseWords = (text: string | null | undefined): WordEntry[] => {
+  const byAvoid = new Map<string, WordEntry>()
+  for (const raw of (text ?? '').split('\n')) {
+    const line = raw.replace(/\r$/, '')
+    if (line.trim() === '' || line.trimStart().startsWith('#')) continue
+    const cols = line.split('\t')
+    const avoid = (cols[0] ?? '').trim()
+    const use = (cols[1] ?? '').trim()
+    if (!avoid || !use) continue
+    byAvoid.set(avoid, { avoid, use, forms: splitForms(cols[2] ?? ''), note: (cols[3] ?? '').trim() })
+  }
+
+  return [...byAvoid.values()]
+}
+
+// What the card writes for an entry: the two words on one line, its forms under it (null: none written yet).
+export const wordLine = (entry: { avoid: string; use: string }) => `${entry.avoid} → ${entry.use}`
+export const formsLine = (entry: { forms: readonly string[] }) => (entry.forms.length > 0 ? entry.forms.join(' · ') : null)
+
+const WORDS_SHOWN = 8
+
+// The entries a card lists: eight, the rest on a press.
+export const wordsFold = (entries: readonly WordEntry[], isAll: boolean, max = WORDS_SHOWN) => {
+  const shown = isAll ? [...entries] : entries.slice(0, max)
+
+  return { shown, hidden: entries.length - shown.length }
+}
+
+// How the card takes a new entry: its own form where the surface draws a field; where it draws none, a button that
+// puts the slash command into this session's prompt box — or, in a viewer session (whose prompt box is not the
+// working session's), a line that says so. hidden: a viewer whose working session takes no presses.
+export type WordsFormKind = 'form' | 'command' | 'none' | 'hidden'
+
+export const wordsFormKind = (has: { controls: boolean; input: boolean; isMirror: boolean }): WordsFormKind =>
+  !has.controls ? 'hidden' : has.input ? 'form' : has.isMirror ? 'none' : 'command'
+
+const WORD_MAX = 80
+const FORMS_MAX = 400
+
+// Whether a text can be a field of the dictionary file: one line, no tab or other control character, not too long.
+export const isWordText = (text: string, max = WORD_MAX) => text.length > 0 && text.length <= max && !/[\u0000-\u001f\u007f]/.test(text)
+
+export type WordDraft = { avoid: string; use: string; forms: string }
+export type WordCheck = { isOk: true; word: WordDraft } | { isOk: false; reason: string }
+
+// What the person typed into the form, as an entry to save: both words there, each a single line the file can
+// hold, the two not the same; the forms as a ', ' list. Else the reason, as the card says it. Nothing is run for
+// a draft that does not pass.
+export const checkWord = (draft: { avoid: unknown; use: unknown; forms?: unknown }): WordCheck => {
+  if (typeof draft.avoid !== 'string' || typeof draft.use !== 'string' || (draft.forms !== undefined && typeof draft.forms !== 'string')) {
+    return { isOk: false, reason: '저장하지 않음 — 글이 아닌 값' }
+  }
+  const avoid = draft.avoid.trim()
+  const use = draft.use.trim()
+  const formsText = typeof draft.forms === 'string' ? draft.forms : ''
+  if (!avoid || !use) return { isOk: false, reason: '저장하지 않음 — 피할 말과 바꿀 말을 모두 적어 주세요' }
+  if (/[\u0000-\u001f\u007f]/.test(`${avoid}${use}${formsText.trim()}`)) return { isOk: false, reason: '저장하지 않음 — 탭이나 줄바꿈은 넣을 수 없습니다' }
+  if (avoid.length > WORD_MAX || use.length > WORD_MAX) return { isOk: false, reason: `저장하지 않음 — 낱말은 ${WORD_MAX}자까지` }
+  if (avoid === use) return { isOk: false, reason: '저장하지 않음 — 피할 말과 바꿀 말이 같습니다' }
+  const forms = splitForms(formsText).join(', ')
+  if (forms.length > FORMS_MAX) return { isOk: false, reason: `저장하지 않음 — 변형은 모두 합쳐 ${FORMS_MAX}자까지` }
+
+  return { isOk: true, word: { avoid, use, forms } }
+}
+
+// The command that saves an entry, one word each: SCV's own dictionary command, then every typed text as the value
+// after its own flag — never part of a shell text. note: the note the entry being replaced had, kept.
+export const wordsAddArgv = (core: string, word: WordDraft, note = '') => [
+  'bash',
+  `${core}/scripts/words.sh`,
+  'add',
+  '--avoid',
+  word.avoid,
+  '--use',
+  word.use,
+  ...(word.forms ? ['--forms', word.forms] : []),
+  ...(note ? ['--note', note] : []),
+]
+
+// The command that takes an entry out, by its avoided word.
+export const wordsRemoveArgv = (core: string, avoid: string) => ['bash', `${core}/scripts/words.sh`, 'remove', avoid]
+
+// What goes into the prompt box where the pane cannot run SCV's command itself (no SCV found, or an older one).
+export const wordsCommand = (word: { avoid: string; use: string }) => `/scv:words add ${word.avoid} → ${word.use}`
+export const wordsRemoveCommand = (avoid: string) => `/scv:words remove ${avoid}`
+
+export type WordsSaid = { kind: 'done'; line: string } | { kind: 'error'; line: string } | { kind: 'none' }
+
+// What SCV's dictionary command said, as the card's one line: the entry it saved or removed, or its own reason for
+// refusing. none: the command did not run, or wrote neither (an SCV without this command) — the caller then hands
+// the work to the prompt box.
+export const wordsSaid = (ran: { exitCode: number | null; stdout: string; stderr: string } | undefined): WordsSaid => {
+  if (!ran) return { kind: 'none' }
+  const said = `${ran.stdout}\n${ran.stderr}`
+  const error = /^WORDS_ERROR:[ \t]*(.*)$/m.exec(said)
+  if (error) return { kind: 'error', line: `사전을 바꾸지 못함 — ${error[1]?.trim() || '이유 없음'}` }
+  const done = ran.exitCode === 0 ? /^WORDS_(SAVED|REMOVED):[ \t]*(.+)$/m.exec(ran.stdout) : null
+  if (!done) return { kind: 'none' }
+
+  return { kind: 'done', line: `${done[1] === 'SAVED' ? '저장함' : '지움'}: ${done[2]?.trim()}` }
 }
