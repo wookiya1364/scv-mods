@@ -104,10 +104,12 @@ export type Task = { id: string; subject: string; status: 'pending' | 'in_progre
 // Work a turn left running after it ended: a command sent to the background, a watch, or a command started in a
 // terminal tab. output: the file its output goes to (absent for a terminal tab); line, done, total: the last
 // progress line read from it; changedAt: when that file last changed (the start, until it does).
+// kind 'agent': a subagent still running — only in the list kept for the conversation after a clear (the board
+// never holds one); its id is the agent's, which its end notice carries.
 export type Job = {
   id: string
   title: string
-  kind: 'command' | 'watch' | 'terminal'
+  kind: 'command' | 'watch' | 'terminal' | 'agent'
   startedAt: number
   changedAt: number
   output?: string
@@ -126,6 +128,8 @@ export type DoneEntry = { at: number; text: string; isOk: boolean }
 // catalog: the project's pure-function dictionary, read with the plans.
 // settingsText · gearsText: the project's SCV settings and gear index as read (undefined in a viewer session, which reads no file).
 // core: where the SCV plugin is installed (null: not found). gearWaits: gear runs waiting for the person's go-ahead.
+// wordsText: the project's word dictionary (scv/words/WORDS.tsv) as read — null: no such file; undefined: a state
+// from a working session that does not read it.
 export type Snapshot = {
   plans: PlanFile[]
   cwd: string
@@ -133,6 +137,7 @@ export type Snapshot = {
   catalog?: Catalog
   settingsText?: string | null
   gearsText?: string | null
+  wordsText?: string | null
   core?: string | null
   gearWaits?: number
 }
@@ -177,6 +182,20 @@ export type GearForm =
 // under). An empty text: the command ran and did not print values (an older SCV) — that gear goes to the conversation.
 export type GearAsks = { index: string | null; byName: Record<string, string> }
 
+// The word dictionary card as this session's person left it: whether it is unfolded (folded, it is one line), the
+// entry open in the form (by its avoided word), the entry asked about before it is removed, whether every entry is
+// listed, and how many times the form was emptied (a new form draws new fields, so a saved text does not stay in them).
+export type WordsView = { isOpen: boolean; edit: string | null; asking: string | null; isAll: boolean; gen: number }
+
+// A viewer session's own line after a press that went to the working session: the card it was pressed in, and
+// what came of the send. Gone when the next state arrives.
+export type ActNote = { where: 'limits' | 'askMode' | 'gears' | 'words'; text: string }
+
+// A viewer session: the values picked here for a gear's block, by gear then by argument (they travel to the working
+// session when the block is submitted). Its other values: hostActs — the acts its working session says it takes
+// (0: none said); hostLive — the gear runs under way there. A working session: fromMirror — what a mirror last had it do.
+export type ViewPicks = Record<string, Record<string, string>>
+
 declare module 'claude-code' {
   interface PluginState {
     'scv-dashboard': {
@@ -199,6 +218,8 @@ declare module 'claude-code' {
       gearAsks: GearAsks
       light: { isOn: boolean; percent: number }
       lightSaid: string | null
+      talks: { user: string; answer: string }[]
+      shownTalk: string
       place: { home: string | null; branch: { name: string; isBranch: boolean } | null }
       branchPick: string[] | null
       placeNote: string | null
@@ -222,6 +243,13 @@ declare module 'claude-code' {
       contextFill?: number | null
       mirror: Mirror | null
       viewers: Viewers
+      wordsNote: string | null
+      wordsView: WordsView
+      hostActs: number
+      hostLive: string[]
+      viewPicks: ViewPicks
+      actNote: ActNote | null
+      fromMirror: string | null
     }
   }
 }

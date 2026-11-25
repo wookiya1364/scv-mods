@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="965" viewBox="0 0 380 965" font-family="-apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif">
+<rect width="380" height="965" fill="#0d1117"/>
+<text x="12.0" y="30.0" font-size="12" fill="#4f8cff" text-anchor="start">거울: 맥 작업 세션 (session_host) · 0초 전 받음</text>
+<rect x="304.7" y="16.0" width="63.3" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="336.3" y="30.0" font-size="11" fill="#c9d1d9" text-anchor="middle">다시 요청</text>
+<text x="12.0" y="52.0" font-size="12" fill="#8b949e" text-anchor="start">여기서 누르면 작업 세션에 메시지 한 줄이 남습니다.</text>
+<rect x="12" y="61.0" width="356" height="215.0" rx="8" fill="#161b22" stroke="#4f8cff"/>
+<text x="22.0" y="83.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">폴더</text>
+<text x="52.0" y="83.0" font-size="12" fill="#8b949e" text-anchor="start">/host</text>
+<text x="22.0" y="109.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">브랜치</text>
+<rect x="64.0" y="95.0" width="54.1" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="91.0" y="109.0" font-size="11" fill="#c9d1d9" text-anchor="middle">main ▴</text>
+<text x="22.0" y="136.0" font-size="11" fill="#8b949e" text-anchor="start">바꿀 브랜치</text>
+<rect x="88.3" y="121.0" width="269.7" height="22" rx="4" fill="#161b22" stroke="#484f58"/>
+<text x="95.3" y="136.0" font-size="11" fill="#e6edf3" text-anchor="start">main</text>
+<text x="350.0" y="136.0" font-size="11" fill="#8b949e" text-anchor="end">▾</text>
+<text x="22.0" y="165.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">컨텍스트</text>
+<text x="76.0" y="165.0" font-size="12" fill="#8b949e" text-anchor="start">40%</text>
+<text x="22.0" y="191.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">사용 한도</text>
+<text x="79.6" y="191.0" font-size="12" fill="#8b949e" text-anchor="start">5시간 42% · 17:40 초기화</text>
+<text x="22.0" y="217.0" font-size="12" fill="#8b949e" text-anchor="start">컨텍스트가 50% 를 넘으면 자동으로 비우기 —</text>
+<text x="22.0" y="234.0" font-size="12" fill="#8b949e" text-anchor="start">기록으로 이어 감</text>
+<rect x="320.0" y="203.0" width="38.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="339.0" y="217.0" font-size="11" fill="#c9d1d9" text-anchor="middle">끄기</text>
+<rect x="22.0" y="246.0" width="27.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="35.5" y="260.0" font-size="11" fill="#c9d1d9" text-anchor="middle">◀</text>
+<rect x="55.0" y="252.0" width="150" height="8" rx="4" fill="#21262d"/>
+<rect x="55.0" y="252.0" width="60.0" height="8" rx="4" fill="#4f8cff"/>
+<rect x="129.0" y="248.0" width="2" height="16" fill="#e6edf3"/>
+<rect x="211.0" y="246.0" width="27.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="224.5" y="260.0" font-size="11" fill="#c9d1d9" text-anchor="middle">▶</text>
+<text x="246.0" y="260.0" font-size="12" fill="#8b949e" text-anchor="start">비우기 기준 50%</text>
+<rect x="12" y="286.0" width="356" height="72.0" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="22.0" y="308.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">묻기 방식</text>
+<text x="79.6" y="308.0" font-size="12" fill="#e6edf3" text-anchor="start">전부 묻기</text>
+<rect x="204.3" y="294.0" width="153.7" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="281.1" y="308.0" font-size="11" fill="#c9d1d9" text-anchor="middle">처음 · 끝에만 묻기로 바꾸기</text>
+<text x="22.0" y="330.0" font-size="12" fill="#8b949e" text-anchor="start">결정이 나올 때마다 선택 창으로 물음</text>
+<text x="22.0" y="347.0" font-size="12" fill="#8b949e" text-anchor="start">작업 세션에 보냄 — 반영을 기다림</text>
+<rect x="12" y="368.0" width="356" height="336.0" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="22.0" y="386.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">저장해 둔 일(기어) 5</text>
+<text x="22.0" y="403.0" font-size="12" fill="#8b949e" text-anchor="start">하려는 일을 그냥 말해도 맞는 것을 씁니다</text>
+<text x="22.0" y="424.0" font-size="12" fill="#e6edf3" text-anchor="start">▾ 시험을 다 돌림</text>
+<text x="36.0" y="446.0" font-size="12" fill="#8b949e" text-anchor="start">이름 ci-all · 받는 값 → 돌려주는 값: 없음 → verdict</text>
+<text x="36.0" y="463.0" font-size="12" fill="#8b949e" text-anchor="start">정할 값 os=mac</text>
+<text x="36.0" y="480.0" font-size="12" fill="#8b949e" text-anchor="start">이럴 때: 시험 · 전부 · 돌림</text>
+<text x="36.0" y="497.0" font-size="12" fill="#8b949e" text-anchor="start">이 컴퓨터에 영향 있음</text>
+<text x="36.0" y="520.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">값 정하기</text>
+<text x="36.0" y="537.0" font-size="12" fill="#8b949e" text-anchor="start">os — 돌릴 곳: mac · linux</text>
+<rect x="36.0" y="544.0" width="48.1" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="60.1" y="558.0" font-size="11" fill="#c9d1d9" text-anchor="middle">● mac</text>
+<rect x="90.1" y="544.0" width="60.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="120.1" y="558.0" font-size="11" fill="#c9d1d9" text-anchor="middle">○ linux</text>
+<rect x="36.0" y="570.0" width="88.6" height="20" rx="6" fill="#1f6feb" stroke="#388bfd"/>
+<text x="80.3" y="584.0" font-size="11" fill="#ffffff" text-anchor="middle">이 값으로 실행</text>
+<text x="22.0" y="610.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 줄 수를 셈</text>
+<rect x="320.0" y="596.0" width="38.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="339.0" y="610.0" font-size="11" fill="#c9d1d9" text-anchor="middle">실행</text>
+<text x="22.0" y="636.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 바뀐 것을 읽고 판단함</text>
+<text x="22.0" y="662.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 태그를 올려 내보냄</text>
+<rect x="320.0" y="648.0" width="38.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="339.0" y="662.0" font-size="11" fill="#c9d1d9" text-anchor="middle">실행</text>
+<text x="22.0" y="688.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 임시 파일을 치움</text>
+<rect x="320.0" y="674.0" width="38.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="339.0" y="688.0" font-size="11" fill="#c9d1d9" text-anchor="middle">실행</text>
+<text x="12.0" y="722.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">작업 세션 계획</text>
+<text x="12.0" y="739.0" font-size="12" fill="#8b949e" text-anchor="start">상태: 시작 전</text>
+<rect x="12" y="748.0" width="356" height="127.0" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="22.0" y="770.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">단계 흐름 (추정)</text>
+<circle cx="29.0" cy="794.0" r="5" fill="none" stroke="#6e7681" stroke-width="2"/>
+<text x="42.0" y="796.0" font-size="12" fill="#e6edf3" text-anchor="start">1. a</text>
+<text x="42.0" y="811.0" font-size="11" fill="#8b949e" text-anchor="start">대기</text>
+<circle cx="29.0" cy="830.0" r="5" fill="none" stroke="#6e7681" stroke-width="2"/>
+<text x="42.0" y="832.0" font-size="12" fill="#e6edf3" text-anchor="start">2. b</text>
+<text x="42.0" y="847.0" font-size="11" fill="#8b949e" text-anchor="start">대기</text>
+<text x="22.0" y="864.0" font-size="12" fill="#8b949e" text-anchor="start">완료 0 · 진행 0 · 막힘 0 · 대기 2 — 단계를 누르면 자세히</text>
+<rect x="12" y="885.0" width="356" height="38.0" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="22.0" y="907.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 낱말 사전 3</text>
+<rect x="12.0" y="931.0" width="217.7" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="120.9" y="945.0" font-size="11" fill="#c9d1d9" text-anchor="middle">더 보기 — 진행률 · 시험 결과 · 변경 이력</text>
+</svg>
