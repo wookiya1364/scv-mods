@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="380" height="374" viewBox="0 0 380 374" font-family="-apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif">
-<rect width="380" height="374" fill="#0d1117"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="201" viewBox="0 0 380 201" font-family="-apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif">
+<rect width="380" height="201" fill="#0d1117"/>
 <text x="12.0" y="26.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">SCV 대시보드</text>
 <rect x="12" y="35.0" width="356" height="150.0" rx="8" fill="#161b22" stroke="#4f8cff"/>
 <text x="22.0" y="57.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">폴더</text>
@@ -19,16 +19,4 @@
 <text x="224.5" y="152.0" font-size="11" fill="#c9d1d9" text-anchor="middle">▶</text>
 <text x="246.0" y="152.0" font-size="12" fill="#8b949e" text-anchor="start">비우기 기준 50%</text>
 <text x="22.0" y="174.0" font-size="12" fill="#8b949e" text-anchor="start">비움 62% → 3% · 1초</text>
-<line x1="12" y1="197.0" x2="368" y2="197.0" stroke="#30363d" stroke-dasharray="3 3"/>
-<text x="12.0" y="211.0" font-size="10.5" fill="#d2a8ff" text-anchor="start">그림 설명: 턴이 끝나 비우기 명령이 받아들여진 뒤의 컨텍스트 칸 (시험</text>
-<text x="12.0" y="226.0" font-size="10.5" fill="#d2a8ff" text-anchor="start">틀이 비우기를 흉내 냄). 마지막 줄이 결과 한 줄</text>
-<text x="12.0" y="241.5" font-size="10.5" fill="#d2a8ff" text-anchor="start">돈 명령(시험 출력): clear</text>
-<text x="12.0" y="257.0" font-size="10.5" fill="#d2a8ff" text-anchor="start">새 대화의 첫 글에 모드가 실은 것(시험 출력):</text>
-<text x="12.0" y="272.5" font-size="10.5" fill="#d2a8ff" text-anchor="start">[SCV 뒤에서 도는 일] 대화를 비우기 전의 턴이 남기고 간 일입니다. 아직</text>
-<text x="12.0" y="288.0" font-size="10.5" fill="#d2a8ff" text-anchor="start">돌고 있을 수 있고, 끝났다는 알림이 이 대화로 올 수 있습니다 — 알림이</text>
-<text x="12.0" y="303.5" font-size="10.5" fill="#d2a8ff" text-anchor="start">오면 아래의 일로 읽으세요. 이 목록만 보고 새 일을 시작하지는 마세요.</text>
-<text x="12.0" y="319.0" font-size="10.5" fill="#d2a8ff" text-anchor="start">- 명령: 측정 128판 — 출력 파일 /tmp/tasks/bg1.output</text>
-<text x="12.0" y="334.5" font-size="10.5" fill="#d2a8ff" text-anchor="start">- 감시: PR 591 확인 지켜보기</text>
-<line x1="12" y1="345.5" x2="368" y2="345.5" stroke="#30363d" stroke-dasharray="3 3"/>
-<text x="12.0" y="359.5" font-size="10.5" fill="#d2a8ff" text-anchor="start">시험이 그린 글이며 실제 앱 화면이 아님</text>
 </svg>
