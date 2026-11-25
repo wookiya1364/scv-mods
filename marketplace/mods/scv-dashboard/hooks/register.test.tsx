@@ -5366,16 +5366,20 @@ const CLEAR_KEY = 'scv-dashboard:clear:/work'
 // main conversation, the person's kind (what the conversation reads as afterwards is kept in replaced).
 // hasTurns: the kit under it already answers the turn's start and end.
 const clearEngine = ($: Engine, on: On, kit: ReturnType<typeof engine>, opts: { percent?: number; clear?: 'runs' | 'refused' | 'idle'; hasTurns?: boolean } = {}) => {
-  const seen = { commands: [] as string[], cleared: 0, compacted: 0, firstText: [] as string[], replaced: [] as { role: string; text: string }[], notices: [] as string[], atClear: [] as number[] }
+  const seen = { commands: [] as string[], cleared: 0, compacted: 0, firstText: [] as string[], replaced: [] as { role: string; text: string }[], notices: [] as string[], pages: [] as string[], atClear: [] as number[] }
   on('session.cwd', () => ({ value: '/work' }))
-  // a notice put into the conversation: kept with how many clears had been seen by then
+  // a notice put into the conversation (none is, since the last exchanges go to a command's output row)
   on('session.append', (_, e, next) => {
-    if (e.message.type === 'system') {
-      seen.notices.push(e.message.content.map(block => ('text' in block ? block.text : '')).join(''))
-      seen.atClear.push(seen.cleared)
-    }
+    if (e.message.type === 'system') seen.notices.push(e.message.content.map(block => ('text' in block ? block.text : '')).join(''))
 
     return next(e)
+  })
+  // the engine's own drawing of a command's output row: the words it is drawn with are kept
+  on('ui.render', { component: 'CommandOutput' }, (kitApi, e) => {
+    seen.pages.push((e.props as { text: string }).text)
+    const { Text } = kitApi.ui.resolve(e as never) as { Text: (props: { children?: unknown }) => never }
+
+    return <Text>row</Text>
   })
   on('store.delete', (_, e) => {
     kit.store.delete(e.key)
@@ -5387,6 +5391,14 @@ const clearEngine = ($: Engine, on: On, kit: ReturnType<typeof engine>, opts: { 
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   on('classic.SessionStart', () => ({}))
   on('command.run', async (_, e) => {
+    // the mod's own command, which no hook answers: its output row is drawn at once, as the app does — what the
+    // person then reads is kept, with how many clears had been seen by then
+    if (e.command === TALK_COMMAND) {
+      await $.ui.render({ component: 'CommandOutput', surface: 'desktop', requestId: 'row-1', props: { command: TALK_COMMAND, args: '', text: UNANSWERED, isErrored: false } } as never)
+      seen.atClear.push(seen.cleared)
+
+      return { text: UNANSWERED }
+    }
     seen.commands.push(e.command)
     if (e.command === 'clear' && opts.clear === 'refused') throw new Error('the command is refused')
     if (e.command === 'clear' && opts.clear !== 'idle') {
@@ -5407,6 +5419,8 @@ const clearEngine = ($: Engine, on: On, kit: ReturnType<typeof engine>, opts: { 
 
   return seen
 }
+// The engine's line for a registered command that no hook answered.
+const UNANSWERED = `scv-dashboard registered /${TALK_COMMAND} but no command.run hook answered it: add on("command.run", …) to the plugin.`
 const withRecord = (kit: ReturnType<typeof engine>) => {
   kit.extraFiles['scv/conversations'] = [{ name: 'new.md', mtimeMs: 9 }]
   kit.extra['scv/conversations/new.md'] = RECORD
@@ -5827,7 +5841,7 @@ test('clear T13 끝이 들린 하위 작업은 싣지 않고, 탭 명령이 없�
   expect((seen.firstText[0] ?? '').split('\n').slice(1)).toEqual([`- 하위 작업: ${SUB} — 알림의 task-id ag-${SUB}`])
 })
 
-import { keepTalk, talkNotices, typedBy } from './model'
+import { isEchoOf, isTalkOutput, keepTalk, swapOutput, talkNotices, talkPage, typedBy, NO_TALK, TALK_COMMAND, TALK_STORED } from './model'
 import type { Talk } from './model'
 
 // One turn of the main conversation, start to end: what was typed and the last thing Claude said.
@@ -5865,9 +5879,24 @@ test('clear T15 순수부 — 사람이 쓴 글만 고르고 · 마지막 셋만
   const alone = talkNotices([{ user: '멈춰', answer: '' }], null)
   expect(alone[0]).not.toContain('전체 기록')
   expect(alone[1]).toContain('Claude: (답 글 없음)')
+
+  // one page for the conversation: the notices, a blank line between; none when nothing is remembered
+  expect(talkPage([], null)).toBe('')
+  expect(talkPage([{ user: '멈춰', answer: '' }], null)).toBe(alone.join('\n\n'))
+
+  // the stored rows of the mod's own command: the echo, then the output row whose words are replaced
+  expect(isEchoOf(`<command-name>/${TALK_COMMAND}</command-name>\n<command-args></command-args>`, TALK_COMMAND)).toBe(true)
+  expect(isEchoOf('<command-name>/cost</command-name>', TALK_COMMAND)).toBe(false)
+  expect(isTalkOutput('<local-command-stdout>아무 글</local-command-stdout>', true)).toBe(true)
+  expect(isTalkOutput('<local-command-stdout>아무 글</local-command-stdout>', false)).toBe(false)
+  expect(isTalkOutput(`<local-command-stdout>${UNANSWERED}</local-command-stdout>`, false)).toBe(true)
+  expect(isTalkOutput(UNANSWERED, true)).toBe(false)
+  expect(swapOutput(`<local-command-stdout>${UNANSWERED}</local-command-stdout>`, TALK_STORED)).toBe(`<local-command-stdout>${TALK_STORED}</local-command-stdout>`)
+  expect(swapOutput('앞 <local-command-stdout>a</local-command-stdout> 뒤', 'b')).toBe('앞 <local-command-stdout>b</local-command-stdout> 뒤')
+  expect(swapOutput('태그 없는 글', 'b')).toBe('b')
 })
 
-test('clear T16 비운 직후 마지막 대화 셋이 대화창에 알림 글로 들어간다 — 답은 자르지 않고, 모델이 받는 첫 글에는 없고, 턴은 시작되지 않는다', async ($, on) => {
+test('clear T16 비운 직후 마지막 대화 셋이 대화창에 보인다 — 자기 명령의 출력 줄에 그려지고, 답은 자르지 않고, 모델이 받는 첫 글에는 없고, 턴은 시작되지 않는다', async ($, on) => {
   const kit = nowEngine(on)
   withProject(kit)
   withRecord(kit)
@@ -5886,28 +5915,34 @@ test('clear T16 비운 직후 마지막 대화 셋이 대화창에 알림 글로
   await exchange($, '요청 3', long)
   // under the mark: nothing is cleared and nothing is put into the conversation
   expect(seen.commands).toEqual([])
-  expect(seen.notices).toEqual([])
+  expect(seen.pages).toEqual([])
 
   opts.percent = 62
   await exchange($, '<task-notification>\n<task-id>bg1</task-id>', '측정이 끝났습니다')
 
   expect(seen.commands).toEqual(['clear'])
-  expect(seen.notices).toHaveLength(4)
-  // every notice went in after the clear was seen: into the emptied conversation
-  expect(seen.atClear).toEqual([1, 1, 1, 1])
-  expect(seen.notices[0]).toContain('비우기 전 마지막 대화 3개')
-  expect(seen.notices[0]).toContain('전체 기록: /work/scv/conversations/new.md')
+  // the mod ran its own command once, after the clear was seen: its row is in the emptied conversation
+  expect(seen.pages).toHaveLength(1)
+  expect(seen.atClear).toEqual([1])
+  // no notice row is put in: the desktop app does not draw one
+  expect(seen.notices).toEqual([])
+  const parts = (seen.pages[0] ?? '').split('\n\n── ')
+  expect(parts).toHaveLength(4)
+  expect(parts[0]).toContain('비우기 전 마지막 대화 3개')
+  expect(parts[0]).toContain('전체 기록: /work/scv/conversations/new.md')
+  // the row is drawn with the exchanges, not with the engine's words for an unanswered command
+  expect(seen.pages[0]).not.toContain('no command.run hook')
   // the oldest of four is forgotten; the three kept are whole, oldest first
-  expect(seen.notices.join('\n')).not.toContain('요청 1')
-  expect(seen.notices[1]).toBe('── 직전 대화 1 / 3 ──\n나: 요청 2\n\nClaude: 답 2')
-  expect(seen.notices[2]).toBe(`── 직전 대화 2 / 3 ──\n나: 요청 3\n\nClaude: ${long}`)
-  expect(seen.notices[3]).toBe('── 직전 대화 3 / 3 ──\n나: (입력 없이 시작한 턴 — 일이 끝났다는 알림 등)\n\nClaude: 측정이 끝났습니다')
+  expect(seen.pages[0]).not.toContain('요청 1')
+  expect(parts[1]).toBe('직전 대화 1 / 3 ──\n나: 요청 2\n\nClaude: 답 2')
+  expect(parts[2]).toBe(`직전 대화 2 / 3 ──\n나: 요청 3\n\nClaude: ${long}`)
+  expect(parts[3]).toBe('직전 대화 3 / 3 ──\n나: (입력 없이 시작한 턴 — 일이 끝났다는 알림 등)\n\nClaude: 측정이 끝났습니다')
   // the model is handed none of it, and no turn starts by itself
   expect(seen.firstText.join('\n')).not.toContain('직전 대화')
   expect(submitted).toEqual([])
 })
 
-test('clear T17 비우기가 거절되면 알림 글을 넣지 않는다 — 대화가 비워지지 않았으므로', async ($, on) => {
+test('clear T17 비우기가 거절되면 직전 대화를 보이지 않는다 — 대화가 비워지지 않았으므로', async ($, on) => {
   const kit = nowEngine(on)
   withProject(kit)
   withRecord(kit)
@@ -5920,6 +5955,7 @@ test('clear T17 비우기가 거절되면 알림 글을 넣지 않는다 — 대
 
   expect(seen.commands).toEqual(['clear', 'compact'])
   expect(seen.cleared).toBe(0)
+  expect(seen.pages).toEqual([])
   expect(seen.notices).toEqual([])
 })
 
@@ -5932,12 +5968,59 @@ test('clear T18 사람이 친 비우기 뒤에는 그 앞의 대화를 잊는다
   await start($)
   await exchange($, '요청 1', '답 1')
   await $.session.end({ reason: 'clear', sessionId: 'local-id' } as never)
-  expect(seen.notices).toEqual([])
+  expect(seen.pages).toEqual([])
 
   opts.percent = 62
   await exchange($, '요청 2', '답 2')
   expect(seen.commands).toEqual(['clear'])
-  expect(seen.notices).toHaveLength(2)
-  expect(seen.notices[0]).toContain('비우기 전 마지막 대화 1개')
-  expect(seen.notices[1]).toBe('── 직전 대화 1 / 1 ──\n나: 요청 2\n\nClaude: 답 2')
+  expect(seen.pages).toHaveLength(1)
+  expect(seen.pages[0]).toContain('비우기 전 마지막 대화 1개')
+  expect(seen.pages[0]?.endsWith('── 직전 대화 1 / 1 ──\n나: 요청 2\n\nClaude: 답 2')).toBe(true)
+})
+
+test('clear T19 자기 명령의 줄이 저장될 때 — 출력 줄의 글은 표시용 한 줄로 바뀌고, 다른 명령의 줄과 다른 문의 줄은 그대로', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  const stored: string[] = []
+  on('session.append', (_, e, next) => {
+    stored.push(e.message.content.map(block => ('text' in block ? block.text : '')).join(''))
+
+    return next(e)
+  })
+  await start($)
+  const row = (text: string, door: string, type = 'system') =>
+    $.session.append({ message: { type, content: [{ type: 'text', text }] }, door, origin: { kind: 'plugin', name: 'scv-dashboard' }, uuid: `row-${stored.length}` } as never)
+  const echo = `<command-name>/${TALK_COMMAND}</command-name>`
+  await row(echo, 'command', 'user')
+  await row(`<local-command-stdout>${UNANSWERED}</local-command-stdout>`, 'command')
+  await row('<command-name>/cost</command-name>', 'command', 'user')
+  await row('<local-command-stdout>비용 줄</local-command-stdout>', 'command')
+  // the same words by another door (a model's answer that quotes them) are not touched
+  await row(`<local-command-stdout>${UNANSWERED}</local-command-stdout>`, 'response', 'assistant')
+
+  expect(stored).toEqual([
+    echo,
+    `<local-command-stdout>${TALK_STORED}</local-command-stdout>`,
+    '<command-name>/cost</command-name>',
+    '<local-command-stdout>비용 줄</local-command-stdout>',
+    `<local-command-stdout>${UNANSWERED}</local-command-stdout>`,
+  ])
+})
+
+test('clear T20 자기 명령의 출력 줄을 그릴 때 — 보일 대화가 없으면 없다는 한 줄, 다른 명령의 줄은 그대로', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  const words: string[] = []
+  on('ui.render', { component: 'CommandOutput' }, (kitApi, e) => {
+    words.push((e.props as { text: string }).text)
+    const { Text } = kitApi.ui.resolve(e as never) as { Text: (props: { children?: unknown }) => never }
+
+    return <Text>row</Text>
+  })
+  await start($)
+  const draw = (command: string, text: string) => $.ui.render({ component: 'CommandOutput', surface: 'desktop', requestId: 'row-1', props: { command, args: '', text, isErrored: false } } as never)
+  await draw(TALK_COMMAND, UNANSWERED)
+  await draw('cost', '비용 줄')
+
+  expect(words).toEqual([NO_TALK, '비용 줄'])
 })

@@ -219,6 +219,7 @@ declare module 'claude-code' {
       light: { isOn: boolean; percent: number }
       lightSaid: string | null
       talks: { user: string; answer: string }[]
+      shownTalk: string
       place: { home: string | null; branch: { name: string; isBranch: boolean } | null }
       branchPick: string[] | null
       placeNote: string | null

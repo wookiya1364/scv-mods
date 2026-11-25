@@ -129,8 +129,14 @@ import {
   parseClearKept,
   jobsBrief,
   keepTalk,
-  talkNotices,
+  talkPage,
   typedBy,
+  isEchoOf,
+  isTalkOutput,
+  swapOutput,
+  NO_TALK,
+  TALK_COMMAND,
+  TALK_STORED,
   agentJobs,
   flightOf,
   tabsOf,
@@ -229,8 +235,12 @@ const light = atom({ plugin: 'scv-dashboard', key: 'light' } as const, DEFAULT_L
 const lightSaid = atom({ plugin: 'scv-dashboard', key: 'lightSaid' } as const, null as string | null)
 // The last exchanges of the main conversation, whole: shown again to the person right after a clear of this mod's.
 // talkRun.typed: what the turn now running began with (null between turns).
+// shownTalk: the page of them the conversation shows now, in the output row of this mod's own command.
+// talkRow.isNext: that command's echo was just stored, so the output row comes next.
 const talks = atom({ plugin: 'scv-dashboard', key: 'talks' } as const, [] as Talk[])
+const shownTalk = atom({ plugin: 'scv-dashboard', key: 'shownTalk' } as const, '' as string)
 const talkRun = { typed: null as string | null }
+const talkRow = { isNext: false }
 const LIGHT_KEY = 'scv-dashboard:light'
 // Where the session works: the person's home folder (to write a folder as '~/…') and the branch checked out.
 const place = atom({ plugin: 'scv-dashboard', key: 'place' } as const, NO_PLACE as Place)
@@ -312,10 +322,15 @@ const runningBoard = async ($: Api): Promise<JobBoard> => {
   return stillRunning({ jobs: [...board.jobs, ...agentJobs(await read($, agents))], extra: board.extra }, { flight: flightRun.seen, tabs: tabsRun.seen })
 }
 
-// Puts notices into the main conversation for the person to read: the model never reads them and no turn starts.
-// One that is refused or fails is left out.
-const showNotices = async ($: Api, notices: readonly string[]) => {
-  for (const text of notices) await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }).catch(() => undefined)
+// Shows the last exchanges in the emptied conversation, for the person to read: the mod runs its own command, whose
+// output row every surface draws (a notice row is stored, and the desktop app does not draw it), and that row is
+// drawn with the page in place of its words. No hook of a mod answers a command the mod itself runs, so the row the
+// engine stores holds its own line for an unanswered command: the session.append hook replaces those words with one
+// plain line, the only part the model reads. No turn starts. No exchange, a refusal or a failure: nothing is shown.
+const showTalk = async ($: Api, page: string) => {
+  if (page === '') return
+  await update($, shownTalk, () => page)
+  await $.command.run({ command: TALK_COMMAND }).catch(() => undefined)
 }
 
 // Clears the conversation as the person's /clear would. The last exchanges, read before it, are shown again in the
@@ -325,7 +340,7 @@ const showNotices = async ($: Api, notices: readonly string[]) => {
 const clearNow = async ($: Api, before: number | null, at: number, recordPath: string | null): Promise<boolean> => {
   const key = clearKey(await $.session.cwd().catch(() => ''))
   const idBefore = await $.session.id().catch(() => null)
-  const notices = talkNotices(await read($, talks), recordPath)
+  const page = talkPage(await read($, talks), recordPath)
   const kept: ClearKept = { before, at, board: await runningBoard($) }
   await $.store.set(key, kept).catch(() => undefined)
   lightRun.isClearing = true
@@ -335,8 +350,8 @@ const clearNow = async ($: Api, before: number | null, at: number, recordPath: s
   lightRun.isClearing = false
   lightRun.isCleared = false
   await $.store.delete(key).catch(() => undefined)
-  if (isCleared) await showNotices($, notices)
   if (isCleared) await sayCleared($, before, at)
+  if (isCleared) await showTalk($, page)
 
   return isCleared
 }
@@ -1563,6 +1578,7 @@ export const register: Register = on => {
     await loadSignals($, project)
     await $.command.register({ name: 'scv-dashboard', description: 'Open the SCV dashboard pane' })
     await $.command.register({ name: 'scv-panel', description: 'Open the SCV dashboard pane' })
+    await $.command.register({ name: TALK_COMMAND, description: 'Show the last exchanges from before the conversation was cleared' })
     await $.command.register({ name: 'scv-mirror', description: "Draw another session's SCV pane here: /scv-mirror <address>, or /scv-mirror stop", argumentHint: '<address> | stop' })
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
     const more = await $.store.get(MORE_KEY).catch(() => undefined)
@@ -1881,6 +1897,30 @@ export const register: Register = on => {
     await fitGear($, e.text).catch(() => undefined)
 
     return changed
+  })
+
+  // The rows of this mod's own command as the conversation stores them: the echo names the command, and the output
+  // row after it holds the engine's words — replaced by one plain line, so the model reads no error that is none.
+  // Another command's echo ends the wait for that output row.
+  on('session.append', { door: 'command' }, async ($, e, next) => {
+    const text = e.message.content.map(block => (block.type === 'text' && typeof block.text === 'string' ? block.text : '')).join('')
+    if (text.includes('<command-name>/')) {
+      talkRow.isNext = isEchoOf(text, TALK_COMMAND)
+
+      return next(e)
+    }
+    if (!isTalkOutput(text, talkRow.isNext)) return next(e)
+    talkRow.isNext = false
+    const content = e.message.content.map(block => (block.type === 'text' && typeof block.text === 'string' ? { ...block, text: swapOutput(block.text, TALK_STORED) } : block))
+
+    return next({ ...e, message: { ...e.message, content } })
+  })
+
+  // The output row of this mod's own command is drawn with the last exchanges in place of its words.
+  on('ui.render', { component: 'CommandOutput' }, async ($, e, next) => {
+    if (e.props.command !== TALK_COMMAND) return next(e)
+
+    return next({ ...e, props: { ...e.props, text: (await read($, shownTalk)) || NO_TALK } })
   })
 
   // The line above the prompt box: the fitting gear's role in plain words, and a way to turn it down.

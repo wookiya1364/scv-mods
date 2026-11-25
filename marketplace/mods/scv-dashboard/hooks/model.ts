@@ -2286,6 +2286,34 @@ export const talkNotices = (talks: readonly Talk[], recordPath: string | null): 
         ),
       ]
 
+// The command this mod runs for itself right after its clear: every surface draws a command's output row, and that
+// row is where the person reads the last exchanges. The words the conversation stores for the row, in place of the
+// engine's own: one plain line, the only part of it the model reads.
+export const TALK_COMMAND = 'scv-last-talk'
+export const TALK_STORED = '[SCV] 비우기 전 마지막 대화를 화면에 다시 보였습니다 — 표시용 줄이며 할 일이 아닙니다.'
+export const NO_TALK = '[SCV] 다시 보일 직전 대화가 없습니다.'
+
+// The last exchanges as one page for the conversation, markdown: the notices with a blank line between. '' when none.
+export const talkPage = (talks: readonly Talk[], recordPath: string | null): string => talkNotices(talks, recordPath).join('\n\n')
+
+const OUTPUT_OPEN = '<local-command-stdout>'
+const OUTPUT_CLOSE = '</local-command-stdout>'
+
+// Whether a stored row is the echo of a command (the row that names it, before its output).
+export const isEchoOf = (text: string, command: string): boolean => text.includes(`<command-name>/${command}</command-name>`)
+
+// Whether a stored row is the output row of this mod's own command: an output row that follows the command's echo,
+// or one whose words name the command (the engine's line for a command no hook answered).
+export const isTalkOutput = (text: string, isAfterEcho: boolean): boolean => text.includes(OUTPUT_OPEN) && (isAfterEcho || text.includes(`/${TALK_COMMAND} `))
+
+// A stored output row with its words replaced: the tags around them stay. A text without the tags is replaced whole.
+export const swapOutput = (text: string, words: string): string => {
+  const from = text.indexOf(OUTPUT_OPEN)
+  const to = text.lastIndexOf(OUTPUT_CLOSE)
+
+  return from < 0 || to < from ? words : `${text.slice(0, from + OUTPUT_OPEN.length)}${words}${text.slice(to)}`
+}
+
 // The end of the conversation record, starting at a turn heading when one falls inside the part kept.
 export const recordTail = (text: string | null | undefined, max = 12_000): string => {
   const whole = (text ?? '').trim()
