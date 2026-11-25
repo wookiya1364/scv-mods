@@ -5366,8 +5366,17 @@ const CLEAR_KEY = 'scv-dashboard:clear:/work'
 // main conversation, the person's kind (what the conversation reads as afterwards is kept in replaced).
 // hasTurns: the kit under it already answers the turn's start and end.
 const clearEngine = ($: Engine, on: On, kit: ReturnType<typeof engine>, opts: { percent?: number; clear?: 'runs' | 'refused' | 'idle'; hasTurns?: boolean } = {}) => {
-  const seen = { commands: [] as string[], cleared: 0, compacted: 0, firstText: [] as string[], replaced: [] as { role: string; text: string }[] }
+  const seen = { commands: [] as string[], cleared: 0, compacted: 0, firstText: [] as string[], replaced: [] as { role: string; text: string }[], notices: [] as string[], atClear: [] as number[] }
   on('session.cwd', () => ({ value: '/work' }))
+  // a notice put into the conversation: kept with how many clears had been seen by then
+  on('session.append', (_, e, next) => {
+    if (e.message.type === 'system') {
+      seen.notices.push(e.message.content.map(block => ('text' in block ? block.text : '')).join(''))
+      seen.atClear.push(seen.cleared)
+    }
+
+    return next(e)
+  })
   on('store.delete', (_, e) => {
     kit.store.delete(e.key)
 
@@ -5816,4 +5825,119 @@ test('clear T13 끝이 들린 하위 작업은 싣지 않고, 탭 명령이 없�
   expect(seen.commands).toEqual(['clear'])
   expect(kit.list.asked).toBe(0)
   expect((seen.firstText[0] ?? '').split('\n').slice(1)).toEqual([`- 하위 작업: ${SUB} — 알림의 task-id ag-${SUB}`])
+})
+
+import { keepTalk, talkNotices, typedBy } from './model'
+import type { Talk } from './model'
+
+// One turn of the main conversation, start to end: what was typed and the last thing Claude said.
+const exchange = async ($: Engine, typed: string, answer: string) => {
+  await $.turn.start({ text: typed, turnId: 't1' })
+  await $.turn.complete({ turnId: 't1', answer, durationMs: 1, isAborted: false, reason: 'answer' } as never)
+  await settle()
+}
+
+test('clear T15 순수부 — 사람이 쓴 글만 고르고 · 마지막 셋만 기억하고 · 알림 글은 머리 하나와 대화마다 하나', () => {
+  expect(typedBy('  고쳐 줘 ')).toBe('고쳐 줘')
+  expect(typedBy('a < b 인지 봐 줘')).toBe('a < b 인지 봐 줘')
+  expect(typedBy('<task-notification>\n<task-id>bg1</task-id>')).toBe('')
+  expect(typedBy('')).toBe('')
+
+  const four = [1, 2, 3, 4].reduce((list, n) => keepTalk(list, { user: `요청 ${n}`, answer: `답 ${n}` }), [] as Talk[])
+  expect(four.map(talk => talk.user)).toEqual(['요청 2', '요청 3', '요청 4'])
+  expect(keepTalk(four, { user: '', answer: '' })).toEqual(four)
+
+  expect(talkNotices([], '/work/scv/conversations/new.md')).toEqual([])
+  const long = '가'.repeat(5_000)
+  const notices = talkNotices(
+    [
+      { user: '첫 요청', answer: long },
+      { user: '', answer: '측정이 끝났습니다' },
+    ],
+    '/work/scv/conversations/new.md',
+  )
+  expect(notices).toHaveLength(3)
+  expect(notices[0]).toContain('비우기 전 마지막 대화 2개')
+  expect(notices[0]).toContain('전체 기록: /work/scv/conversations/new.md')
+  // the answer is whole: nothing is cut
+  expect(notices[1]).toBe(`── 직전 대화 1 / 2 ──\n나: 첫 요청\n\nClaude: ${long}`)
+  expect(notices[2]).toBe('── 직전 대화 2 / 2 ──\n나: (입력 없이 시작한 턴 — 일이 끝났다는 알림 등)\n\nClaude: 측정이 끝났습니다')
+  const alone = talkNotices([{ user: '멈춰', answer: '' }], null)
+  expect(alone[0]).not.toContain('전체 기록')
+  expect(alone[1]).toContain('Claude: (답 글 없음)')
+})
+
+test('clear T16 비운 직후 마지막 대화 셋이 대화창에 알림 글로 들어간다 — 답은 자르지 않고, 모델이 받는 첫 글에는 없고, 턴은 시작되지 않는다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  const submitted: string[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+
+    return { text: e.text } as never
+  })
+  await start($)
+  const long = '나'.repeat(4_000)
+  await exchange($, '요청 1', '답 1')
+  await exchange($, '요청 2', '답 2')
+  await exchange($, '요청 3', long)
+  // under the mark: nothing is cleared and nothing is put into the conversation
+  expect(seen.commands).toEqual([])
+  expect(seen.notices).toEqual([])
+
+  opts.percent = 62
+  await exchange($, '<task-notification>\n<task-id>bg1</task-id>', '측정이 끝났습니다')
+
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.notices).toHaveLength(4)
+  // every notice went in after the clear was seen: into the emptied conversation
+  expect(seen.atClear).toEqual([1, 1, 1, 1])
+  expect(seen.notices[0]).toContain('비우기 전 마지막 대화 3개')
+  expect(seen.notices[0]).toContain('전체 기록: /work/scv/conversations/new.md')
+  // the oldest of four is forgotten; the three kept are whole, oldest first
+  expect(seen.notices.join('\n')).not.toContain('요청 1')
+  expect(seen.notices[1]).toBe('── 직전 대화 1 / 3 ──\n나: 요청 2\n\nClaude: 답 2')
+  expect(seen.notices[2]).toBe(`── 직전 대화 2 / 3 ──\n나: 요청 3\n\nClaude: ${long}`)
+  expect(seen.notices[3]).toBe('── 직전 대화 3 / 3 ──\n나: (입력 없이 시작한 턴 — 일이 끝났다는 알림 등)\n\nClaude: 측정이 끝났습니다')
+  // the model is handed none of it, and no turn starts by itself
+  expect(seen.firstText.join('\n')).not.toContain('직전 대화')
+  expect(submitted).toEqual([])
+})
+
+test('clear T17 비우기가 거절되면 알림 글을 넣지 않는다 — 대화가 비워지지 않았으므로', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10, clear: 'refused' as const }
+  const seen = clearEngine($, on, kit, opts)
+  await start($)
+  await exchange($, '요청 1', '답 1')
+  opts.percent = 62
+  await exchange($, '요청 2', '답 2')
+
+  expect(seen.commands).toEqual(['clear', 'compact'])
+  expect(seen.cleared).toBe(0)
+  expect(seen.notices).toEqual([])
+})
+
+test('clear T18 사람이 친 비우기 뒤에는 그 앞의 대화를 잊는다 — 다음 자동 비우기는 그 뒤의 대화만 보인다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  await start($)
+  await exchange($, '요청 1', '답 1')
+  await $.session.end({ reason: 'clear', sessionId: 'local-id' } as never)
+  expect(seen.notices).toEqual([])
+
+  opts.percent = 62
+  await exchange($, '요청 2', '답 2')
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.notices).toHaveLength(2)
+  expect(seen.notices[0]).toContain('비우기 전 마지막 대화 1개')
+  expect(seen.notices[1]).toBe('── 직전 대화 1 / 1 ──\n나: 요청 2\n\nClaude: 답 2')
 })

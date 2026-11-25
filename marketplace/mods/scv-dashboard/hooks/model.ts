@@ -2259,6 +2259,33 @@ export const lastTurns = (messages: readonly Said[], turns = 3, max = 1500): { r
   ])
 }
 
+// One exchange of the main conversation: what the person wrote and the last thing Claude said in that turn, whole.
+// user is empty for a turn the person did not start (the notice that a job ended, say).
+export type Talk = { user: string; answer: string }
+
+const TALK_ROOM = 3
+const MACHINE_TEXT = /^<[a-z][a-z-]*>/
+
+// What a turn began with, as the person's own words: none when nothing was typed, or when a machine wrote the text
+// (such a text opens with a tag).
+export const typedBy = (text: string): string => (MACHINE_TEXT.test(text.trim()) ? '' : text.trim())
+
+// The exchanges remembered with one more at the end, the newest few only. An exchange with neither side is not one.
+export const keepTalk = (talks: readonly Talk[], talk: Talk, room = TALK_ROOM): Talk[] =>
+  talk.user === '' && talk.answer === '' ? [...talks] : [...talks, talk].slice(-room)
+
+// What the person reads in the conversation right after a clear, a notice each: a heading, then every remembered
+// exchange whole, oldest first. None when no exchange is remembered.
+export const talkNotices = (talks: readonly Talk[], recordPath: string | null): string[] =>
+  talks.length === 0
+    ? []
+    : [
+        `[SCV] 대화를 비웠습니다. 비우기 전 마지막 대화 ${talks.length}개를 아래에 다시 보입니다 — Claude 는 이 글을 읽지 않고, 기록을 따로 받았습니다.${recordPath ? ` 전체 기록: ${recordPath}` : ''}`,
+        ...talks.map((talk, index) =>
+          [`── 직전 대화 ${index + 1} / ${talks.length} ──`, `나: ${talk.user || '(입력 없이 시작한 턴 — 일이 끝났다는 알림 등)'}`, '', `Claude: ${talk.answer || '(답 글 없음)'}`].join('\n'),
+        ),
+      ]
+
 // The end of the conversation record, starting at a turn heading when one falls inside the part kept.
 export const recordTail = (text: string | null | undefined, max = 12_000): string => {
   const whole = (text ?? '').trim()

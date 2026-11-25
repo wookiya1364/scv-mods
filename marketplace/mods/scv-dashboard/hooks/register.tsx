@@ -128,6 +128,9 @@ import {
   wasCleared,
   parseClearKept,
   jobsBrief,
+  keepTalk,
+  talkNotices,
+  typedBy,
   agentJobs,
   flightOf,
   tabsOf,
@@ -168,7 +171,7 @@ import {
   wordsRemoveCommand,
   wordsSaid,
 } from './model'
-import type { AskMode, BranchNow, ClearKept, ConfirmStop, Flight, JobEnd, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, TabSeen, WordDraft } from './model'
+import type { AskMode, BranchNow, ClearKept, Talk, ConfirmStop, Flight, JobEnd, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, TabSeen, WordDraft } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -224,6 +227,10 @@ const drawnHint = { name: null as string | null }
 // ended; isClearing: the clear command of this mod is out; isCleared: a clear was seen while it was).
 const light = atom({ plugin: 'scv-dashboard', key: 'light' } as const, DEFAULT_LIGHT as LightSettings)
 const lightSaid = atom({ plugin: 'scv-dashboard', key: 'lightSaid' } as const, null as string | null)
+// The last exchanges of the main conversation, whole: shown again to the person right after a clear of this mod's.
+// talkRun.typed: what the turn now running began with (null between turns).
+const talks = atom({ plugin: 'scv-dashboard', key: 'talks' } as const, [] as Talk[])
+const talkRun = { typed: null as string | null }
 const LIGHT_KEY = 'scv-dashboard:light'
 // Where the session works: the person's home folder (to write a folder as '~/…') and the branch checked out.
 const place = atom({ plugin: 'scv-dashboard', key: 'place' } as const, NO_PLACE as Place)
@@ -305,12 +312,20 @@ const runningBoard = async ($: Api): Promise<JobBoard> => {
   return stillRunning({ jobs: [...board.jobs, ...agentJobs(await read($, agents))], extra: board.extra }, { flight: flightRun.seen, tabs: tabsRun.seen })
 }
 
-// Clears the conversation as the person's /clear would. What the new conversation and the pane's line need goes to
+// Puts notices into the main conversation for the person to read: the model never reads them and no turn starts.
+// One that is refused or fails is left out.
+const showNotices = async ($: Api, notices: readonly string[]) => {
+  for (const text of notices) await $.session.append({ message: { type: 'system', content: [{ type: 'text', text }] } }).catch(() => undefined)
+}
+
+// Clears the conversation as the person's /clear would. The last exchanges, read before it, are shown again in the
+// emptied conversation once the clear was seen. What the new conversation and the pane's line need goes to
 // the store first. True only when a clear was really seen — the command having returned is no proof, and a command
 // that was refused, failed or changed nothing is false (the caller then goes the other way).
-const clearNow = async ($: Api, before: number | null, at: number): Promise<boolean> => {
+const clearNow = async ($: Api, before: number | null, at: number, recordPath: string | null): Promise<boolean> => {
   const key = clearKey(await $.session.cwd().catch(() => ''))
   const idBefore = await $.session.id().catch(() => null)
+  const notices = talkNotices(await read($, talks), recordPath)
   const kept: ClearKept = { before, at, board: await runningBoard($) }
   await $.store.set(key, kept).catch(() => undefined)
   lightRun.isClearing = true
@@ -320,6 +335,7 @@ const clearNow = async ($: Api, before: number | null, at: number): Promise<bool
   lightRun.isClearing = false
   lightRun.isCleared = false
   await $.store.delete(key).catch(() => undefined)
+  if (isCleared) await showNotices($, notices)
   if (isCleared) await sayCleared($, before, at)
 
   return isCleared
@@ -339,7 +355,7 @@ const maybeLighten = async ($: Api) => {
   const way = lightWay(isDue, recordTail(record?.text) !== '')
   if (way === 'none') return
   lightRun.pending = true
-  const isClearFailed = way === 'clear' && !(await clearNow($, before, at))
+  const isClearFailed = way === 'clear' && !(await clearNow($, before, at, record?.path ?? null))
   if (way === 'clear' && !isClearFailed) return void (await refresh($).catch(() => undefined))
   lightRun.kind = 'summary'
   const ran = await $.command
@@ -1576,6 +1592,7 @@ export const register: Register = on => {
 
       return next(e)
     }
+    if (e.reason === 'clear') await update($, talks, () => [])
     for (const name of [...liveRuns.keys()]) await stopGear($, name).catch(() => undefined)
 
     return next(e)
@@ -1739,6 +1756,7 @@ export const register: Register = on => {
     // A new turn is work again. The wake-up it may have set for itself is spent; the jobs it left stay on the board
     // until their own end is heard — the person speaking does not end them.
     await update($, live, value => ({ ...value, isWorking: true, turnStartedAt: at, background: false }))
+    talkRun.typed = typedBy(e.text)
     await endJob($, jobEndOf({ text: e.text }))
     await update($, stopped, () => null)
     await update($, permit, () => null)
@@ -1755,6 +1773,9 @@ export const register: Register = on => {
     }
     await update($, live, value => ({ ...value, isWorking: false, tool: null, hasEnded: true }))
     await update($, permit, () => null)
+    const exchange = { user: talkRun.typed ?? '', answer: e.answer.trim() }
+    talkRun.typed = null
+    await update($, talks, list => keepTalk(list, exchange))
     const end = classifyTurnEnd(e.reason, e.durationMs)
     if (end.kind === 'stopped') {
       const at = await $.clock.now()
