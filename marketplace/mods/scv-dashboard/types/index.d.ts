@@ -199,6 +199,9 @@ declare module 'claude-code' {
       gearAsks: GearAsks
       light: { isOn: boolean; percent: number }
       lightSaid: string | null
+      place: { home: string | null; branch: { name: string; isBranch: boolean } | null }
+      branchPick: string[] | null
+      placeNote: string | null
       gearHint: string | null
       gearDismissed: string | null
       gearOpen: string | null

@@ -126,6 +126,15 @@ import {
   lightNote,
   paneSections,
   parseLight,
+  moveLight,
+  lightBarSvg,
+  LIGHT_STEP,
+  NO_PLACE,
+  branchOfHead,
+  gitDirOf,
+  parseBranches,
+  shortPath,
+  switchNote,
   recordTail,
   resumeBrief,
   DEFAULT_LIGHT,
@@ -135,7 +144,7 @@ import {
   submitWithGear,
   usedGear,
 } from './model'
-import type { AskMode, ConfirmStop, JobEnd, LightSettings, RunPlan, StepFunctionView } from './model'
+import type { AskMode, BranchNow, ConfirmStop, JobEnd, LightSettings, Place, RunPlan, StepFunctionView } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -191,6 +200,11 @@ const drawnHint = { name: null as string | null }
 const light = atom({ plugin: 'scv-dashboard', key: 'light' } as const, DEFAULT_LIGHT as LightSettings)
 const lightSaid = atom({ plugin: 'scv-dashboard', key: 'lightSaid' } as const, null as string | null)
 const LIGHT_KEY = 'scv-dashboard:light'
+// Where the session works: the person's home folder (to write a folder as '~/…') and the branch checked out.
+const place = atom({ plugin: 'scv-dashboard', key: 'place' } as const, NO_PLACE as Place)
+// The branches to pick from, while the person has the branch line open; and what the last change came to.
+const branchPick = atom({ plugin: 'scv-dashboard', key: 'branchPick' } as const, null as string[] | null)
+const placeNote = atom({ plugin: 'scv-dashboard', key: 'placeNote' } as const, null as string | null)
 const lightRun = { pending: false, kind: 'summary' as 'records' | 'summary', lastAt: 0 }
 // What the summarizer is told when the records cannot stand in (no conversation record in this project).
 const LIGHT_INSTRUCTIONS =
@@ -390,6 +404,50 @@ const loadRuns = async ($: Api, project: string) => {
   await update($, runs, () => (Array.isArray(kept) ? (kept as TestRun[]) : []))
 }
 
+// The branch checked out where the session works, read from the repository's own HEAD file (no command run):
+// the nearest folder at or above the session's that holds one; a worktree's '.git' file is followed.
+const readBranch = async ($: Api, root: string): Promise<BranchNow | null> => {
+  if (!root.startsWith('/')) return null
+  for (const dir of ancestorsOf(root)) {
+    const head = await readText($, `${dir}/.git/HEAD`)
+    if (head) return branchOfHead(head)
+    const linked = gitDirOf(await readText($, `${dir}/.git`), dir)
+    if (linked) return branchOfHead(await readText($, `${linked}/HEAD`))
+  }
+
+  return null
+}
+
+const readPlace = async ($: Api, root: string) => {
+  const home = (await read($, place)).home ?? (await $.env.get('HOME').catch(() => undefined)) ?? null
+  const branch = await readBranch($, root)
+  await update($, place, () => ({ home, branch }))
+}
+
+// A press on the branch line: the local branches are listed to pick from; a second press folds the list.
+const openBranches = async ($: Api) => {
+  if (await read($, branchPick)) return void (await update($, branchPick, () => null))
+  const root = (await read($, snapshot)).root
+  const ran = await $.process.run(['git', 'branch', '--format=%(refname:short)'], { ...(root ? { cwd: root } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+  const names = ran?.exitCode === 0 ? parseBranches(ran.stdout) : []
+  if (names.length === 0) return void (await update($, placeNote, () => '브랜치 목록을 읽지 못함'))
+  await update($, placeNote, () => null)
+  await update($, branchPick, () => names)
+}
+
+// A branch picked: git changes to it (git itself refuses when a file not yet committed would be lost). Never
+// while a turn runs — the work under way was started on the branch it found.
+const switchBranch = async ($: Api, to: string) => {
+  const from = (await read($, place)).branch?.name ?? null
+  await update($, branchPick, () => null)
+  if (to === from) return
+  if ((await read($, live)).isWorking) return void (await update($, placeNote, () => '턴이 도는 중에는 브랜치를 바꾸지 않음 — 턴이 끝난 뒤 다시 눌러 주세요'))
+  const root = (await read($, snapshot)).root
+  const ran = await $.process.run(['git', 'switch', to], { ...(root ? { cwd: root } : {}), timeoutMs: 30_000 }).catch(() => undefined)
+  await refresh($).catch(() => undefined)
+  await update($, placeNote, () => switchNote({ from, to, exitCode: ran ? ran.exitCode : null, stderr: ran?.stderr ?? '' }))
+}
+
 const refresh = async ($: Api) => {
   const at = await $.clock.now()
   // A viewer session draws the working session's state, so its own files are not read; only its clock moves.
@@ -413,6 +471,7 @@ const refresh = async ($: Api) => {
   await update($, snapshot, () => next)
   await update($, now, () => at)
   await loadSignals($, next.cwd)
+  await readPlace($, root)
   await checkUsage($, at)
   const plan = await planInView($)
   if (plan) {
@@ -643,6 +702,7 @@ const mirrorState = async ($: Api) => ({
   since: await read($, since),
   limits: await read($, limits),
   contextFill: await read($, contextFill),
+  place: await read($, place),
   hostName: sessionName(await sessionFiles($), await $.session.id()),
   inView: (await planInView($))?.slug ?? null,
 })
@@ -681,6 +741,7 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, since, () => state.since ?? null)
   await update($, limits, () => state.limits ?? [])
   await update($, contextFill, () => (typeof state.contextFill === 'number' ? state.contextFill : null))
+  await update($, place, () => (state.place && typeof state.place === 'object' ? state.place : NO_PLACE))
   await update($, hostInView, () => (typeof state.inView === 'string' ? state.inView : null))
   const at = await $.clock.now()
   const name = typeof state.hostName === 'string' ? state.hostName : (mirrored.name ?? null)
@@ -1827,15 +1888,49 @@ export const register: Register = on => {
 
     const lightState = await read($, light)
     const lightLine = await read($, lightSaid)
-    const switchLight = async () => {
-      const next = await update($, light, one => ({ ...one, isOn: !one.isOn }))
-      await $.store.set(LIGHT_KEY, next).catch(() => undefined)
-    }
-    // A row only for a value this session has; with neither there is no card (nothing to say yet).
+    const fillNow = await read($, contextFill)
+    const keepLight = async (next: LightSettings) => void (await $.store.set(LIGHT_KEY, next).catch(() => undefined))
+    const switchLight = async () => keepLight(await update($, light, one => ({ ...one, isOn: !one.isOn })))
+    // ◀ · ▶: the mark one step down or up the bar.
+    const stepLight = async (by: number) => keepLight(await update($, light, one => moveLight(one, one.percent + by)))
+    const where = await read($, place)
+    const picking = await read($, branchPick)
+    const whereNote = await read($, placeNote)
+    const folder = shot.root ? shortPath(shot.root, where.home) : null
+    const branchLabel = where.branch ? (where.branch.isBranch ? where.branch.name : `${where.branch.name} (브랜치 없음)`) : null
+    // The folder and branch the session works in, then context · usage; a row only for a value this session has.
     const limitsCard = () =>
-      usage || context
+      usage || context || folder
         ? card(
             <Box flexDirection="column">
+              {folder ? (
+                <Box flexDirection="row" gap={1}>
+                  <Text bold>폴더</Text>
+                  <Text dimColor>{folder}</Text>
+                </Box>
+              ) : null}
+              {branchLabel ? (
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Text bold>브랜치</Text>
+                  {mirrored ? <Text dimColor>{branchLabel}</Text> : <Button key="branch-open" label={`${branchLabel} ${picking ? '▴' : '▾'}`} onPress={() => void openBranches($).catch(() => undefined)} />}
+                </Box>
+              ) : null}
+              {picking && !mirrored ? (
+                <Box flexDirection="column">
+                  {Select ? (
+                    <Select
+                      key="branch-pick"
+                      label="바꿀 브랜치"
+                      options={picking.map(value => ({ value }))}
+                      {...(where.branch?.isBranch && picking.includes(where.branch.name) ? { value: where.branch.name } : {})}
+                      onSelect={(value: string) => void switchBranch($, value).catch(() => undefined)}
+                    />
+                  ) : (
+                    picking.slice(0, 12).map((name, i) => <Button key={`branch-to-${i}`} label={name} onPress={() => void switchBranch($, name).catch(() => undefined)} />)
+                  )}
+                </Box>
+              ) : null}
+              {whereNote ? <Text dimColor>{whereNote}</Text> : null}
               {context ? (
                 <Box flexDirection="row" gap={1}>
                   <Text bold>컨텍스트</Text>
@@ -1850,10 +1945,18 @@ export const register: Register = on => {
               ) : null}
               {context ? (
                 <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-                  <Text dimColor>{lightState.isOn ? `대화가 길어지면(${lightState.percent}%) 자동으로 가볍게 함` : '대화가 길어져도 그대로 둠'}</Text>
+                  <Text dimColor>{lightState.isOn ? `컨텍스트가 ${lightState.percent}% 를 넘으면 자동으로 요약함 — 비우지 않음` : '대화가 길어져도 그대로 둠'}</Text>
                   <Box flexDirection="row">
                     {mirrored ? [] : [<Button key="light-toggle" label={lightState.isOn ? '끄기' : '켜기'} onPress={() => void switchLight().catch(() => undefined)} />]}
                   </Box>
+                </Box>
+              ) : null}
+              {context && lightState.isOn && !mirrored ? (
+                <Box flexDirection="row" gap={1} alignItems="center">
+                  <Button key="light-down" label="◀" onPress={() => void stepLight(-LIGHT_STEP).catch(() => undefined)} />
+                  {Svg ? <Svg source={lightBarSvg(lightState.percent, fillNow)} alt={`요약 기준 ${lightState.percent}% · 지금 ${context}`} /> : null}
+                  <Button key="light-up" label="▶" onPress={() => void stepLight(LIGHT_STEP).catch(() => undefined)} />
+                  <Text dimColor>{`기준 ${lightState.percent}%`}</Text>
                 </Box>
               ) : null}
               {lightLine ? <Text dimColor>{lightLine}</Text> : null}

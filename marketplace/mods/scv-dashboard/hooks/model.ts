@@ -1924,12 +1924,82 @@ export type LightSettings = { isOn: boolean; percent: number }
 
 export const DEFAULT_LIGHT: LightSettings = { isOn: true, percent: 50 }
 
+// The ends of the bar the mark moves on, and how far one press moves it.
+export const LIGHT_MIN = 10
+export const LIGHT_MAX = 95
+export const LIGHT_STEP = 5
+
 // What the store kept, read back: anything of another shape is the default (on, at 50%).
 export const parseLight = (kept: unknown): LightSettings => {
   const one = (kept ?? {}) as { isOn?: unknown; percent?: unknown }
-  const percent = typeof one.percent === 'number' && one.percent >= 10 && one.percent <= 95 ? Math.round(one.percent) : DEFAULT_LIGHT.percent
+  const percent = typeof one.percent === 'number' && one.percent >= LIGHT_MIN && one.percent <= LIGHT_MAX ? Math.round(one.percent) : DEFAULT_LIGHT.percent
 
   return { isOn: typeof one.isOn === 'boolean' ? one.isOn : DEFAULT_LIGHT.isOn, percent }
+}
+
+// The mark put at another place on the bar: on a whole step, never past the bar's ends.
+export const moveLight = (settings: LightSettings, percent: number): LightSettings => ({
+  ...settings,
+  percent: Math.min(LIGHT_MAX, Math.max(LIGHT_MIN, Math.round(percent / LIGHT_STEP) * LIGHT_STEP)),
+})
+
+// The bar as a picture: the filled part is how full the conversation is now (red once it is at the mark), the
+// knob is where the mark stands.
+export const lightBarSvg = (mark: number, fill: number | null, width = 180, height = 18): string => {
+  const pad = 8
+  const span = width - pad * 2
+  const xOf = (percent: number) => (pad + (span * Math.min(100, Math.max(0, percent))) / 100).toFixed(1)
+  const mid = height / 2
+  const track = `<rect x="${pad}" y="${mid - 2}" width="${span}" height="4" rx="2" fill="#8b949e" fill-opacity="0.4"/>`
+  const full = fill === null ? '' : `<rect x="${pad}" y="${mid - 2}" width="${(Number(xOf(fill)) - pad).toFixed(1)}" height="4" rx="2" fill="${fill >= mark ? '#f85149' : '#4f8cff'}"/>`
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${track}${full}<circle cx="${xOf(mark)}" cy="${mid}" r="6" fill="#e3b341" stroke="#ffffff" stroke-width="1.5"/></svg>`
+}
+
+// ── where the session works: its folder and branch (pane 0.5.0) ──────────────────
+
+// isBranch: false for a commit checked out with no branch (its first seven letters stand as the name).
+export type BranchNow = { name: string; isBranch: boolean }
+export type Place = { home: string | null; branch: BranchNow | null }
+
+export const NO_PLACE: Place = { home: null, branch: null }
+
+// The branch a repository's HEAD file names ('ref: refs/heads/<name>'), or the commit it holds with no branch.
+export const branchOfHead = (text: string | null | undefined): BranchNow | null => {
+  const line = ((text ?? '').trim().split('\n')[0] ?? '').trim()
+  const named = /^ref: refs\/heads\/(.+)$/.exec(line)?.[1]
+  if (named) return { name: named, isBranch: true }
+
+  return /^[0-9a-f]{7,64}$/.test(line) ? { name: line.slice(0, 7), isBranch: false } : null
+}
+
+// Where a '.git' file points ('gitdir: <path>', as a worktree has), read against the folder that holds it.
+export const gitDirOf = (text: string | null | undefined, dir: string): string | null => {
+  const path = /^gitdir: (.+)$/m.exec(text ?? '')?.[1]?.trim()
+  if (!path) return null
+
+  return path.startsWith('/') ? path : `${dir}/${path}`
+}
+
+// The local branches `git branch --format=%(refname:short)` printed, one a line (the line for no branch left out).
+export const parseBranches = (stdout: string): string[] => [
+  ...new Set(
+    stdout
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line !== '' && !line.startsWith('(')),
+  ),
+]
+
+// A folder as a person reads it: the home folder is '~'.
+export const shortPath = (path: string, home: string | null | undefined): string => (home && (path === home || path.startsWith(`${home}/`)) ? `~${path.slice(home.length)}` : path)
+
+// The line the pane shows after a press to change the branch: done, or git's own first reason for refusing.
+export const switchNote = (input: { from: string | null; to: string; exitCode: number | null; stderr: string }) => {
+  if (input.exitCode === 0) return `브랜치를 바꿈: ${input.from ?? '(없음)'} → ${input.to}`
+  const why = input.stderr.split('\n').map(line => line.trim()).find(line => line !== '') ?? ''
+
+  return `브랜치를 바꾸지 못함${why ? ` — ${cutLine(why, 160)}` : ''}`
 }
 
 const LIGHT_GAP_MS = 5 * 60_000

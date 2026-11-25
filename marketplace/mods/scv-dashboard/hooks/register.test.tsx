@@ -3819,7 +3819,7 @@ test('light T5 창의 한 줄과 끄기 버튼 — 끄면 기준을 넘어도 �
   withUsage($, on, 62, kit)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await drawnText($)).toContain('대화가 길어지면(50%) 자동으로 가볍게 함')
+  expect(await drawnText($)).toContain('컨텍스트가 50% 를 넘으면 자동으로 요약함 — 비우지 않음')
   await ui.press({ key: 'light-toggle' })
   expect(await drawnText($)).toContain('대화가 길어져도 그대로 둠')
   expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
@@ -3838,6 +3838,142 @@ test('light T6 사람이 친 정리나 엔진의 자동 정리는 건드리지 �
   await ($.session as unknown as { compact: (e: unknown) => Promise<unknown> }).compact({ trigger: 'manual', messages: SAID })
 
   expect(kit.compactions).toEqual([{ trigger: 'manual', instructions: undefined }])
+})
+
+
+// ── pane 0.5.0: the mark on a bar · the folder and branch the session works in ───
+import { LIGHT_MAX, LIGHT_MIN, branchOfHead, gitDirOf, lightBarSvg, moveLight, parseBranches, shortPath, switchNote } from './model'
+
+test('light T7 기준 막대 — ◀ ▶ 로 5% 씩 옮기고, 옮긴 기준이 남고, 그 기준으로 요약한다', async ($, on) => {
+  expect(moveLight(DEFAULT_LIGHT, 55)).toEqual({ isOn: true, percent: 55 })
+  expect(moveLight(DEFAULT_LIGHT, 57)).toEqual({ isOn: true, percent: 55 })
+  expect(moveLight(DEFAULT_LIGHT, 0).percent).toBe(LIGHT_MIN)
+  expect(moveLight(DEFAULT_LIGHT, 200).percent).toBe(LIGHT_MAX)
+  expect(lightBarSvg(50, 62)).toContain('#f85149')
+  expect(lightBarSvg(70, 62)).toContain('#4f8cff')
+  expect(lightBarSvg(70, null)).not.toContain('#4f8cff')
+
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 62, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await drawnText($)).toContain('기준 50%')
+  await ui.press({ key: 'light-up' })
+  await ui.press({ key: 'light-up' })
+  await ui.press({ key: 'light-up' })
+  await ui.press({ key: 'light-up' })
+  expect(await drawnText($)).toContain('컨텍스트가 70% 를 넘으면 자동으로 요약함')
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: true, percent: 70 })
+  expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('요약 기준 70% · 지금 62%')
+  await endTurn($)
+  await settle()
+  expect(kit.compactions).toHaveLength(0)
+  await ui.press({ key: 'light-down' })
+  await ui.press({ key: 'light-down' })
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: true, percent: 60 })
+  await endTurn($)
+  await settle()
+  expect(kit.compactions).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('place T1 순수부 — 브랜치 읽기 · 워크트리 · 목록 · 폴더 줄임 · 바꾼 뒤 한 줄', async () => {
+  expect(branchOfHead('ref: refs/heads/feat/x\n')).toEqual({ name: 'feat/x', isBranch: true })
+  expect(branchOfHead('0123456789abcdef0123456789abcdef01234567\n')).toEqual({ name: '0123456', isBranch: false })
+  expect(branchOfHead('')).toBe(null)
+  expect(branchOfHead(null)).toBe(null)
+  expect(gitDirOf('gitdir: /repo/.git/worktrees/w\n', '/w')).toBe('/repo/.git/worktrees/w')
+  expect(gitDirOf('gitdir: ../.git/modules/m\n', '/repo/m')).toBe('/repo/m/../.git/modules/m')
+  expect(gitDirOf(null, '/w')).toBe(null)
+  expect(parseBranches('main\n  feat/x\n(HEAD detached at 0123456)\nmain\n\n')).toEqual(['main', 'feat/x'])
+  expect(shortPath('/home/u/work/app', '/home/u')).toBe('~/work/app')
+  expect(shortPath('/home/u', '/home/u')).toBe('~')
+  expect(shortPath('/home/user2/app', '/home/u')).toBe('/home/user2/app')
+  expect(shortPath('/work', null)).toBe('/work')
+  expect(switchNote({ from: 'main', to: 'feat/x', exitCode: 0, stderr: '' })).toBe('브랜치를 바꿈: main → feat/x')
+  expect(switchNote({ from: 'main', to: 'feat/x', exitCode: 1, stderr: '\nerror: 바꿀 수 없음\n다음 줄' })).toBe('브랜치를 바꾸지 못함 — error: 바꿀 수 없음')
+  expect(switchNote({ from: 'main', to: 'feat/x', exitCode: null, stderr: '' })).toBe('브랜치를 바꾸지 못함')
+})
+
+test('place T2 창 맨 위에 폴더와 브랜치 — 브랜치를 누르면 목록이 열리고, 고르면 git 이 바꾼다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/main\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^\/work$/)).toBe('/work')
+  expect((await ui.find({ type: 'Button', key: 'branch-open' }))?.props.label).toBe('main ▾')
+  expect(await ui.find({ type: 'Select', key: 'branch-pick' })).toBeUndefined()
+
+  kit.proc.stdout = 'main\nfeat/x\n'
+  await ui.press({ key: 'branch-open' })
+  expect(kit.processes.at(-1)).toEqual(['git', 'branch', '--format=%(refname:short)'])
+  expect(kit.runs.at(-1)?.cwd).toBe('/work')
+  const picker = await ui.find({ type: 'Select', key: 'branch-pick' })
+  expect(picker?.props.value).toBe('main')
+  expect((picker?.props.options as { value: string }[]).map(one => one.value)).toEqual(['main', 'feat/x'])
+
+  kit.proc.stdout = ''
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/feat/x\n'
+  await ui.select({ key: 'branch-pick', value: 'feat/x' })
+  await settle()
+  expect(kit.processes.at(-1)).toEqual(['git', 'switch', 'feat/x'])
+  expect(kit.runs.at(-1)?.cwd).toBe('/work')
+  expect((await ui.find({ type: 'Button', key: 'branch-open' }))?.props.label).toBe('feat/x ▾')
+  expect(await drawnText($)).toContain('브랜치를 바꿈: main → feat/x')
+  expect(await ui.find({ type: 'Select', key: 'branch-pick' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('place T3 git 이 거절하면 이유를 보이고 브랜치는 그대로 — 턴이 도는 중에는 바꾸지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  withProject(kit)
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/main\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  kit.proc.stdout = 'main\nfeat/x\n'
+  await ui.press({ key: 'branch-open' })
+  kit.procEnd.exitCode = 1
+  kit.procEnd.stderr = 'error: Your local changes would be overwritten\n'
+  await ui.select({ key: 'branch-pick', value: 'feat/x' })
+  await settle()
+  expect(await drawnText($)).toContain('브랜치를 바꾸지 못함 — error: Your local changes would be overwritten')
+  expect((await ui.find({ type: 'Button', key: 'branch-open' }))?.props.label).toBe('main ▾')
+
+  kit.procEnd.exitCode = 0
+  kit.procEnd.stderr = ''
+  await ui.press({ key: 'branch-open' })
+  await $.turn.start({ text: '일', turnId: 't9' })
+  const before = kit.processes.length
+  await ui.select({ key: 'branch-pick', value: 'feat/x' })
+  await settle()
+  expect(kit.processes.slice(before).some(argv => argv[1] === 'switch')).toBe(false)
+  expect(await drawnText($)).toContain('턴이 도는 중에는 브랜치를 바꾸지 않음')
+  await ui.unmount()
+})
+
+test('place T4 git 저장소가 아니면 폴더만 보인다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^\/work$/)).toBe('/work')
+  expect(await ui.find({ type: 'Button', key: 'branch-open' })).toBeUndefined()
+  expect(await drawnText($)).not.toContain('브랜치')
+  await ui.unmount()
+})
+
+test('place T5 워크트리는 .git 파일을 따라가 읽고, 브랜치 없는 커밋은 그 앞 일곱 글자로 보인다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  kit.extra['/work/.git'] = 'gitdir: /repo/.git/worktrees/w\n'
+  kit.extra['/repo/.git/worktrees/w/HEAD'] = '0123456789abcdef0123456789abcdef01234567\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Button', key: 'branch-open' }))?.props.label).toBe('0123456 (브랜치 없음) ▾')
+  await ui.unmount()
 })
 
 
