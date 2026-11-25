@@ -68,7 +68,6 @@ import {
   parseCatalog,
   recordFunctions,
   stepFunctionView,
-  keptFunctions,
   firstClause,
   functionBullet,
   usedNames,
@@ -2004,10 +2003,9 @@ export const register: Register = on => {
     const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
     const catalog = shot.catalog ?? {}
     const functionLog = await read($, stepFunctions)
-    // Each step's functions: what it builds, what it made and used. The step in focus shows them in its detail;
-    // a finished step keeps them on its own line in the flow, in focus or not.
+    // Each step's functions: what it builds, what it made and used. Only the step in focus shows them, in its
+    // detail under the flow — finished or not. A line of the flow is the step's sentence and its state, nothing more.
     const viewOf = (i: number) => stepFunctionView(i, stages, plan.slug, plan.pipeline, catalog, functionLog)
-    const keptViews = stages.map((stage, i) => keptFunctions(stage, viewOf(i)))
     const focusedView = focused === null ? null : viewOf(focused)
     const did = focusedView?.did
     const builds = focusedView?.builds ?? []
@@ -2161,14 +2159,6 @@ export const register: Register = on => {
                     <Text color={STATE_COLOR[stage.state]}>
                       {isHere(stage.state) ? `${wordOf(stage.state, i)}  ◀ 지금 여기` : wordOf(stage.state, i)}
                     </Text>
-                    {keptViews[i] ? (
-                      <Box flexDirection="column">
-                        {keptViews[i].builds.length > 0 ? <Text dimColor>하는 일</Text> : null}
-                        {buildsPart(keptViews[i].builds)}
-                        {keptViews[i].did ? <Text dimColor>이 단계에서 한 일</Text> : null}
-                        {keptViews[i].did ? didPart(keptViews[i].done) : null}
-                      </Box>
-                    ) : null}
                   </Box>
                 </Box>
               ))}

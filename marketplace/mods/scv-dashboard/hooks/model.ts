@@ -489,9 +489,9 @@ export const doneFunctions = (
 
 export type StepFunctionView = { builds: FunctionLine[]; did: StepFunctions | undefined; done: { made: DoneFunction[]; used: DoneFunction[] } }
 
-// One step's functions as the pane shows them: what it builds (하는 일), and what it made and used. Worked out the
-// same way for the step in focus and for a finished step — a finished step keeps this list on its own line in the
-// flow, where it is the proof of a step with no screen to show. log: what each step wrote, by '<plan>#<index>'.
+// One step's functions as the pane shows them in the step's detail: what it builds (하는 일), and what it made and
+// used. A finished step keeps them — pressed, its detail shows the same lists. log: what each step wrote, by
+// '<plan>#<index>'.
 export const stepFunctionView = (
   index: number,
   stages: readonly Stage[],
@@ -512,11 +512,6 @@ export const stepFunctionView = (
 
   return { builds, did, done: doneFunctions(did, builds.map(line => line.name), catalog, earlier) }
 }
-
-// The lists a finished step keeps on its line in the flow: nothing while it is not done, or when it names and wrote
-// no function.
-export const keptFunctions = (stage: Stage | undefined, view: StepFunctionView): StepFunctionView | null =>
-  stage?.state === 'done' && (view.builds.length > 0 || view.done.made.length > 0 || view.done.used.length > 0) ? view : null
 
 // The code a tool call writes: Write's content, Edit's new_string, MultiEdit's new_strings. Files under the project's
 // scv folder (plans, the dictionary, records) only name functions, they do not call them, so they are left out.

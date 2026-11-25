@@ -2013,19 +2013,24 @@ test('step-functions T4 견본 — 2단계는 새로 만든 두 함수, 3단계�
 
   expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
   expect(await text(ui, /^훅과 절차/)).toBe('훅과 절차 문서만 고침')
-  // Step 2 has ended and the detail has moved on to step 3, yet step 2's lists stay on its own line in the flow:
-  // the first of each pair is the finished step's, the second the detail of the step in progress.
+  // Step 2 has ended and the detail has moved on to step 3: the flow's lines carry no function list, so only step
+  // 3's detail shows lists now.
   const all = async (pattern: RegExp) => (await ui.findAll({ type: 'Text', text: pattern })).map(one => one.text)
-  expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 2', '새로 만듦 0'])
-  expect(await all(/^가져다 씀 /)).toEqual(['가져다 씀 0', '가져다 씀 3'])
-  expect(await all(/^• scv_step_active_plan \(/)).toEqual(['• scv_step_active_plan (고르기)'])
-  // what it does: once on step 2's line, once where step 3's detail describes the function it used
-  expect(await all(/^구현 중인/)).toEqual(['구현 중인 계획 이름 하나를 고른다', '구현 중인 계획 이름 하나를 고른다'])
+  expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 0'])
+  expect(await all(/^가져다 씀 /)).toEqual(['가져다 씀 3'])
+  expect(await all(/^• scv_step_active_plan \(/)).toEqual([])
+  // what it does: once, where step 3's detail describes the function it used
+  expect(await all(/^구현 중인/)).toEqual(['구현 중인 계획 이름 하나를 고른다'])
   expect(await text(ui, /^• scv_step_line$/)).toBe('• scv_step_line')
   expect(await text(ui, /^도구 이름과 계획/)).toBe('도구 이름과 계획 이름으로 매 턴 안내 한 줄을 만든다')
   expect(await text(ui, /^첫 버전이/)).toBe('첫 버전이 둘째 버전보다 낮으면 참(숫자로 비교, 접미사는 무시)')
   // Kept per project, so a new session still shows what each step did.
   expect(env.store.get('functions:/work')).toBeDefined()
+  // The finished step keeps its lists: pressed, its detail under the flow shows what it made.
+  await ui.press({ key: 'step-2' })
+  expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 2'])
+  expect(await all(/^가져다 씀 /)).toEqual(['가져다 씀 0'])
+  expect(await all(/^• scv_step_active_plan \(/)).toEqual(['• scv_step_active_plan (고르기)'])
   await ui.unmount()
 })
 
@@ -2868,7 +2873,7 @@ test('parallel-steps T8 사용자 차례 · 답 기다림은 진행 중인 단�
 })
 
 // ── step evidence: '끝'에는 증거 · 누르면 증거와 실제 진행 (계획 20261117-wookiya1364-checks-not-comments 4단계) ─────────
-import { backgroundSteps, bigIndexOf, doingWord, evidenceKind, isBackgroundSignal, isDrawable, judgeEvidence, keptFunctions, liveOf, proofView, signalAnswer, stepFunctionView, turnPicture } from './model'
+import { backgroundSteps, bigIndexOf, doingWord, evidenceKind, isBackgroundSignal, isDrawable, judgeEvidence, liveOf, proofView, signalAnswer, turnPicture } from './model'
 
 // Three steps: the first names the pure functions it builds; the other two name none, so they have a screen to show.
 const MIXED = ['순수부 만들기 — `fa`, `fb`', '화면 그리기', '훈련 돌리기']
@@ -3049,7 +3054,7 @@ test('step-evidence T20 옛 기록에 남은 소스 파일 증거는 여는 버�
   expect(proofView(undefined, []).isMissing).toBe(true)
 })
 
-test('step-evidence T21 증거 그림의 크게 보기를 누르면 창 전체가 그 그림이 되고, 닫으면 단계 흐름으로 돌아온다', async ($, on) => {
+test('step-evidence T23 증거 그림의 크게 보기를 누르면 창 전체가 그 그림이 되고, 닫으면 단계 흐름으로 돌아온다', async ($, on) => {
   const { store, processes } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: MIXED }) })
   evidenceFiles(on, { '/work/shot.png': { base64: 'iVBORw0KGgo=', mtimeMs: 1 }, '/work/chart.svg': { base64: 'PHN2Zy8+', mtimeMs: 1 }, '/work/run.mp4': { base64: 'AA', mtimeMs: 1 } })
   store.set('signals:/work', [
@@ -3116,7 +3121,7 @@ test('step-evidence T21 증거 그림의 크게 보기를 누르면 창 전체�
   expect(turnPicture(0, [files[0]], 1)).toBe(0)
 })
 
-test('step-evidence T21 끝난 단계에도 함수 목록이 그대로 보인다 — 누르지 않아도, 다음 단계로 넘어가도, 모두 끝나도', async ($, on) => {
+test('step-evidence T21 끝난 단계의 함수 목록은 단계를 눌렀을 때 아래 상세에 그대로 — 단계 흐름 줄에는 문장과 상태만', async ($, on) => {
   const pipeline = ['`fa` | 글을 읽어 값으로 정리한다 | 글 → 값 | 순수', '`fb` | 값을 줄로 만든다 | 값 → 줄 | 순수']
   const files = { a: plan({ title: 'p', status: 'in_progress', steps: MIXED, pipeline }) }
   engine(on, files)
@@ -3127,39 +3132,40 @@ test('step-evidence T21 끝난 단계에도 함수 목록이 그대로 보인다
   await $.tool.call({ tool: 'Write', file_path: '/work/src/pure.sh', content: '# @pure\n# 역할: 글을 읽어 값으로 정리한다\n# 종류: 읽기\nfa() {\n  :\n}\n' })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const all = async (pattern: RegExp) => (await ui.findAll({ type: 'Text', text: pattern })).map(one => one.text)
-  // In progress: the list is in the step's detail only.
+  // In progress: the list is in the step's detail.
   expect(await all(/^• fa \(/)).toEqual(['• fa (읽기)'])
   expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 1'])
 
-  // Done, and the work moves to step 2: the detail is now step 2's, and step 1 keeps its list on its own line.
+  // Done, and the work moves to step 2: the detail is now step 2's. Step 1's line in the flow is its sentence and
+  // its state alone — no function list under it.
   await doneWith($, 1, {})
   await doingWith($, 2)
   expect(await text(ui, /^2\. 화면 그리기 — /)).toBe('2. 화면 그리기 — 진행 중')
+  expect(await all(/^• f[ab]/)).toEqual([])
+  expect(await all(/^값을 줄로/)).toEqual([])
+  expect(await all(/^새로 만듦 /)).toEqual([])
+  expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
+  await doneWith($, 2, { evidence: ['shot.png'] })
+  await doingWith($, 3)
+  await doneWith($, 3, { evidence: ['shot.png'] })
+  // Every step is done: no detail is open, and the flow shows no function at all.
+  expect(await text(ui, /^\d\. .* — 완료$/)).toBeUndefined()
+  expect(await all(/^• f[ab]/)).toEqual([])
+  expect(await all(/^하는 일$/)).toEqual([])
+  expect(await all(/^새로 만듦 /)).toEqual([])
+  // Pressed, the finished step shows its detail under the flow: what it builds, and what it made — kept after done.
+  await ui.press({ key: 'step-1' })
+  expect(await text(ui, /^1\. 순수부 만들기 — /)).toBe('1. 순수부 만들기 — 완료')
+  expect(await all(/^하는 일$/)).toEqual(['하는 일'])
   expect(await all(/^• fa \(/)).toEqual(['• fa (읽기)'])
   expect(await all(/^• fb/)).toEqual(['• fb'])
   expect(await all(/^값을 줄로/)).toEqual(['값을 줄로 만든다'])
   expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 1'])
+  // A finished step with no function says so in its detail, and still lists nothing on its line.
+  await ui.press({ key: 'step-2' })
   expect(await text(ui, /^순수함수 없음/)).toBe('순수함수 없음')
-  // A finished step that names and wrote no function has no list to keep.
-  await doneWith($, 2, { evidence: ['shot.png'] })
-  await doingWith($, 3)
-  await doneWith($, 3, { evidence: ['shot.png'] })
-  // Every step is done: no detail is open, and the list is still there.
-  expect(await text(ui, /^\d\. .* — 완료$/)).toBeUndefined()
-  expect(await all(/^• fa \(/)).toEqual(['• fa (읽기)'])
-  expect(await all(/^하는 일$/)).toEqual(['하는 일'])
-  expect(await all(/^새로 만듦 /)).toEqual(['새로 만듦 1'])
-  // Pressed, the step shows its detail too; the line's own list does not go away.
-  await ui.press({ key: 'step-1' })
-  expect(await all(/^• fa \(/)).toEqual(['• fa (읽기)', '• fa (읽기)'])
+  expect(await all(/^• f[ab]/)).toEqual([])
   await ui.unmount()
-
-  // 순수: 끝나지 않은 단계와, 함수가 없는 끝난 단계는 줄에 남길 목록이 없다
-  const stages = [{ ...st('순수부', 'done'), refs: ['fa'] }, st('화면', 'done'), { ...st('다음', 'doing'), refs: ['fb'] }]
-  const view = (i: number) => stepFunctionView(i, stages, 'a', [], {}, {})
-  expect(keptFunctions(stages[0], view(0))?.builds.map(line => line.name)).toEqual(['fa'])
-  expect(keptFunctions(stages[1], view(1))).toBeNull()
-  expect(keptFunctions(stages[2], view(2))).toBeNull()
 })
 
 test('step-evidence T22 뒤에서 도는 단계는 진행 중(백그라운드) — background 인자 · log · url 어느 것이든, 단계마다 따로', async ($, on) => {
