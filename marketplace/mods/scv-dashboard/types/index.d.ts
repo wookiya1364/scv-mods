@@ -180,10 +180,10 @@ export type GearForm =
 // under). An empty text: the command ran and did not print values (an older SCV) — that gear goes to the conversation.
 export type GearAsks = { index: string | null; byName: Record<string, string> }
 
-// The word dictionary card as this session's person left it: the entry open in the form (by its avoided word), the
-// entry asked about before it is removed, whether every entry is listed, and how many times the form was emptied
-// (a new form draws new fields, so a saved text does not stay in them).
-export type WordsView = { edit: string | null; asking: string | null; isAll: boolean; gen: number }
+// The word dictionary card as this session's person left it: whether it is unfolded (folded, it is one line), the
+// entry open in the form (by its avoided word), the entry asked about before it is removed, whether every entry is
+// listed, and how many times the form was emptied (a new form draws new fields, so a saved text does not stay in them).
+export type WordsView = { isOpen: boolean; edit: string | null; asking: string | null; isAll: boolean; gen: number }
 
 // A viewer session's own line after a press that went to the working session: the card it was pressed in, and
 // what came of the send. Gone when the next state arrives.

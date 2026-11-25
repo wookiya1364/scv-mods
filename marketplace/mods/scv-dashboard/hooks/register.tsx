@@ -164,7 +164,7 @@ import {
   wordsRemoveCommand,
   wordsSaid,
 } from './model'
-import type { AskMode, BranchNow, ClearKept, ConfirmStop, JobEnd, LightSettings, Place, RunPlan, StepFunctionView, WordDraft } from './model'
+import type { AskMode, BranchNow, ClearKept, ConfirmStop, JobEnd, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, WordDraft } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -365,7 +365,7 @@ const mirror = atom({ plugin: 'scv-dashboard', key: 'mirror' } as const, null as
 const viewers = atom({ plugin: 'scv-dashboard', key: 'viewers' } as const, {} as Viewers)
 // The word dictionary card: what SCV's command said after the last save or removal, and how the person left the card.
 const wordsNote = atom({ plugin: 'scv-dashboard', key: 'wordsNote' } as const, null as string | null)
-const NO_WORDS_VIEW: WordsView = { edit: null, asking: null, isAll: false, gen: 0 }
+const NO_WORDS_VIEW: WordsView = { isOpen: false, edit: null, asking: null, isAll: false, gen: 0 }
 const wordsView = atom({ plugin: 'scv-dashboard', key: 'wordsView' } as const, NO_WORDS_VIEW)
 // What the person typed into the dictionary form. Kept outside the drawn state, so a keystroke redraws nothing.
 const wordsTyped: { avoid?: string; use?: string; forms?: string } = {}
@@ -2450,8 +2450,9 @@ export const register: Register = on => {
         </Box>,
       )
 
-    // The word dictionary: an entry a line — the word to avoid, the word to use, its forms dim under them — then
-    // the form that adds one. Always shown where the project is read, also when the dictionary is empty.
+    // The word dictionary: folded to one line until it is pressed (each session folds its own — a mirror sends
+    // nothing for it). Unfolded: an entry a line — the word to avoid, the word to use, its forms dim under them —
+    // then the form that adds one. Shown where the project is read, also when the dictionary is empty.
     const wordsOpen = await read($, wordsView)
     const wordsLine = await read($, wordsNote)
     const wordList = parseWords(shot.wordsText)
@@ -2545,73 +2546,78 @@ export const register: Register = on => {
     const wordsCard = () =>
       card(
         <Box flexDirection="column">
-          <Text bold>{`낱말 사전 ${wordList.length}`}</Text>
-          {wordList.length === 0 ? (
-            <Text dimColor>피할 말과 바꿀 말을 적어 두면, Claude 가 그 말이나 그 변형을 쓰려 할 때 바꿀 말로 씁니다 — 예: 재다 → 측정하다 (잰 · 재 봤을 때 → 측정)</Text>
-          ) : (
-            <Text dimColor>Claude 가 왼쪽 말이나 그 변형을 쓰려 할 때 오른쪽 말로 바꿔 씁니다</Text>
-          )}
-          {wordFold.shown.map((entry, i) => {
-            const forms = formsLine(entry)
-            const isAsked = wordsOpen.asking === entry.avoid
+          <Box flexDirection="row">
+            <Button key="words-toggle" plain onPress={() => void update($, wordsView, one => ({ ...one, isOpen: !one.isOpen }))}>
+              {`${wordsOpen.isOpen ? '▾' : '▸'} 낱말 사전 ${wordList.length}`}
+            </Button>
+          </Box>
+          {wordsOpen.isOpen ? (
+            <Box flexDirection="column">
+              {wordList.length === 0 ? (
+                <Text dimColor>피할 말과 바꿀 말을 적어 두면, Claude 가 그 말이나 그 변형을 쓰려 할 때 바꿀 말로 씁니다 — 예: 재다 → 측정하다 (잰 · 재 봤을 때 → 측정)</Text>
+              ) : (
+                <Text dimColor>Claude 가 왼쪽 말이나 그 변형을 쓰려 할 때 오른쪽 말로 바꿔 씁니다</Text>
+              )}
+              {wordFold.shown.map((entry, i) => {
+                const forms = formsLine(entry)
+                const isAsked = wordsOpen.asking === entry.avoid
 
-            return (
-              <Box key={`word-${i}`} flexDirection="column">
-                <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-                  <Box flexDirection="row" flexShrink={1}>
-                    <Text>{wordLine(entry)}</Text>
+                return (
+                  <Box key={`word-${i}`} flexDirection="column">
+                    <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+                      <Box flexDirection="row" flexShrink={1}>
+                        <Text>{wordLine(entry)}</Text>
+                      </Box>
+                      <Box flexDirection="row" gap={1}>
+                        {hasControls && !isAsked
+                          ? [
+                              ...(Input ? [<Button key={`words-edit-${i}`} label="고치기" onPress={() => void editWord(entry.avoid)} />] : []),
+                              <Button key={`words-remove-${i}`} label="지우기" onPress={() => void askRemove(entry.avoid)} />,
+                            ]
+                          : []}
+                      </Box>
+                    </Box>
+                    {forms ? (
+                      <Box paddingLeft={2}>
+                        <Text dimColor>{forms}</Text>
+                      </Box>
+                    ) : (
+                      <Box flexDirection="row" paddingLeft={2} gap={1} alignItems="center">
+                        <Text dimColor>변형 없음 — Claude 가 채움</Text>
+                        {mirrored ? [] : [<Button key={`words-fill-${i}`} label="채우기" onPress={() => void fillWords('/scv:words fill', '보내면 Claude 가 빈 변형을 채웁니다').catch(() => undefined)} />]}
+                      </Box>
+                    )}
+                    {isAsked && hasControls ? (
+                      <Box flexDirection="row" paddingLeft={2} gap={1} alignItems="center">
+                        <Text color="#e3b341">지울까요?</Text>
+                        <Button key="words-remove-yes" label="지우기" onPress={() => void removeHere(entry.avoid).catch(() => undefined)} />
+                        <Button key="words-remove-no" label="취소" onPress={() => void askRemove(null)} />
+                      </Box>
+                    ) : null}
                   </Box>
-                  <Box flexDirection="row" gap={1}>
-                    {hasControls && !isAsked
-                      ? [
-                          ...(Input ? [<Button key={`words-edit-${i}`} label="고치기" onPress={() => void editWord(entry.avoid)} />] : []),
-                          <Button key={`words-remove-${i}`} label="지우기" onPress={() => void askRemove(entry.avoid)} />,
-                        ]
-                      : []}
-                  </Box>
-                </Box>
-                {forms ? (
-                  <Box paddingLeft={2}>
-                    <Text dimColor>{forms}</Text>
-                  </Box>
-                ) : (
-                  <Box flexDirection="row" paddingLeft={2} gap={1} alignItems="center">
-                    <Text dimColor>변형 없음 — Claude 가 채움</Text>
-                    {mirrored ? [] : [<Button key={`words-fill-${i}`} label="채우기" onPress={() => void fillWords('/scv:words fill', '보내면 Claude 가 빈 변형을 채웁니다').catch(() => undefined)} />]}
-                  </Box>
-                )}
-                {isAsked && hasControls ? (
-                  <Box flexDirection="row" paddingLeft={2} gap={1} alignItems="center">
-                    <Text color="#e3b341">지울까요?</Text>
-                    <Button key="words-remove-yes" label="지우기" onPress={() => void removeHere(entry.avoid).catch(() => undefined)} />
-                    <Button key="words-remove-no" label="취소" onPress={() => void askRemove(null)} />
-                  </Box>
-                ) : null}
-              </Box>
-            )
-          })}
-          {wordFold.hidden > 0 ? [<Button key="words-all" label={`${wordFold.hidden}개 더 보기`} onPress={() => void update($, wordsView, one => ({ ...one, isAll: true }))} />] : []}
-          {wordsForm()}
+                )
+              })}
+              {wordFold.hidden > 0 ? [<Button key="words-all" label={`${wordFold.hidden}개 더 보기`} onPress={() => void update($, wordsView, one => ({ ...one, isAll: true }))} />] : []}
+              {wordsForm()}
+            </Box>
+          ) : null}
           {wordsLine ? <Text dimColor>{wordsLine}</Text> : null}
           {sentNote('words')}
         </Box>,
       )
 
-    // Always on top: context · usage, then ask mode and gears where this session's project is read.
+    // Always on top: context · usage, then ask mode and gears where this session's project is read. The word
+    // dictionary is not among them: it sits right under the plan (under the two lines that say there is none).
     const hasProject = shot.settingsText !== undefined
-    const topCards = (hasPlan: boolean, hasBlocks: boolean) => {
-      const sections = paneSections({ plan: hasPlan, blocks: hasBlocks, project: hasProject, words: shot.wordsText !== undefined })
-
-      return (
-        <Box flexDirection="column">
-          {!mirrored && cameFrom ? <Text dimColor>{cameFrom}</Text> : null}
-          {sections.includes('limits') ? limitsCard() : null}
-          {sections.includes('askMode') ? askCard() : null}
-          {sections.includes('gears') ? gearsCard() : null}
-          {sections.includes('words') ? wordsCard() : null}
-        </Box>
-      )
-    }
+    const sectionsOf = (hasPlan: boolean, hasBlocks: boolean) => paneSections({ plan: hasPlan, blocks: hasBlocks, project: hasProject, words: shot.wordsText !== undefined })
+    const topCards = (sections: readonly PaneSection[]) => (
+      <Box flexDirection="column">
+        {!mirrored && cameFrom ? <Text dimColor>{cameFrom}</Text> : null}
+        {sections.includes('limits') ? limitsCard() : null}
+        {sections.includes('askMode') ? askCard() : null}
+        {sections.includes('gears') ? gearsCard() : null}
+      </Box>
+    )
 
     // Until the host's first state comes, what this session holds is its own folder or an older state: not shown.
     if (mirrored && !mirrored.at) {
@@ -2625,13 +2631,16 @@ export const register: Register = on => {
     }
 
     if (!plan) {
+      const sections = sectionsOf(false, false)
+
       return (
         <Box flexDirection="column">
           {mirrorLine}
           <Text bold>SCV 대시보드</Text>
-          {topCards(false, false)}
+          {topCards(sections)}
           <Text dimColor>이 폴더에 진행 중인 SCV 계획이 없습니다. /scv:promote 로 계획을 만들면 여기에 보입니다.</Text>
           <Text dimColor>{`확인한 곳: ${shot.cwd || '(작업 폴더 모름)'}/scv/promote`}</Text>
+          {sections.includes('words') ? wordsCard() : null}
           {nowCard(null)}
         </Box>
       )
@@ -2754,10 +2763,12 @@ export const register: Register = on => {
       )
     }
 
+    const sections = sectionsOf(true, blocks.length > 0)
+
     return (
       <Box flexDirection="column">
         {mirrorLine}
-        {topCards(true, blocks.length > 0)}
+        {topCards(sections)}
         {plans.length > 1 && Select ? (
           <Select
             key="plan"
@@ -2894,6 +2905,7 @@ export const register: Register = on => {
           </>,
         )}
 
+        {sections.includes('words') ? wordsCard() : null}
         <Button key="more-toggle" label={open.more ? '접기 — 진행률 · 시험 결과 · 변경 이력' : '더 보기 — 진행률 · 시험 결과 · 변경 이력'} onPress={() => void toggleMore().catch(() => undefined)} />
         {open.more ? (
           <Box flexDirection="column" marginTop={1}>

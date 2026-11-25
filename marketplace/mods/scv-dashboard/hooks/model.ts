@@ -1964,14 +1964,15 @@ export type PaneSection = 'limits' | 'askMode' | 'gears' | 'words' | 'blocks' | 
 
 // The cards always shown, top to bottom; the rest sits under 'more'. Blocked work shows only when there is some,
 // the steps only with a plan, and ask mode · gears only where this session reads the project itself. The word
-// dictionary comes after the gears where the project's dictionary was looked for (words: a state from a working
-// session that does not read it has none).
+// dictionary comes right under the plan — after the steps and before 'more', or last where there is no plan —
+// where the project's dictionary was looked for (words: a state from a working session that does not read it has none).
 export const paneSections = (has: { plan: boolean; blocks: boolean; project: boolean; words?: boolean }): PaneSection[] => [
   'limits',
   ...(has.project ? (['askMode', 'gears'] as const) : []),
-  ...(has.project && has.words ? (['words'] as const) : []),
   ...(has.plan && has.blocks ? (['blocks'] as const) : []),
-  ...(has.plan ? (['steps', 'more'] as const) : []),
+  ...(has.plan ? (['steps'] as const) : []),
+  ...(has.project && has.words ? (['words'] as const) : []),
+  ...(has.plan ? (['more'] as const) : []),
 ]
 
 // ── a gear for what the person is typing (pane 0.3.1) ────────────────────────

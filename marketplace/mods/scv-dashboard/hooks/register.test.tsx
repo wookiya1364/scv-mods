@@ -4427,6 +4427,8 @@ const wordsKit = (on: On, words: string | null = WORDS_TSV, opts: { isInstalled?
 }
 const wordsRuns = (kit: { runs: { argv: string[]; cwd?: string }[] }) => kit.runs.filter(one => one.argv[1]?.endsWith('/scripts/words.sh'))
 const hasInput = async (ui: { find: (q: { type: 'Input'; key: string }) => Promise<unknown> }, key: string) => Boolean(await ui.find({ type: 'Input', key }))
+// the card is folded to its one line until that line is pressed
+const openWords = (ui: { press: (q: { key: string }) => Promise<unknown> }) => ui.press({ key: 'words-toggle' })
 
 test('words T1 순수부 — 사전 읽기 · 접기 · 저장 전 검사 · 명령의 낱말 · 본체가 한 말', () => {
   expect(parseWords(WORDS_TSV)).toEqual([
@@ -4476,6 +4478,9 @@ test('words T1 순수부 — 사전 읽기 · 접기 · 저장 전 검사 · 명
   expect(wordsFormKind({ controls: true, input: false, isMirror: true })).toBe('none')
   expect(wordsFormKind({ controls: false, input: true, isMirror: true })).toBe('hidden')
   expect(paneSections({ plan: false, blocks: false, project: true, words: true })).toEqual(['limits', 'askMode', 'gears', 'words'])
+  // with a plan: right under the steps, above 'more'
+  expect(paneSections({ plan: true, blocks: false, project: true, words: true })).toEqual(['limits', 'askMode', 'gears', 'steps', 'words', 'more'])
+  expect(paneSections({ plan: true, blocks: true, project: true, words: true })).toEqual(['limits', 'askMode', 'gears', 'blocks', 'steps', 'words', 'more'])
   expect(paneSections({ plan: true, blocks: false, project: false, words: true })).toEqual(['limits', 'steps', 'more'])
 })
 
@@ -4483,9 +4488,10 @@ test('words T2 사전이 비어도 칸이 있다 — 무엇을 위한 것인지 
   wordsKit(on, null)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   const drawn = await drawnText($)
 
-  expect(await text(ui, /^낱말 사전/)).toBe('낱말 사전 0')
+  expect(await labelOf(ui, 'words-toggle')).toBe('▾ 낱말 사전 0')
   expect(drawn).toContain('예: 재다 → 측정하다')
   expect(drawn.indexOf('저장해 둔 일(기어)')).toBeLessThan(drawn.indexOf('낱말 사전 0'))
   expect(await hasInput(ui, 'words-avoid-0')).toBe(true)
@@ -4503,9 +4509,10 @@ test('words T3 낱말마다 한 줄 — 피할 말 → 바꿀 말, 아래에 변
   const { fills } = promptEngine(on)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   const drawn = await drawnText($)
 
-  expect(await text(ui, /^낱말 사전/)).toBe('낱말 사전 3')
+  expect(await labelOf(ui, 'words-toggle')).toBe('▾ 낱말 사전 3')
   expect(await text(ui, /^재다 →/)).toBe('재다 → 측정하다')
   expect(await text(ui, /^잰 ·/)).toBe('잰 · 재서 · 재 본')
   expect(await text(ui, /^돌리다 →/)).toBe('돌리다 → 실행하다')
@@ -4527,6 +4534,7 @@ test('words T4 저장 — 본체의 사전 명령을 프로젝트 폴더에서, 
   const kit = wordsKit(on, null)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   // quotes, a semicolon, a command substitution: each still one word after its flag
   const avoid = '재"다; rm -rf x'
   const use = "측정 '하다' $(id)"
@@ -4541,8 +4549,8 @@ test('words T4 저장 — 본체의 사전 명령을 프로젝트 폴더에서, 
   expect(wordsRuns(kit)[0]?.argv).toEqual(['bash', WORDS_SH, 'add', '--avoid', avoid, '--use', use])
   expect(wordsRuns(kit)[0]?.cwd).toBe('/work')
   expect(await text(ui, /^저장함/)).toBe(`저장함: ${avoid} → ${use}`)
-  // read again: the entry is listed, and the form is a new, empty one
-  expect(await text(ui, /^낱말 사전/)).toBe('낱말 사전 1')
+  // read again: the entry is listed, the card stays unfolded, and the form is a new, empty one
+  expect(await labelOf(ui, 'words-toggle')).toBe('▾ 낱말 사전 1')
   expect(await hasInput(ui, 'words-avoid-0')).toBe(false)
   expect(await hasInput(ui, 'words-avoid-1')).toBe(true)
   // with forms, saved by Enter in the last field: the list goes as one word, tidied
@@ -4561,6 +4569,7 @@ test('words T5 본체가 거절하면 그 이유를 보이고 적은 글은 남�
   const { fills } = promptEngine(on)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   await ui.press({ key: 'words-save' })
   await settle()
   expect(wordsRuns(kit)).toHaveLength(0)
@@ -4584,6 +4593,7 @@ test('words T6 지우기는 그 자리에서 한 번 묻는다 — 취소면 아
   const kit = wordsKit(on)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   await ui.press({ key: 'words-remove-0' })
   expect(await text(ui, /^지울까요/)).toBe('지울까요?')
   expect(await labelOf(ui, 'words-remove-yes')).toBe('지우기')
@@ -4603,7 +4613,7 @@ test('words T6 지우기는 그 자리에서 한 번 묻는다 — 취소면 아
   expect(wordsRuns(kit)[0]?.argv).toEqual(['bash', WORDS_SH, 'remove', '재다'])
   expect(wordsRuns(kit)[0]?.cwd).toBe('/work')
   expect(await text(ui, /^지움/)).toBe('지움: 재다')
-  expect(await text(ui, /^낱말 사전/)).toBe('낱말 사전 2')
+  expect(await labelOf(ui, 'words-toggle')).toBe('▾ 낱말 사전 2')
   expect(await drawnText($)).not.toContain('재다 → 측정하다')
   await ui.unmount()
 })
@@ -4613,6 +4623,7 @@ test('words T7 본체를 못 찾거나 사전 명령이 없는 옛 본체면 입
   const { fills } = promptEngine(on)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   await ui.input({ key: 'words-avoid-0', text: '재다', kind: 'change' })
   await ui.input({ key: 'words-use-0', text: '측정하다', kind: 'change' })
   await ui.press({ key: 'words-save' })
@@ -4629,6 +4640,7 @@ test('words T7b 옛 본체 — 명령이 돌았지만 저장했다는 말이 없
   const { fills } = promptEngine(on)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   kit.procEnd.exitCode = 127
   kit.procEnd.stderr = `bash: ${WORDS_SH}: No such file or directory\n`
   await ui.input({ key: 'words-avoid-0', text: '살피다', kind: 'change' })
@@ -4651,6 +4663,7 @@ test('words T8 여덟 줄까지 보이고 나머지는 N개 더 보기 — 고�
   const kit = wordsKit(on, many)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   expect(await text(ui, /^말7 →/)).toBe('말7 → 바꿈7')
   expect(await text(ui, /^말8 →/)).toBeUndefined()
   expect(await labelOf(ui, 'words-all')).toBe('3개 더 보기')
@@ -4688,6 +4701,100 @@ test('words T8 여덟 줄까지 보이고 나머지는 N개 더 보기 — 고�
   expect(await labelOf(ui, 'words-edit-cancel')).toBe('취소')
   await ui.press({ key: 'words-edit-cancel' })
   expect(await text(ui, /^낱말 추가$/)).toBe('낱말 추가')
+  await ui.unmount()
+})
+
+test('words T9 기본은 접힘 — 한 줄만 보이고, 누르면 펼치고, 다시 누르면 접힌다. 접혀도 방금 한 일의 결과 줄은 남는다', async ($, on) => {
+  const kit = wordsKit(on)
+  const { fills } = promptEngine(on)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const isFolded = async () => {
+    const drawn = await drawnText($)
+    for (const gone of ['재다 → 측정하다', '잰 · 재서 · 재 본', '변형 없음', 'Claude 가 왼쪽 말이나', '낱말 추가']) expect(drawn).not.toContain(gone)
+    for (const key of ['words-edit-0', 'words-remove-0', 'words-fill-1', 'words-save', 'words-all']) expect(await has(ui, key)).toBe(false)
+    expect(await hasInput(ui, 'words-avoid-0')).toBe(false)
+  }
+
+  expect(await labelOf(ui, 'words-toggle')).toBe('▸ 낱말 사전 3')
+  await isFolded()
+  await openWords(ui)
+  expect(await labelOf(ui, 'words-toggle')).toBe('▾ 낱말 사전 3')
+  expect(await text(ui, /^Claude 가 왼쪽/)).toBe('Claude 가 왼쪽 말이나 그 변형을 쓰려 할 때 오른쪽 말로 바꿔 씁니다')
+  expect(await text(ui, /^재다 →/)).toBe('재다 → 측정하다')
+  expect(await text(ui, /^낱말 추가$/)).toBe('낱말 추가')
+  expect(await has(ui, 'words-save')).toBe(true)
+  expect(await hasInput(ui, 'words-avoid-0')).toBe(true)
+  await openWords(ui)
+  expect(await labelOf(ui, 'words-toggle')).toBe('▸ 낱말 사전 3')
+  await isFolded()
+  // folding and unfolding ran nothing and put nothing into the prompt box
+  expect(wordsRuns(kit)).toHaveLength(0)
+  expect(fills).toHaveLength(0)
+
+  // a removal done while unfolded: its result line stays under the one line after the card is folded
+  await openWords(ui)
+  await ui.press({ key: 'words-remove-0' })
+  kit.proc.stdout = 'WORDS_REMOVED: 재다\n'
+  kit.extra['scv/words/WORDS.tsv'] = WORDS_TSV.split('\n').filter(line => !line.startsWith('재다')).join('\n')
+  await ui.press({ key: 'words-remove-yes' })
+  await settle()
+  await openWords(ui)
+  expect(await labelOf(ui, 'words-toggle')).toBe('▸ 낱말 사전 2')
+  expect(await text(ui, /^지움/)).toBe('지움: 재다')
+  expect(await drawnText($)).not.toContain('돌리다 → 실행하다')
+  await ui.unmount()
+})
+
+test('words T10 자리 — 계획이 없으면 안내 두 줄 바로 아래, 계획이 있으면 단계 흐름 아래 · 더 보기 위', async ($, on) => {
+  wordsKit(on)
+  await start($)
+  const none = await drawnText($)
+  const at = (drawn: string, part: string) => {
+    expect(drawn).toContain(part)
+
+    return drawn.indexOf(part)
+  }
+
+  expect(at(none, '저장해 둔 일(기어) 3')).toBeLessThan(at(none, '진행 중인 SCV 계획이 없습니다'))
+  expect(at(none, '진행 중인 SCV 계획이 없습니다')).toBeLessThan(at(none, '확인한 곳: /work/scv/promote'))
+  expect(at(none, '확인한 곳: /work/scv/promote')).toBeLessThan(at(none, '▸ 낱말 사전 3'))
+  // drawn once, and no other line stands between the two lines and it
+  expect(none.split('낱말 사전 3')).toHaveLength(2)
+  expect(none.slice(at(none, '확인한 곳: /work/scv/promote'), at(none, '▸ 낱말 사전 3'))).not.toContain('"type":"Text"')
+})
+
+test('words T10b 자리 — 계획이 있을 때: 묻기 방식 · 기어 · 단계 흐름 다음에 낱말 사전, 그 다음이 더 보기', async ($, on) => {
+  const kit = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE, tests: ['T1 하나'] }) })
+  withProject(kit)
+  kit.extra['scv/words/WORDS.tsv'] = WORDS_TSV
+  kit.store.delete('scv-dashboard:more')
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const order = async () => {
+    const drawn = await drawnText($)
+
+    return ['묻기 방식', '저장해 둔 일(기어) 3', '단계 흐름', '단계를 누르면 자세히', '낱말 사전 3', '"key":"more-toggle"'].map(part => {
+      expect(drawn).toContain(part)
+
+      return drawn.indexOf(part)
+    })
+  }
+  const sorted = (list: number[]) => [...list].sort((a, b) => a - b)
+
+  expect(await labelOf(ui, 'words-toggle')).toBe('▸ 낱말 사전 3')
+  expect(await order()).toEqual(sorted(await order()))
+  // folded: no line stands between it and the 'more' button
+  const folded = await drawnText($)
+  expect(folded.slice(folded.indexOf('낱말 사전 3'), folded.indexOf('"key":"more-toggle"'))).not.toContain('"type":"Text"')
+  // unfolded, and with 'more' open: the same place — the folded cards come after the dictionary
+  await openWords(ui)
+  await ui.press({ key: 'more-toggle' })
+  expect(await order()).toEqual(sorted(await order()))
+  const opened = await drawnText($)
+  expect(opened.indexOf('낱말 추가')).toBeGreaterThan(opened.indexOf('단계를 누르면 자세히'))
+  expect(opened.indexOf('낱말 추가')).toBeLessThan(opened.indexOf('"key":"more-toggle"'))
+  expect(opened.indexOf('"key":"more-toggle"')).toBeLessThan(opened.indexOf('예상 완료 시간'))
   await ui.unmount()
 })
 
@@ -4784,6 +4891,7 @@ test('mirror-press T2 누를 수 있다고 말하지 않은 작업 세션(옛 �
   const { acts: _acts, ...old } = HOST_STATE()
   await hostSends($, old)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
   const before = await drawnText($)
 
   // the cards are drawn as before, with nothing to press
@@ -4921,6 +5029,9 @@ test('mirror-press T4 거울에서 기어 — 실행 · 값 정하기 · 밖으�
 test('mirror-press T5 거울에서 낱말 — 저장은 적은 글이 누를 때 한 번에, 지우기는 물어본 뒤에 ACT 로 간다', async ($, on) => {
   const env = await startPresser($, on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await openWords(ui)
+  // unfolding is this session's own: nothing went to the working session
+  expect(actsOf(env)).toHaveLength(0)
   await ui.input({ key: 'words-avoid-0', text: '살피다', kind: 'change' })
   await ui.input({ key: 'words-use-0', text: '확인"하다"; x', kind: 'change' })
   expect(actsOf(env)).toHaveLength(0)
@@ -4961,6 +5072,42 @@ test('mirror-press T5 거울에서 낱말 — 저장은 적은 글이 누를 때
   expect(after).toContain('지움: 재다')
   expect(after).toContain('낱말 사전 2')
   expect(after).not.toContain(WAITING)
+  await ui.unmount()
+})
+
+test('mirror-press T6 거울의 낱말 사전 — 단계 흐름 아래에 접힌 채 있고, 접고 펴도 작업 세션에 보내는 글이 없다', async ($, on) => {
+  const env = await startViewer($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // a working session that did not read a dictionary: no card
+  expect(await has(ui, 'words-toggle')).toBe(false)
+  await hostSends($, HOST_STATE())
+  const folded = await drawnText($)
+
+  expect(await labelOf(ui, 'words-toggle')).toBe('▸ 낱말 사전 3')
+  expect(folded).not.toContain('재다 → 측정하다')
+  expect(await has(ui, 'words-save')).toBe(false)
+  expect(folded.indexOf('저장해 둔 일(기어) 5')).toBeLessThan(folded.indexOf('단계 흐름'))
+  expect(folded.indexOf('단계 흐름')).toBeLessThan(folded.indexOf('낱말 사전 3'))
+  expect(folded.indexOf('낱말 사전 3')).toBeLessThan(folded.indexOf('"key":"more-toggle"'))
+
+  const sentBefore = env.sent.length
+  await openWords(ui)
+  expect(await labelOf(ui, 'words-toggle')).toBe('▾ 낱말 사전 3')
+  expect(await text(ui, /^재다 →/)).toBe('재다 → 측정하다')
+  expect(await has(ui, 'words-save')).toBe(true)
+  // the working session's next state does not fold it again
+  await hostSends($, HOST_STATE())
+  expect(await labelOf(ui, 'words-toggle')).toBe('▾ 낱말 사전 3')
+  await openWords(ui)
+  expect(await labelOf(ui, 'words-toggle')).toBe('▸ 낱말 사전 3')
+  expect(await drawnText($)).not.toContain('재다 → 측정하다')
+  expect(env.sent).toHaveLength(sentBefore)
+  expect(actsOf(env)).toHaveLength(0)
+  expect(wordsRuns(env)).toHaveLength(0)
+  // folded, the working session's own result line still shows under the one line
+  await hostSends($, HOST_STATE({ wordsNote: '지움: 재다' }, { wordsText: WORDS_TSV.split('\n').filter(line => !line.startsWith('재다')).join('\n') }))
+  expect(await labelOf(ui, 'words-toggle')).toBe('▸ 낱말 사전 2')
+  expect(await text(ui, /^지움/)).toBe('지움: 재다')
   await ui.unmount()
 })
 
