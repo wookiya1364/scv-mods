@@ -15,7 +15,6 @@ Claude Code mods for the SCV workflow.
   - the usage limits: how much of the 5-hour and 7-day windows is used and when the 5-hour one resets
   - alerts when Claude waits for your answer or your permission, a test run fails, a turn of 2 minutes or more finishes, a turn stops on an error or a refusal, or a usage window passes 90% (once per window): the app's notification, else the system's own, and Claude's own notification tool, which also reaches your phone while Remote Control is connected
   - the project is the nearest folder at or above the session's folder that holds `scv/`, so a session opened in a subfolder still sees its plans
-  - the latest `/scv:dreams` summary, its improvement items, and a button that opens the report
   - press a step node to see what that step does, in plain words from the plan's pipeline table (its 하는 일 column), and what was done during it in this session; a step line names its pipeline steps after a dash: `3. Draw the pane — \`render\``
   - a plan picker when there are several plans; buttons to expand each section
 

@@ -36,8 +36,9 @@ export type Plan = {
 export type Stage = { name: string; state: StageState; refs: string[]; role?: string; note?: string }
 
 // What Claude reported about one step of a plan's Suggested path, kept in the mod's own store.
-// What a step reported as its proof when it was done: project files (pictures, results) and/or a command's output.
-export type EvidenceFile = { path: string; size: number; kind: 'image' | 'text' | 'other' }
+// What a step reported as its proof when it was done: project files a person can look at (a picture, a video, a page
+// to open) and/or a command's output. A step with no file stands on the pure functions its plan line names.
+export type EvidenceFile = { path: string; size: number; kind: 'image' | 'video' | 'document' }
 export type Evidence = { files: EvidenceFile[]; output?: string }
 
 // Where a running step's real progress can be seen: a log file in the project and/or a page to open.
@@ -52,6 +53,8 @@ export type StepSignal = {
   startedAt?: number
   evidence?: Evidence
   source?: StepSource
+  // The step said it runs behind the conversation (a step that names a log or a page is such work too).
+  background?: boolean
 }
 
 export type WorkEntry = { tool: string; target: string; at: number }
@@ -116,17 +119,12 @@ export type JobBoard = { jobs: Job[]; extra: number }
 // One line of 'recently finished': when, what, and whether it ended well.
 export type DoneEntry = { at: number; text: string; isOk: boolean }
 
-export type Dreams = { date: string; items: string[]; reportPath: string | null }
-
 // cwd: the project folder the pane reads (the nearest holding scv/); root: the session root it was found from.
-// reportHtml: the dreams report itself, so a viewer on another device can open its own copy.
 // catalog: the project's pure-function dictionary, read with the plans.
 // settingsText · gearsText: the project's SCV settings and gear index as read (undefined in a viewer session, which reads no file).
 // core: where the SCV plugin is installed (null: not found). gearWaits: gear runs waiting for the person's go-ahead.
 export type Snapshot = {
   plans: PlanFile[]
-  dreamsText: string | null
-  reportHtml?: string | null
   cwd: string
   root: string
   catalog?: Catalog
@@ -146,8 +144,8 @@ export type Live = {
   background?: boolean
 }
 
-// more: the cards under '더 보기' (progress, tests, dreams, history) are open
-export type Expanded = { steps: boolean; tests: boolean; blocks: boolean; dreams: boolean; more?: boolean }
+// more: the cards under '더 보기' (progress, tests, history) are open
+export type Expanded = { steps: boolean; tests: boolean; blocks: boolean; more?: boolean }
 
 // A viewer session drawing another session's state: whose, when it last arrived (0: nothing yet) and when it was last asked for.
 // hostAt: the working session's own clock on the newest state taken, so a state that arrives late is dropped.
