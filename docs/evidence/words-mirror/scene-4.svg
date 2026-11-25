@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="858" viewBox="0 0 380 858" font-family="-apple-system, 'Apple SD Gothic Neo', 'Noto Sans KR', 'Malgun Gothic', sans-serif">
+<rect width="380" height="858" fill="#0d1117"/>
+<text x="12.0" y="26.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">SCV 대시보드</text>
+<text x="12.0" y="43.0" font-size="12" fill="#8b949e" text-anchor="start">거울에서: 묻기 방식 → 처음 · 끝에만 묻기 · 09:16</text>
+<rect x="12" y="52.0" width="356" height="64.0" rx="8" fill="#161b22" stroke="#4f8cff"/>
+<text x="22.0" y="74.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">폴더</text>
+<text x="52.0" y="74.0" font-size="12" fill="#8b949e" text-anchor="start">/work</text>
+<text x="22.0" y="100.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">브랜치</text>
+<rect x="64.0" y="86.0" width="54.1" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="91.0" y="100.0" font-size="11" fill="#c9d1d9" text-anchor="middle">main ▾</text>
+<rect x="12" y="126.0" width="356" height="72.0" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="22.0" y="148.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">묻기 방식</text>
+<text x="79.6" y="148.0" font-size="12" fill="#e6edf3" text-anchor="start">처음 · 끝에만 묻기</text>
+<rect x="247.4" y="134.0" width="110.6" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="302.7" y="148.0" font-size="11" fill="#c9d1d9" text-anchor="middle">전부 묻기로 바꾸기</text>
+<text x="22.0" y="170.0" font-size="12" fill="#8b949e" text-anchor="start">처음(요구 · 계획) · 끝(검증) · 되돌릴 수 없는 일만 물음.</text>
+<text x="22.0" y="187.0" font-size="12" fill="#8b949e" text-anchor="start">나머지는 추천대로 하고 끝 보고에 적음</text>
+<rect x="12" y="208.0" width="356" height="193.0" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="22.0" y="226.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">저장해 둔 일(기어) 5</text>
+<text x="22.0" y="243.0" font-size="12" fill="#8b949e" text-anchor="start">하려는 일을 그냥 말해도 맞는 것을 씁니다</text>
+<text x="22.0" y="264.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 시험을 다 돌림</text>
+<rect x="320.0" y="250.0" width="38.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="339.0" y="264.0" font-size="11" fill="#c9d1d9" text-anchor="middle">실행</text>
+<text x="22.0" y="290.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 줄 수를 셈</text>
+<rect x="320.0" y="276.0" width="38.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="339.0" y="290.0" font-size="11" fill="#c9d1d9" text-anchor="middle">실행</text>
+<text x="22.0" y="316.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 바뀐 것을 읽고 판단함</text>
+<rect x="309.0" y="302.0" width="49.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="333.5" y="316.0" font-size="11" fill="#c9d1d9" text-anchor="middle">대화로</text>
+<text x="22.0" y="342.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 태그를 올려 내보냄</text>
+<rect x="320.0" y="328.0" width="38.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="339.0" y="342.0" font-size="11" fill="#c9d1d9" text-anchor="middle">실행</text>
+<text x="22.0" y="368.0" font-size="12" fill="#e6edf3" text-anchor="start">▸ 임시 파일을 치움</text>
+<rect x="320.0" y="354.0" width="38.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="339.0" y="368.0" font-size="11" fill="#c9d1d9" text-anchor="middle">실행</text>
+<text x="22.0" y="390.0" font-size="12" fill="#8b949e" text-anchor="start">묻기 방식을 바꿈 — 다음 메시지부터 처음 · 끝에만 묻기</text>
+<rect x="12" y="411.0" width="356" height="340.0" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="22.0" y="429.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">낱말 사전 3</text>
+<text x="22.0" y="446.0" font-size="12" fill="#8b949e" text-anchor="start">Claude 가 왼쪽 말이나 그 변형을 쓰려 할 때 오른쪽 말로 바꿔</text>
+<text x="22.0" y="463.0" font-size="12" fill="#8b949e" text-anchor="start">씁니다</text>
+<text x="22.0" y="484.0" font-size="12" fill="#e6edf3" text-anchor="start">재다 → 측정하다</text>
+<rect x="254.0" y="470.0" width="49.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="278.5" y="484.0" font-size="11" fill="#c9d1d9" text-anchor="middle">고치기</text>
+<rect x="309.0" y="470.0" width="49.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="333.5" y="484.0" font-size="11" fill="#c9d1d9" text-anchor="middle">지우기</text>
+<text x="36.0" y="506.0" font-size="12" fill="#8b949e" text-anchor="start">잰 · 재서 · 재 본</text>
+<text x="22.0" y="527.0" font-size="12" fill="#e6edf3" text-anchor="start">돌리다 → 실행하다</text>
+<rect x="254.0" y="513.0" width="49.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="278.5" y="527.0" font-size="11" fill="#c9d1d9" text-anchor="middle">고치기</text>
+<rect x="309.0" y="513.0" width="49.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="333.5" y="527.0" font-size="11" fill="#c9d1d9" text-anchor="middle">지우기</text>
+<text x="36.0" y="553.0" font-size="12" fill="#8b949e" text-anchor="start">변형 없음 — Claude 가 채움</text>
+<rect x="195.8" y="539.0" width="49.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="220.3" y="553.0" font-size="11" fill="#c9d1d9" text-anchor="middle">채우기</text>
+<text x="22.0" y="579.0" font-size="12" fill="#e6edf3" text-anchor="start">까먹다 → 잊다</text>
+<rect x="254.0" y="565.0" width="49.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="278.5" y="579.0" font-size="11" fill="#c9d1d9" text-anchor="middle">고치기</text>
+<rect x="309.0" y="565.0" width="49.0" height="20" rx="6" fill="#21262d" stroke="#484f58"/>
+<text x="333.5" y="579.0" font-size="11" fill="#c9d1d9" text-anchor="middle">지우기</text>
+<text x="36.0" y="601.0" font-size="12" fill="#8b949e" text-anchor="start">까먹은 · 까먹어서</text>
+<text x="22.0" y="624.0" font-size="12" fill="#e6edf3" font-weight="600" text-anchor="start">낱말 추가</text>
+<text x="22.0" y="646.0" font-size="11" fill="#8b949e" text-anchor="start">피할 말</text>
+<rect x="66.3" y="631.0" width="291.7" height="22" rx="4" fill="#010409" stroke="#30363d"/>
+<text x="73.3" y="646.0" font-size="11" fill="#6e7681" text-anchor="start">예: 재다</text>
+<text x="22.0" y="676.0" font-size="11" fill="#8b949e" text-anchor="start">바꿀 말</text>
+<rect x="66.3" y="661.0" width="291.7" height="22" rx="4" fill="#010409" stroke="#30363d"/>
+<text x="73.3" y="676.0" font-size="11" fill="#6e7681" text-anchor="start">예: 측정하다</text>
+<text x="22.0" y="706.0" font-size="11" fill="#8b949e" text-anchor="start">변형(쉼표로)</text>
+<rect x="92.0" y="691.0" width="266.0" height="22" rx="4" fill="#010409" stroke="#30363d"/>
+<text x="99.0" y="706.0" font-size="11" fill="#6e7681" text-anchor="start">비워 두면 Claude 가 채움 — 예: 잰, 재서, 재 본</text>
+<rect x="22.0" y="721.0" width="38.0" height="20" rx="6" fill="#1f6feb" stroke="#388bfd"/>
+<text x="41.0" y="735.0" font-size="11" fill="#ffffff" text-anchor="middle">저장</text>
+<text x="12.0" y="769.0" font-size="12" fill="#8b949e" text-anchor="start">이 폴더에 진행 중인 SCV 계획이 없습니다. /scv:promote 로</text>
+<text x="12.0" y="786.0" font-size="12" fill="#8b949e" text-anchor="start">계획을 만들면 여기에 보입니다.</text>
+<text x="12.0" y="803.0" font-size="12" fill="#8b949e" text-anchor="start">확인한 곳: /work/scv/promote</text>
+<line x1="12" y1="814.0" x2="368" y2="814.0" stroke="#30363d" stroke-dasharray="3 3"/>
+<text x="12.0" y="828.0" font-size="10.5" fill="#d2a8ff" text-anchor="start">그림 설명: 작업 세션의 창 — 거울에서 온 묻기 방식 바꾸기를 한 뒤. 맨 위</text>
+<text x="12.0" y="843.0" font-size="10.5" fill="#d2a8ff" text-anchor="start">한 줄이 거울에서 온 일, 기어 칸 아래 한 줄이 그 결과</text>
+</svg>
