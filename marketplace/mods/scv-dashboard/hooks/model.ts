@@ -2151,7 +2151,7 @@ export const wasCleared = (seen: { isEndSeen: boolean; idBefore: string | null; 
 export type ClearKept = { before: number | null; at: number; board: JobBoard }
 
 const CLEAR_KEPT_MS = 2 * 60_000
-const JOB_KINDS: readonly string[] = ['command', 'watch', 'terminal']
+const JOB_KINDS: readonly string[] = ['command', 'watch', 'terminal', 'agent']
 
 // The kept values read back at `at`: null for anything of another shape, and for values kept longer ago than a
 // clear takes (left by a clear that never came — not this conversation's).
@@ -2165,12 +2165,67 @@ export const parseClearKept = (kept: unknown, at: number): ClearKept | null => {
   return { before: typeof one.before === 'number' ? one.before : null, at: one.at, board: { jobs, extra: typeof one.board?.extra === 'number' ? one.board.extra : 0 } }
 }
 
-const JOB_KIND_WORD: Record<Job['kind'], string> = { command: '명령', watch: '감시', terminal: '터미널 탭의 명령' }
+const JOB_KIND_WORD: Record<Job['kind'], string> = { command: '명령', watch: '감시', terminal: '터미널 탭의 명령', agent: '하위 작업' }
+
+// The subagents still running, as jobs for the list kept before a clear: each named by the task it was given, under
+// the agent's id (the id its end notice names).
+export const agentJobs = (agents: readonly AgentState[]): Job[] =>
+  agents.map(agent => ({ id: agent.id, title: agent.name, kind: 'agent', startedAt: agent.at, changedAt: agent.at }))
+
+// The background work the engine named as still in flight when a turn stopped: `now` at the last stop (at `at`),
+// `ever` at any stop so far.
+export type Flight = { ever: string[]; now: string[]; at: number }
+
+const FLIGHT_ROOM = 200
+
+// The flight after a turn stopped at `at`, from the list of in-flight work the engine gave with the stop. A stop
+// that gave no list says nothing: the flight stays as it was.
+export const flightOf = (before: Flight | null, tasks: unknown, at: number): Flight | null => {
+  if (!Array.isArray(tasks)) return before
+  const now = [...new Set(tasks.flatMap(task => (typeof task?.id === 'string' ? [task.id as string] : [])))]
+
+  return { ever: [...(before?.ever ?? []).filter(id => !now.includes(id)), ...now].slice(-FLIGHT_ROOM), now, at }
+}
+
+// One terminal tab as the tab list tells it: isRunning null when the list could not tell.
+export type TabSeen = { id: string; isRunning: boolean | null }
+
+const jsonOf = (text: string): unknown => {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+// The terminal's tabs, read from what the tab list tool answered (rows of tab_id · is_running_command, as the
+// result itself or as JSON in its text). None for an answer of any other shape.
+export const tabsOf = (ran: { result?: unknown; text?: string }): TabSeen[] => {
+  const blocks = Array.isArray(ran.result) ? ran.result.map(block => (typeof block?.text === 'string' ? jsonOf(block.text) : null)) : []
+  const rows = [ran.result, jsonOf(ran.text ?? ''), ...blocks].flatMap(value => (Array.isArray(value) ? value : []))
+
+  return rows.flatMap(row => (typeof row?.tab_id === 'string' ? [{ id: row.tab_id as string, isRunning: typeof row.is_running_command === 'boolean' ? (row.is_running_command as boolean) : null }] : []))
+}
+
+// What can be told, before a clear, about ends nobody heard: the engine's in-flight list (null: it never gave one)
+// and the terminal's tabs (none: not asked, or no answer).
+export type EndFacts = { flight: Flight | null; tabs: readonly TabSeen[] }
+
+// Whether a job is known to have ended. A terminal tab's command: the tab is listed with no command running in it.
+// Any other job: the engine named it in flight at an earlier stop and no longer at the last one, and the job has
+// not moved since that stop. Anything else is not known — a guess takes no job off the list.
+export const hasEnded = (job: Job, facts: EndFacts): boolean =>
+  job.kind === 'terminal'
+    ? facts.tabs.some(tab => `tab:${tab.id}` === job.id && tab.isRunning === false)
+    : facts.flight !== null && facts.flight.ever.includes(job.id) && !facts.flight.now.includes(job.id) && job.changedAt <= facts.flight.at
+
+// The board without the jobs known to have ended: what the conversation after a clear is told of.
+export const stillRunning = (board: JobBoard, facts: EndFacts): JobBoard => ({ jobs: board.jobs.filter(job => !hasEnded(job, facts)), extra: board.extra })
 
 // The work the turns left running, a line each for a conversation that knows nothing of it: what kind it is, its
-// name, and the file its output goes to when it has one.
+// name, the file its output goes to when it has one, and for a subagent the id its end notice names.
 export const jobLines = (board: JobBoard): string[] => [
-  ...board.jobs.map(job => `- ${JOB_KIND_WORD[job.kind]}: ${cutLine(job.title, 200)}${job.output ? ` — 출력 파일 ${job.output}` : ''}`),
+  ...board.jobs.map(job => `- ${JOB_KIND_WORD[job.kind]}: ${cutLine(job.title, 200)}${job.output ? ` — 출력 파일 ${job.output}` : ''}${job.kind === 'agent' ? ` — 알림의 task-id ${job.id}` : ''}`),
   ...(board.extra > 0 ? [`- 그 밖에 ${board.extra}개 — 이름을 적어 두지 못함`] : []),
 ]
 

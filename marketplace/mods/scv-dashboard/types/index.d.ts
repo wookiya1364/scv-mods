@@ -104,10 +104,12 @@ export type Task = { id: string; subject: string; status: 'pending' | 'in_progre
 // Work a turn left running after it ended: a command sent to the background, a watch, or a command started in a
 // terminal tab. output: the file its output goes to (absent for a terminal tab); line, done, total: the last
 // progress line read from it; changedAt: when that file last changed (the start, until it does).
+// kind 'agent': a subagent still running — only in the list kept for the conversation after a clear (the board
+// never holds one); its id is the agent's, which its end notice carries.
 export type Job = {
   id: string
   title: string
-  kind: 'command' | 'watch' | 'terminal'
+  kind: 'command' | 'watch' | 'terminal' | 'agent'
   startedAt: number
   changedAt: number
   output?: string

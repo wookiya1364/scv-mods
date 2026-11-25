@@ -128,6 +128,10 @@ import {
   wasCleared,
   parseClearKept,
   jobsBrief,
+  agentJobs,
+  flightOf,
+  tabsOf,
+  stillRunning,
   paneSections,
   parseLight,
   moveLight,
@@ -164,7 +168,7 @@ import {
   wordsRemoveCommand,
   wordsSaid,
 } from './model'
-import type { AskMode, BranchNow, ClearKept, ConfirmStop, JobEnd, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, WordDraft } from './model'
+import type { AskMode, BranchNow, ClearKept, ConfirmStop, Flight, JobEnd, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, TabSeen, WordDraft } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -227,6 +231,13 @@ const place = atom({ plugin: 'scv-dashboard', key: 'place' } as const, NO_PLACE 
 const branchPick = atom({ plugin: 'scv-dashboard', key: 'branchPick' } as const, null as string[] | null)
 const placeNote = atom({ plugin: 'scv-dashboard', key: 'placeNote' } as const, null as string | null)
 const lightRun = { pending: false, kind: 'summary' as 'records' | 'summary', lastAt: 0, isClearing: false, isCleared: false }
+// The background work the engine named as in flight at the main conversation's stops, as this copy of the module
+// heard it: what tells an end nobody heard, before a clear.
+const flightRun = { seen: null as Flight | null }
+// The terminal's own list of its tabs, which says whether a command runs in each; and what it answered when the
+// main conversation's last turn ended (none: the board held no tab's command then, or there was no answer).
+const TABS_TOOL = 'mcp__terminal__list_terminal_tabs'
+const tabsRun = { seen: [] as TabSeen[] }
 // What a clear of this mod's keeps for the conversation after it, by the folder the session runs in: the store
 // outlasts the session, which goes on under another id (whether this session's state does is not known).
 const clearKey = (cwd: string) => `scv-dashboard:clear:${cwd}`
@@ -277,13 +288,30 @@ const afterClear = async ($: Api): Promise<string | null> => {
   return jobsBrief(kept.board)
 }
 
+// Asks the terminal for its tabs when the board holds a tab's command, as a turn of the main conversation ends —
+// while the turn's own hook runs, where the mod's call is let through without a dialog. No such tool, a refusal or
+// a failure: no tabs are known.
+const readTabs = async ($: Api) => {
+  const hasTab = !(await read($, mirror)) && (await read($, jobs)).jobs.some(job => job.kind === 'terminal')
+  tabsRun.seen = hasTab ? tabsOf(await $.tool.call({ tool: TABS_TOOL } as never).catch(() => ({}))) : []
+}
+
+// The work still running, for the conversation after a clear: the board's jobs and the subagents, without the ones
+// known to have ended — by the engine's in-flight list, and for a terminal tab's command by the terminal's tabs as
+// read when the turn ended. The board itself is not changed.
+const runningBoard = async ($: Api): Promise<JobBoard> => {
+  const board = await read($, jobs)
+
+  return stillRunning({ jobs: [...board.jobs, ...agentJobs(await read($, agents))], extra: board.extra }, { flight: flightRun.seen, tabs: tabsRun.seen })
+}
+
 // Clears the conversation as the person's /clear would. What the new conversation and the pane's line need goes to
 // the store first. True only when a clear was really seen — the command having returned is no proof, and a command
 // that was refused, failed or changed nothing is false (the caller then goes the other way).
 const clearNow = async ($: Api, before: number | null, at: number): Promise<boolean> => {
   const key = clearKey(await $.session.cwd().catch(() => ''))
   const idBefore = await $.session.id().catch(() => null)
-  const kept: ClearKept = { before, at, board: await read($, jobs) }
+  const kept: ClearKept = { before, at, board: await runningBoard($) }
   await $.store.set(key, kept).catch(() => undefined)
   lightRun.isClearing = true
   lightRun.isCleared = false
@@ -1743,6 +1771,7 @@ export const register: Register = on => {
       const count = plan ? countStages(deriveStages(plan).stages) : undefined
       await alert($, buildAlertText(['끝났어요', formatDuration(e.durationMs), plan && count ? `${plan.title} ${count.done}/${count.total}` : null]))
     }
+    await readTabs($).catch(() => undefined)
     // The turn is over: a conversation grown past the mark is made light now, apart from this hook's answer.
     void maybeLighten($).catch(() => {
       lightRun.pending = false
@@ -1750,6 +1779,15 @@ export const register: Register = on => {
     })
 
     return ended
+  })
+
+  // The engine's list of background work still in flight, given when the main conversation's turn stops: kept to
+  // tell, before a clear, the jobs whose end nobody heard. Nothing about the stop itself is changed.
+  on('classic.Stop', async ($, e, next) => {
+    const at = await $.clock.now()
+    flightRun.seen = flightOf(flightRun.seen, e.background_tasks, at)
+
+    return next(e)
   })
 
   // The pass this mod asked for, on the main conversation: SCV's own record stands in for the older part — the
@@ -1800,6 +1838,9 @@ export const register: Register = on => {
 
   // The mod's own phone notification asks no permission; the person's calls to it are judged as ever.
   on('tool.check', { tool: 'PushNotification' }, ($, e, next) => (isOwnCall(next.origin) ? { decision: 'allow' as const } : next(e)))
+
+  // The mod's own look at the terminal's tabs when a turn ends (it runs nothing) asks no permission; the model's is judged as ever.
+  on('tool.check', { tool: TABS_TOOL }, ($, e, next) => (isOwnCall(next.origin) ? { decision: 'allow' as const } : next(e)))
 
   // The mod's own mirror messages ask no permission (auto mode has no verdict for a send nobody typed); the model's are judged as ever.
   on('tool.check', { tool: 'SendMessage' }, ($, e, next) => (isOwnCall(next.origin) ? { decision: 'allow' as const } : next(e)))
@@ -1932,7 +1973,7 @@ export const register: Register = on => {
   }))
 
   on('tool.call', async ($, e, next) => {
-    if (OWN_TOOLS.has(e.tool)) return next(e)
+    if (OWN_TOOLS.has(e.tool) || ((e.tool as string) === TABS_TOOL && isOwnCall(next.origin))) return next(e)
     const input = e as unknown as Record<string, unknown>
     const at = await $.clock.now()
     // The main conversation's tool is the 'now' line; a subagent's goes on that agent's own line.

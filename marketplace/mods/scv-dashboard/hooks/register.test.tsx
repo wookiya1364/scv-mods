@@ -5620,3 +5620,200 @@ test('clear T6 (라) 창에서 돌리던 기어는 이 모드가 돌린 비우�
   expect(await drawnText($)).not.toContain('치운 파일 3개')
   await ui.unmount()
 })
+
+// ── the list kept before a clear: the subagents are on it, the work known to have ended is not ──────────────
+import { agentJobs, flightOf, hasEnded, stillRunning, tabsOf } from './model'
+
+const TABS_TOOL = 'mcp__terminal__list_terminal_tabs'
+// A row of the terminal's tab list, as the desktop app answers it.
+const tabRow = (id: string, isRunning: boolean | null) => ({ tab_id: id, title: `탭 ${id}`, cwd: '/work', opened_by: 'claude', is_running_command: isRunning })
+const SUB = '코어 합치기와 클로드 래퍼 맞춤'
+const inFlight = (id: string, type: string, description: string) => ({ id, type, status: 'running', description })
+const stop = ($: Engine, tasks?: unknown[]) => $.classic.Stop({ stop_hook_active: false, ...(tasks ? { background_tasks: tasks } : {}) } as never)
+const spawnBehind = ($: Engine, description: string) =>
+  $.agent.spawn({ tool_use_id: `u-${description}`, prompt: 'do', description, subagentType: 'general-purpose', parentModel: 'm', background: true, fork: false } as never)
+
+// A turn engine whose tool calls answer like the real ones: a command sent to the background (bg1, bg2 …), a
+// terminal tab per command (c1, c2 …), and the terminal's own tab list (asked: how many times; isDown: no such tool).
+// The session would ask the person before the tab list is read: only a call that is let through reaches it.
+const flightKit = (on: On) => {
+  const kit = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  turnEngine(on)
+  agentEngine(on)
+  on('fs.stat', (_, e) => ({ deny: `ENOENT ${e.path}` }))
+  on('classic.Stop', () => ({}) as never)
+  on('tool.check', (_, e) => ({ decision: e.tool === TABS_TOOL ? ('ask' as const) : ('allow' as const) }))
+  const tabs: ReturnType<typeof tabRow>[] = []
+  const list = { asked: 0, isDown: false }
+  let serial = 0
+  on('tool.call', (_, e) => {
+    const input = e as unknown as Record<string, unknown>
+    if (e.tool === 'Bash' && input.run_in_background === true) {
+      serial += 1
+
+      return { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: `bg${serial}` }, text: BG_TEXT(`bg${serial}`, `/tmp/tasks/bg${serial}.output`) } as never
+    }
+    if (e.tool.endsWith('run_in_terminal')) {
+      tabs.push(tabRow(`c${tabs.length + 1}`, true))
+
+      return { result: {}, text: JSON.stringify({ tab_id: `c${tabs.length}`, cwd: '/work' }) } as never
+    }
+    if (e.tool.endsWith('list_terminal_tabs')) {
+      list.asked += 1
+      if (list.isDown) throw new Error('no such tool')
+
+      return { result: {}, text: JSON.stringify(tabs, null, 2) } as never
+    }
+
+    return { result: {} }
+  })
+
+  return { ...kit, tabs, list }
+}
+
+test('clear T10 순수부 — 하위 작업이 한 줄로 실리고, 끝난 것을 아는 일(끝난 탭 명령 · 끝난 명령)만 빠지고, 모르는 일은 남는다', () => {
+  const at = 1_000_000
+  // what the real app held on 2026-11-25: three tab commands and a command that had ended, a subagent that ran
+  const board: JobBoard = {
+    jobs: [
+      job({ id: 'tab:c66', title: '맥 · 리눅스 검사', kind: 'terminal' }),
+      job({ id: 'tab:c67', title: '실제 세션 두 번', kind: 'terminal' }),
+      job({ id: 'tab:c68', title: '기어 검사', kind: 'terminal' }),
+      job({ id: 'bg7', title: '전체 시험', output: '/tmp/tasks/bg7.output' }),
+    ],
+    extra: 0,
+  }
+  const team = [{ id: 'ag-1', name: SUB, tool: 'Bash', target: 'git merge', at: at + 50_000 }]
+  expect(agentJobs(team)).toEqual([{ id: 'ag-1', title: SUB, kind: 'agent', startedAt: at + 50_000, changedAt: at + 50_000 }])
+  expect(agentJobs([])).toEqual([])
+  const tabs = tabsOf({ text: JSON.stringify([tabRow('c66', false), tabRow('c67', false), tabRow('c68', false)], null, 2) })
+  expect(tabs).toEqual([{ id: 'c66', isRunning: false }, { id: 'c67', isRunning: false }, { id: 'c68', isRunning: false }])
+  // the engine's list at two stops: the command in flight, then the subagent alone
+  const first = flightOf(null, [inFlight('bg7', 'shell', '전체 시험')], at + 10_000)
+  const flight = flightOf(first, [inFlight('ag-1', 'subagent', SUB)], at + 60_000)
+  expect(flight).toEqual({ ever: ['bg7', 'ag-1'], now: ['ag-1'], at: at + 60_000 })
+  const all: JobBoard = { jobs: [...board.jobs, ...agentJobs(team)], extra: 0 }
+  expect(jobLines(stillRunning(all, { flight, tabs }))).toEqual([`- 하위 작업: ${SUB} — 알림의 task-id ag-1`])
+  expect(jobsBrief(stillRunning(all, { flight, tabs }))?.split('\n')).toHaveLength(2)
+  expect(jobsBrief(stillRunning(board, { flight, tabs }))).toBeNull()
+  expect(stillRunning({ jobs: board.jobs, extra: 2 }, { flight, tabs }).extra).toBe(2)
+
+  // nothing known: nothing is taken off
+  expect(stillRunning(all, { flight: null, tabs: [] })).toEqual(all)
+  const facts = { flight, tabs: [...tabs, { id: 'c70', isRunning: true }, { id: 'c71', isRunning: null }] }
+  // a tab's command: only a listed tab with no command running is an end
+  expect(hasEnded(job({ id: 'tab:c66', title: 't', kind: 'terminal' }), facts)).toBe(true)
+  expect(hasEnded(job({ id: 'tab:c70', title: 't', kind: 'terminal' }), facts)).toBe(false)
+  expect(hasEnded(job({ id: 'tab:c71', title: 't', kind: 'terminal' }), facts)).toBe(false)
+  expect(hasEnded(job({ id: 'tab:c99', title: 't', kind: 'terminal' }), facts)).toBe(false)
+  expect(hasEnded(job({ id: 'tab:1000000', title: 't', kind: 'terminal' }), facts)).toBe(false)
+  // any other job: named in flight at an earlier stop, not at the last one, and not moved since
+  expect(hasEnded(job({ id: 'bg7', title: 'c' }), facts)).toBe(true)
+  expect(hasEnded(job({ id: 'bg7', title: 'c', changedAt: at + 60_001 }), facts)).toBe(false)
+  expect(hasEnded(job({ id: 'bash-1000000', title: 'c' }), facts)).toBe(false)
+  expect(hasEnded(job({ id: 'w1', title: 'w', kind: 'watch' }), facts)).toBe(false)
+  expect(hasEnded(job({ id: 'ag-1', title: SUB, kind: 'agent', changedAt: at + 50_000 }), facts)).toBe(false)
+  // a subagent whose end was not heard: named before, gone from the next stop's list
+  const later = flightOf(flight, [], at + 90_000)
+  expect(later).toEqual({ ever: ['bg7', 'ag-1'], now: [], at: at + 90_000 })
+  expect(jobLines(stillRunning(all, { flight: later, tabs }))).toEqual([])
+
+  // a stop that gives no list says nothing; rows without an id are not read
+  expect(flightOf(flight, undefined, at + 99_000)).toBe(flight)
+  expect(flightOf(null, undefined, at)).toBeNull()
+  expect(flightOf(null, [{ id: 7 }, null, inFlight('a', 'shell', ''), inFlight('a', 'shell', '')], at)).toEqual({ ever: ['a'], now: ['a'], at })
+  // the tab list in the shapes a tool answer comes in; anything else is no tab
+  expect(tabsOf({ result: [tabRow('c1', true)] })).toEqual([{ id: 'c1', isRunning: true }])
+  expect(tabsOf({ result: [{ type: 'text', text: JSON.stringify([tabRow('c2', null)]) }] })).toEqual([{ id: 'c2', isRunning: null }])
+  expect(tabsOf({ result: {}, text: 'no tabs' })).toEqual([])
+  expect(tabsOf({})).toEqual([])
+
+  // the kept values hold a subagent's line across the clear
+  const kept = { before: 62, at: 1_000, board: stillRunning(all, { flight, tabs }) }
+  expect(parseClearKept(kept, 2_000)).toEqual(kept)
+})
+
+test('clear T11 비우기 전에 끝난 일은 첫 글에서 빠지고 도는 하위 작업은 실린다 — 끝난 탭 명령 셋 · 끝난 명령 하나 · 도는 하위 작업 하나', async ($, on) => {
+  const kit = flightKit(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { percent: 40, hasTurns: true }
+  const seen = clearEngine($, on, kit, opts)
+  await start($)
+  // morning: three commands in terminal tabs and one in the background; the turn stops with them running
+  await spoken($, '검사 셋과 전체 시험을 돌려 줘')
+  await signal($, 2, 'doing')
+  await $.tool.call({ tool: 'mcp__terminal__run_in_terminal', command: 'bash a.sh', title: '맥 · 리눅스 검사' } as never)
+  await $.tool.call({ tool: 'mcp__terminal__run_in_terminal', command: 'bash b.sh', title: '실제 세션 두 번' } as never)
+  await $.tool.call({ tool: 'mcp__terminal__run_in_terminal', command: 'bash c.sh', title: '기어 검사' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: '전체 시험', run_in_background: true } as never)
+  await stop($, [inFlight('bg1', 'shell', '전체 시험')])
+  await endTurn($)
+  await settle()
+  expect(seen.commands).toEqual([])
+  // the tabs were read as the turn ended (the mod's own call, let through without asking the person)
+  expect(kit.list.asked).toBe(1)
+  // they all end and no end is heard: the tabs stay open with no command in them, no notice reaches the mod
+  for (const tab of kit.tabs) tab.is_running_command = false
+  kit.clock.at += 8 * 3_600_000
+  // evening: a subagent is sent to the background, and the turn stops over the mark with it alone in flight
+  await spoken($, '코어를 합치고 래퍼를 맞춰 줘')
+  await spawnBehind($, SUB)
+  await stop($, [inFlight(`ag-${SUB}`, 'subagent', SUB)])
+  opts.percent = 62
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.firstText).toHaveLength(1)
+  const lines = (seen.firstText[0] ?? '').split('\n')
+  expect(lines[0]?.startsWith('[SCV 뒤에서 도는 일]')).toBe(true)
+  expect(lines.slice(1)).toEqual([`- 하위 작업: ${SUB} — 알림의 task-id ag-${SUB}`])
+  expect(kit.list.asked).toBe(2)
+  // the pane's own list is as it was (only what the new conversation is told changed), and the mod's own looks
+  // at the tabs are not the step's work: the turn's own calls are (the tab commands in a row count once, then Bash)
+  const drawn = await drawnText($)
+  expect(drawn).toContain('뒤에서 도는 일 4')
+  expect(drawn).toContain('▸ 도구 호출 2건')
+  // the model's own call of the tab list is judged as ever
+  expect((await $.tool.check({ tool: TABS_TOOL, input: {} } as never)).decision).toBe('ask')
+})
+
+test('clear T12 끝났는지 모르는 일은 첫 글에 남는다 — 탭 목록을 못 받은 탭 명령 · 엔진이 이름을 부른 적 없는 명령', async ($, on) => {
+  const kit = flightKit(on)
+  withProject(kit)
+  withRecord(kit)
+  const seen = clearEngine($, on, kit, { hasTurns: true })
+  kit.list.isDown = true
+  await start($)
+  await spoken($, '검사와 전체 시험을 돌려 줘')
+  await $.tool.call({ tool: 'mcp__terminal__run_in_terminal', command: 'bash a.sh', title: '맥 · 리눅스 검사' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'npm test', description: '전체 시험', run_in_background: true } as never)
+  // the stop gives no list of work in flight
+  await stop($)
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear'])
+  expect(kit.list.asked).toBe(1)
+  expect((seen.firstText[0] ?? '').split('\n').slice(1)).toEqual(['- 터미널 탭의 명령: 맥 · 리눅스 검사', '- 명령: 전체 시험 — 출력 파일 /tmp/tasks/bg1.output'])
+})
+
+test('clear T13 끝이 들린 하위 작업은 싣지 않고, 탭 명령이 없으면 탭 목록을 묻지 않는다', async ($, on) => {
+  const kit = flightKit(on)
+  withProject(kit)
+  withRecord(kit)
+  const seen = clearEngine($, on, kit, { hasTurns: true })
+  await start($)
+  await spoken($, '둘로 나눠서 해 줘')
+  await spawnBehind($, '문서 고치기')
+  await spawnBehind($, SUB)
+  // the first one's run ends before the turn does
+  await turnEnd($, 'answer', 1, 'ag-문서 고치기')
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear'])
+  expect(kit.list.asked).toBe(0)
+  expect((seen.firstText[0] ?? '').split('\n').slice(1)).toEqual([`- 하위 작업: ${SUB} — 알림의 task-id ag-${SUB}`])
+})
