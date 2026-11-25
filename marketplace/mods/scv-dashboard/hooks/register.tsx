@@ -124,6 +124,10 @@ import {
   lightDue,
   lightMessages,
   lightNote,
+  lightWay,
+  wasCleared,
+  parseClearKept,
+  jobsBrief,
   paneSections,
   parseLight,
   moveLight,
@@ -160,7 +164,7 @@ import {
   wordsRemoveCommand,
   wordsSaid,
 } from './model'
-import type { AskMode, BranchNow, ConfirmStop, JobEnd, LightSettings, Place, RunPlan, StepFunctionView, WordDraft } from './model'
+import type { AskMode, BranchNow, ClearKept, ConfirmStop, JobEnd, LightSettings, Place, RunPlan, StepFunctionView, WordDraft } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -212,7 +216,8 @@ const recentKey = (project: string) => `scv-dashboard:gear-recent:${project}`
 const drawnHint = { name: null as string | null }
 
 // A long conversation made light: the switch and its mark (kept across sessions), what the last pass came to, and
-// the pass under way (pending: this mod asked for it; kind: how it was answered; lastAt: when the last one ended).
+// the pass under way (pending: this mod asked for it; kind: how a compaction was answered; lastAt: when the last one
+// ended; isClearing: the clear command of this mod is out; isCleared: a clear was seen while it was).
 const light = atom({ plugin: 'scv-dashboard', key: 'light' } as const, DEFAULT_LIGHT as LightSettings)
 const lightSaid = atom({ plugin: 'scv-dashboard', key: 'lightSaid' } as const, null as string | null)
 const LIGHT_KEY = 'scv-dashboard:light'
@@ -221,7 +226,10 @@ const place = atom({ plugin: 'scv-dashboard', key: 'place' } as const, NO_PLACE 
 // The branches to pick from, while the person has the branch line open; and what the last change came to.
 const branchPick = atom({ plugin: 'scv-dashboard', key: 'branchPick' } as const, null as string[] | null)
 const placeNote = atom({ plugin: 'scv-dashboard', key: 'placeNote' } as const, null as string | null)
-const lightRun = { pending: false, kind: 'summary' as 'records' | 'summary', lastAt: 0 }
+const lightRun = { pending: false, kind: 'summary' as 'records' | 'summary', lastAt: 0, isClearing: false, isCleared: false }
+// What a clear of this mod's keeps for the conversation after it, by the folder the session runs in: the store
+// outlasts the session, which goes on under another id (whether this session's state does is not known).
+const clearKey = (cwd: string) => `scv-dashboard:clear:${cwd}`
 // What the summarizer is told when the records cannot stand in (no conversation record in this project).
 const LIGHT_INSTRUCTIONS =
   '진행 중인 SCV 계획과 그 단계, 사용자가 정한 것, 아직 남은 일, 바꾼 파일과 돌린 명령의 결과, 기록 파일(scv/conversations)의 자리를 남겨라. 사용자의 요청 문장은 그대로 남겨라.'
@@ -239,20 +247,72 @@ const newestRecord = async ($: Api, cwd: string) => {
   return text ? { path: `${dir}/${first.name}`, text } : null
 }
 
-// When a turn ends: at or over the mark the conversation is made light. The mod runs the compact command as the
-// person would (a compaction this mod raised itself would skip its own hook), and the session.compact hook below
-// answers it from SCV's own record — no model. With no record the engine's summary runs. Never while a turn runs.
+const percentNow = async ($: Api) => {
+  const usage = await $.session.usage().catch(() => undefined)
+
+  return typeof usage?.context?.percent === 'number' ? usage.context.percent : null
+}
+
+// The clear this mod asked for was seen: the pass is over, and the pane says so with how full the conversation
+// was and is. Called where the clear is first seen and again once the command returns (the figure is newer then).
+const sayCleared = async ($: Api, before: number | null, at: number) => {
+  const endedAt = await $.clock.now()
+  const after = await percentNow($)
+  lightRun.pending = false
+  lightRun.lastAt = endedAt
+  await update($, lightSaid, () => lightNote({ kind: 'cleared', before, after, ms: endedAt - at }))
+}
+
+// A conversation starts after a clear. When this mod kept values for it (its own clear, moments ago): the clear is
+// taken as seen, the pane says so, and the work the turns left running comes back as the text to hand the new
+// conversation — null when no work was left, and for a clear this mod kept nothing for (the person's own).
+const afterClear = async ($: Api): Promise<string | null> => {
+  const key = clearKey(await $.session.cwd().catch(() => ''))
+  const kept = parseClearKept(await $.store.get(key).catch(() => undefined), await $.clock.now())
+  if (!kept) return null
+  await $.store.delete(key).catch(() => undefined)
+  lightRun.isCleared = lightRun.isClearing
+  await sayCleared($, kept.before, kept.at)
+
+  return jobsBrief(kept.board)
+}
+
+// Clears the conversation as the person's /clear would. What the new conversation and the pane's line need goes to
+// the store first. True only when a clear was really seen — the command having returned is no proof, and a command
+// that was refused, failed or changed nothing is false (the caller then goes the other way).
+const clearNow = async ($: Api, before: number | null, at: number): Promise<boolean> => {
+  const key = clearKey(await $.session.cwd().catch(() => ''))
+  const idBefore = await $.session.id().catch(() => null)
+  const kept: ClearKept = { before, at, board: await read($, jobs) }
+  await $.store.set(key, kept).catch(() => undefined)
+  lightRun.isClearing = true
+  lightRun.isCleared = false
+  await $.command.run({ command: 'clear' }).catch(() => undefined)
+  const isCleared = wasCleared({ isEndSeen: lightRun.isCleared, idBefore, idAfter: await $.session.id().catch(() => null) })
+  lightRun.isClearing = false
+  lightRun.isCleared = false
+  await $.store.delete(key).catch(() => undefined)
+  if (isCleared) await sayCleared($, before, at)
+
+  return isCleared
+}
+
+// When a turn ends: at or over the mark the conversation is made light. With a conversation record in the project
+// it is cleared (the new conversation starts from the record's end, which SCV's own session-start hook carries).
+// When the clear does not happen, or there is no record, the mod runs the compact command as the person would (a
+// compaction this mod raised itself would skip its own hook), and the session.compact hook below answers it from
+// SCV's own record — no model; with no record the engine's summary runs. Never while a turn runs.
 const maybeLighten = async ($: Api) => {
   if (lightRun.pending || (await read($, mirror))) return
-  const percentNow = async () => {
-    const usage = await $.session.usage().catch(() => undefined)
-
-    return typeof usage?.context?.percent === 'number' ? usage.context.percent : null
-  }
-  const before = await percentNow()
+  const before = await percentNow($)
   const at = await $.clock.now()
-  if (!lightDue(await read($, light), before, (await read($, live)).isWorking, lightRun.lastAt, at)) return
+  const isDue = lightDue(await read($, light), before, (await read($, live)).isWorking, lightRun.lastAt, at)
+  const record = isDue ? await newestRecord($, (await read($, snapshot)).cwd).catch(() => null) : null
+  const way = lightWay(isDue, recordTail(record?.text) !== '')
+  if (way === 'none') return
   lightRun.pending = true
+  const isClearFailed = way === 'clear' && !(await clearNow($, before, at))
+  if (way === 'clear' && !isClearFailed) return void (await refresh($).catch(() => undefined))
   lightRun.kind = 'summary'
   const ran = await $.command
     .run({ command: 'compact', args: LIGHT_INSTRUCTIONS })
@@ -262,8 +322,8 @@ const maybeLighten = async ($: Api) => {
   const endedAt = await $.clock.now()
   lightRun.pending = false
   lightRun.lastAt = endedAt
-  const after = stood ? await percentNow() : null
-  await update($, lightSaid, () => lightNote({ kind: stood ? lightRun.kind : 'skipped', before, after, ms: endedAt - at }))
+  const after = stood ? await percentNow($) : null
+  await update($, lightSaid, () => lightNote({ kind: stood ? lightRun.kind : 'skipped', before, after, ms: endedAt - at, isClearFailed }))
   await refresh($).catch(() => undefined)
 }
 
@@ -1480,11 +1540,27 @@ export const register: Register = on => {
     return started
   })
 
-  // The session ends: a gear still running from the pane is stopped (the module's unloading ends it too).
+  // The session ends: a gear still running from the pane is stopped (the module's unloading ends it too). The clear
+  // this mod asked for is no such end — the process goes on under another id, and the gear with it.
   on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear' && lightRun.isClearing) {
+      lightRun.isCleared = true
+
+      return next(e)
+    }
     for (const name of [...liveRuns.keys()]) await stopGear($, name).catch(() => undefined)
 
     return next(e)
+  })
+
+  // The conversation after a clear this mod asked for: the pane says it was cleared, and the work the turns left
+  // running is handed to the model as context beside what SCV's own hook carries (the record's end) — as context, so
+  // no turn starts by itself. A clear the person typed kept nothing in the store, and nothing is added to it.
+  on('classic.SessionStart', async ($, e, next) => {
+    const started = await next(e)
+    const brief = e.source === 'clear' ? await afterClear($).catch(() => null) : null
+
+    return brief ? { ...started, additionalContext: [...(started.additionalContext ?? []), brief] } : started
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -1670,6 +1746,7 @@ export const register: Register = on => {
     // The turn is over: a conversation grown past the mark is made light now, apart from this hook's answer.
     void maybeLighten($).catch(() => {
       lightRun.pending = false
+      lightRun.isClearing = false
     })
 
     return ended
@@ -2263,7 +2340,7 @@ export const register: Register = on => {
               ) : null}
               {context ? (
                 <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-                  <Text dimColor>{lightState.isOn ? `컨텍스트가 ${lightState.percent}% 를 넘으면 자동으로 요약함 — 비우지 않음` : '대화가 길어져도 그대로 둠'}</Text>
+                  <Text dimColor>{lightState.isOn ? `컨텍스트가 ${lightState.percent}% 를 넘으면 자동으로 비우기 — 기록으로 이어 감` : '대화가 길어져도 그대로 둠'}</Text>
                   <Box flexDirection="row">
                     {hasControls ? [<Button key="light-toggle" label={lightState.isOn ? '끄기' : '켜기'} onPress={() => void switchLight().catch(() => undefined)} />] : []}
                   </Box>
@@ -2272,9 +2349,9 @@ export const register: Register = on => {
               {context && lightState.isOn && hasControls ? (
                 <Box flexDirection="row" gap={1} alignItems="center">
                   <Button key="light-down" label="◀" onPress={() => void stepLight(-LIGHT_STEP).catch(() => undefined)} />
-                  {Svg ? <Svg source={lightBarSvg(lightState.percent, fillNow)} alt={`요약 기준 ${lightState.percent}% · 지금 ${context}`} /> : null}
+                  {Svg ? <Svg source={lightBarSvg(lightState.percent, fillNow)} alt={`비우기 기준 ${lightState.percent}% · 지금 ${context}`} /> : null}
                   <Button key="light-up" label="▶" onPress={() => void stepLight(LIGHT_STEP).catch(() => undefined)} />
-                  <Text dimColor>{`기준 ${lightState.percent}%`}</Text>
+                  <Text dimColor>{`비우기 기준 ${lightState.percent}%`}</Text>
                 </Box>
               ) : null}
               {lightLine ? <Text dimColor>{lightLine}</Text> : null}

@@ -3819,7 +3819,7 @@ test('light T5 창의 한 줄과 끄기 버튼 — 끄면 기준을 넘어도 �
   withUsage($, on, 62, kit)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await drawnText($)).toContain('컨텍스트가 50% 를 넘으면 자동으로 요약함 — 비우지 않음')
+  expect(await drawnText($)).toContain('컨텍스트가 50% 를 넘으면 자동으로 비우기 — 기록으로 이어 감')
   await ui.press({ key: 'light-toggle' })
   expect(await drawnText($)).toContain('대화가 길어져도 그대로 둠')
   expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
@@ -3863,9 +3863,9 @@ test('light T7 기준 막대 — ◀ ▶ 로 5% 씩 옮기고, 옮긴 기준이 
   await ui.press({ key: 'light-up' })
   await ui.press({ key: 'light-up' })
   await ui.press({ key: 'light-up' })
-  expect(await drawnText($)).toContain('컨텍스트가 70% 를 넘으면 자동으로 요약함')
+  expect(await drawnText($)).toContain('컨텍스트가 70% 를 넘으면 자동으로 비우기')
   expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: true, percent: 70 })
-  expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('요약 기준 70% · 지금 62%')
+  expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('비우기 기준 70% · 지금 62%')
   await endTurn($)
   await settle()
   expect(kit.compactions).toHaveLength(0)
@@ -4802,7 +4802,7 @@ test('mirror-press T2 누를 수 있다고 말하지 않은 작업 세션(옛 �
   await ui.unmount()
 })
 
-test('mirror-press T3 거울에서 묻기 방식 · 자동 요약 · 기준 · 브랜치를 누르면 작업 세션으로 ACT 가 가고, 여기서는 아무것도 돌지 않는다', async ($, on) => {
+test('mirror-press T3 거울에서 묻기 방식 · 자동 비우기 · 기준 · 브랜치를 누르면 작업 세션으로 ACT 가 가고, 여기서는 아무것도 돌지 않는다', async ($, on) => {
   const env = await startPresser($, on)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   const ranBefore = env.runs.length
@@ -5013,7 +5013,7 @@ test('mirror-act T1 작업 세션은 시청자의 ACT 를 자기 버튼과 같�
   await actFrom($, { do: 'lightMark', percent: 67 })
   expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 65 })
   expect(lastSent(kit).light).toEqual({ isOn: false, percent: 65 })
-  expect(await drawnText($)).toContain('거울에서: 요약 기준 → 65%')
+  expect(await drawnText($)).toContain('거울에서: 비우기 기준 → 65%')
   expect(kit.sent).toHaveLength(5)
 })
 
@@ -5192,7 +5192,7 @@ test('mirror-act T6 다른 세션을 거울로 보는 세션은 받은 ACT 를 �
   expect(env.store.get('scv-dashboard:light')).toBeUndefined()
 })
 
-test('mirror-act T7 거울을 끄면 이 세션의 칸은 제 값으로 돌아온다 — 받아 둔 요약 기준 · 기어 상태를 쓰지 않는다', async ($, on) => {
+test('mirror-act T7 거울을 끄면 이 세션의 칸은 제 값으로 돌아온다 — 받아 둔 비우기 기준 · 기어 상태를 쓰지 않는다', async ($, on) => {
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, tokens: 80000, percent: 40 }, rateLimits: [] } }) as never)
   const env = await startPresser($, on, { light: { isOn: false, percent: 80 }, paneNote: '작업 세션의 한 줄', gearRuns: { tidy: { startedAt: 1, endedAt: 2, tail: '남의 결과', exitCode: 0, isStopped: false } }, gearOpen: 'tidy' })
   expect(await drawnText($)).toContain('대화가 길어져도 그대로 둠')
@@ -5202,8 +5202,274 @@ test('mirror-act T7 거울을 끄면 이 세션의 칸은 제 값으로 돌아�
   await $.command.run({ command: 'scv-mirror', args: 'stop' } as never)
   const drawn = await drawnText($)
 
-  expect(drawn).toContain('컨텍스트가 60% 를 넘으면 자동으로 요약함')
+  expect(drawn).toContain('컨텍스트가 60% 를 넘으면 자동으로 비우기')
   expect(drawn).not.toContain('작업 세션의 한 줄')
   expect(drawn).not.toContain('남의 결과')
   expect(drawn).not.toContain('여기서 누르면')
+})
+
+// ── after pane 0.5.0: a long conversation is cleared, not summarized ──────────────
+import { jobLines, jobsBrief, lightWay, parseClearKept, wasCleared } from './model'
+
+const CLEAR_KEY = 'scv-dashboard:clear:/work'
+// The engine around a clear. How full the conversation is: `percent`, 3% once it was cleared, 8% once a compaction
+// stood. The clear command, by `clear`: 'runs' — the session ends as a clear and starts anew 1.2 s later, as the
+// engine does it (what the session-start hooks hand the model is kept in firstText); 'refused' — the command is
+// rejected; 'idle' — the command returns and nothing was cleared. The compact command runs a compaction of the
+// main conversation, the person's kind (what the conversation reads as afterwards is kept in replaced).
+// hasTurns: the kit under it already answers the turn's start and end.
+const clearEngine = ($: Engine, on: On, kit: ReturnType<typeof engine>, opts: { percent?: number; clear?: 'runs' | 'refused' | 'idle'; hasTurns?: boolean } = {}) => {
+  const seen = { commands: [] as string[], cleared: 0, compacted: 0, firstText: [] as string[], replaced: [] as { role: string; text: string }[] }
+  on('session.cwd', () => ({ value: '/work' }))
+  on('store.delete', (_, e) => {
+    kit.store.delete(e.key)
+
+    return { value: undefined }
+  })
+  on('session.usage', () => ({ value: { rateLimits: [], context: { percent: seen.cleared > 0 ? 3 : seen.compacted > 0 ? 8 : (opts.percent ?? 62) } } }) as never)
+  if (!opts.hasTurns) turnEngine(on)
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('classic.SessionStart', () => ({}))
+  on('command.run', async (_, e) => {
+    seen.commands.push(e.command)
+    if (e.command === 'clear' && opts.clear === 'refused') throw new Error('the command is refused')
+    if (e.command === 'clear' && opts.clear !== 'idle') {
+      kit.clock.at += 1_200
+      await $.session.end({ reason: 'clear', sessionId: 'local-id', resume: { id: 'local-id' } } as never)
+      seen.cleared += 1
+      const started = await $.classic.SessionStart({ source: 'clear' } as never)
+      seen.firstText.push(...(started.additionalContext ?? []))
+    }
+    if (e.command === 'compact') {
+      const done = (await ($.session as unknown as { compact: (e: unknown) => Promise<unknown> }).compact({ trigger: 'manual', instructions: e.args, messages: SAID })) as { messages?: { role: string; text: string }[] }
+      seen.replaced = done.messages ?? []
+      seen.compacted += 1
+    }
+
+    return { text: '' }
+  })
+
+  return seen
+}
+const withRecord = (kit: ReturnType<typeof engine>) => {
+  kit.extraFiles['scv/conversations'] = [{ name: 'new.md', mtimeMs: 9 }]
+  kit.extra['scv/conversations/new.md'] = RECORD
+}
+
+test('clear T1 순수부 — 어느 길로 갈지 · 비워졌는지 · 맡겨 둔 값 · 남은 일의 줄 · 결과 한 줄', async () => {
+  expect(lightWay(true, true)).toBe('clear')
+  expect(lightWay(true, false)).toBe('summary')
+  expect(lightWay(false, true)).toBe('none')
+  expect(wasCleared({ isEndSeen: true, idBefore: 'a', idAfter: 'a' })).toBe(true)
+  expect(wasCleared({ isEndSeen: false, idBefore: 'a', idAfter: 'b' })).toBe(true)
+  expect(wasCleared({ isEndSeen: false, idBefore: 'a', idAfter: 'a' })).toBe(false)
+  expect(wasCleared({ isEndSeen: false, idBefore: null, idAfter: 'b' })).toBe(false)
+
+  const board: JobBoard = { jobs: [job({ id: 'bg1', title: '측정 128판', output: '/tmp/tasks/bg1.output' }), job({ id: 'w1', title: 'PR 확인 지켜보기', kind: 'watch' }), job({ id: 'tab:c1', title: '서버 띄우기', kind: 'terminal' })], extra: 2 }
+  expect(jobLines(board)).toEqual(['- 명령: 측정 128판 — 출력 파일 /tmp/tasks/bg1.output', '- 감시: PR 확인 지켜보기', '- 터미널 탭의 명령: 서버 띄우기', '- 그 밖에 2개 — 이름을 적어 두지 못함'])
+  expect(jobLines(NO_JOBS)).toEqual([])
+  expect(jobsBrief(NO_JOBS)).toBeNull()
+  expect(jobsBrief(board)?.split('\n')).toHaveLength(5)
+  expect(jobsBrief(board)?.startsWith('[SCV 뒤에서 도는 일]')).toBe(true)
+
+  expect(parseClearKept({ before: 62, at: 1_000, board }, 2_000)).toEqual({ before: 62, at: 1_000, board })
+  expect(parseClearKept({ before: 62, at: 1_000, board }, 1_000 + 3 * 60_000)).toBeNull()
+  expect(parseClearKept(undefined, 2_000)).toBeNull()
+  expect(parseClearKept({ before: '62', at: 1_000, board: { jobs: [{ id: 1 }, board.jobs[1]], extra: 'x' } }, 2_000)).toEqual({ before: null, at: 1_000, board: { jobs: [board.jobs[1]], extra: 0 } })
+
+  expect(lightNote({ kind: 'cleared', before: 62, after: 3, ms: 1200 })).toBe('비움 62% → 3% · 1초')
+  expect(lightNote({ kind: 'cleared', before: 62, after: null, ms: 400 })).toBe('비움 62% · 1초')
+  expect(lightNote({ kind: 'records', before: 62, after: 8, ms: 1200, isClearFailed: true })).toBe('비우지 못해 기록으로 바꿔 끼워 가볍게 함 62% → 8% · 1초')
+  expect(lightNote({ kind: 'summary', before: 62, after: 8, ms: 70_000, isClearFailed: true })).toBe('비우지 못해 요약해서 가볍게 함 62% → 8% · 70초')
+  expect(lightNote({ kind: 'skipped', before: 62, after: null, ms: 1, isClearFailed: true })).toBe('비우지 못했고 기록으로 바꿔 끼우지도 못함 — 다음 턴 끝에 다시 봄')
+  expect(actLabel({ do: 'lightSwitch', isOn: false })).toBe('자동 비우기 → 끔')
+  expect(actLabel({ do: 'lightMark', percent: 65 })).toBe('비우기 기준 → 65%')
+})
+
+test('clear T6 (가) 턴 끝에 기준을 넘으면 비우기 명령이 한 번 돌고 요약 명령은 돌지 않는다 — 창은 비웠다고 적는다', async ($, on) => {
+  const kit = engine(on, { a: plan({ title: '계획 하나', status: 'in_progress', steps: FIVE }) })
+  withProject(kit)
+  withRecord(kit)
+  const seen = clearEngine($, on, kit)
+  await start($)
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear'])
+  expect(kit.compactions).toHaveLength(0)
+  const drawn = await drawnText($)
+  expect(drawn).toContain('비움 62% → 3% · 1초')
+  expect(drawn).not.toContain('비우지 못')
+  expect(kit.store.has(CLEAR_KEY)).toBe(false)
+  // within five minutes of it nothing is tried again, whatever the figure
+  await endTurn($)
+  await settle()
+  expect(seen.commands).toEqual(['clear'])
+})
+
+test('clear T6 (나) 비우기 명령이 거절되면 요약 명령이 한 번 돌아 대화가 기록으로 바뀐다 — 창은 넘어갔다고 적는다', async ($, on) => {
+  const kit = engine(on, { a: plan({ title: '계획 하나', status: 'in_progress', steps: FIVE }) })
+  withProject(kit)
+  withRecord(kit)
+  const seen = clearEngine($, on, kit, { clear: 'refused' })
+  await start($)
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear', 'compact'])
+  expect(seen.cleared).toBe(0)
+  // the mod answered the compaction from SCV's record: the engine's own summary never ran
+  expect(kit.compactions).toHaveLength(0)
+  expect(seen.replaced[0]?.text).toContain('[SCV 이어 하기]')
+  expect(seen.replaced[0]?.text).toContain('## Turn 2')
+  const drawn = await drawnText($)
+  expect(drawn).toContain('비우지 못해 기록으로 바꿔 끼워 가볍게 함 62% → 8% · 1초')
+  expect(drawn).not.toContain('비움 ')
+  expect(kit.store.has(CLEAR_KEY)).toBe(false)
+  expect(seen.firstText).toEqual([])
+})
+
+test('clear T6 (다) 비우기 명령이 돌았다고만 하고 비워지지 않았으면 비웠다고 적지 않는다 — 기록으로 넘어간다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withRecord(kit)
+  const seen = clearEngine($, on, kit, { clear: 'idle' })
+  await start($)
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear', 'compact'])
+  const drawn = await drawnText($)
+  expect(drawn).toContain('비우지 못해 기록으로 바꿔 끼워 가볍게 함 62% → 8%')
+  expect(drawn).not.toContain('비움 ')
+})
+
+test('clear T7 턴이 도는 중 · 기준 아래 · 꺼짐이면 아무것도 돌지 않고, 기록이 없으면 비우지 않고 엔진 요약으로 간다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withRecord(kit)
+  const opts: { percent?: number } = { percent: 40 }
+  const seen = clearEngine($, on, kit, opts)
+  await start($)
+  // under the mark
+  await endTurn($)
+  await settle()
+  expect(seen.commands).toEqual([])
+  // over the mark, a turn of the main conversation running: a subagent's turn ending is not the turn's end
+  opts.percent = 62
+  await $.turn.start({ text: '일해 줘', turnId: 't1' } as never)
+  await turnEnd($, 'answer', 1, 'agent-1')
+  await settle()
+  expect(seen.commands).toEqual([])
+  expect(lightDue(DEFAULT_LIGHT, 62, true, 0, 1)).toBe(false)
+  // switched off
+  kit.store.set('scv-dashboard:light', { isOn: false, percent: 50 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'light-toggle' })
+  await ui.press({ key: 'light-toggle' })
+  await ui.press({ key: 'light-toggle' })
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
+  await endTurn($)
+  await settle()
+  expect(seen.commands).toEqual([])
+  // on again, and no conversation record in the project: no clear — the engine's summary, as before
+  await ui.press({ key: 'light-toggle' })
+  kit.extraFiles['scv/conversations'] = []
+  await endTurn($)
+  await settle()
+  expect(seen.commands).toEqual(['compact'])
+  expect(kit.compactions).toHaveLength(1)
+  expect(await drawnText($)).toContain('요약해서 가볍게 함 62% → 8%')
+  expect(await drawnText($)).not.toContain('비우지 못')
+  await ui.unmount()
+})
+
+test('clear T8 비운 뒤 첫 글에 뒤에서 도는 일이 한 줄씩 실린다 — 남은 일이 없으면 그 묶음이 없고, 기록은 싣지 않는다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const seen = clearEngine($, on, kit, { hasTurns: true })
+  await start($)
+  await spoken($, '측정 돌리고 PR 도 지켜봐 줘')
+  await $.tool.call({ tool: 'Bash', command: 'npm run measure', description: '측정 128판', run_in_background: true } as never)
+  await $.tool.call({ tool: 'Monitor', command: 'gh pr checks 591 --watch', description: 'PR 591 확인 지켜보기' } as never)
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.firstText).toHaveLength(1)
+  const lines = (seen.firstText[0] ?? '').split('\n')
+  expect(lines[0]?.startsWith('[SCV 뒤에서 도는 일]')).toBe(true)
+  expect(lines.slice(1)).toEqual(['- 명령: 측정 128판 — 출력 파일 /tmp/tasks/bg1.output', '- 감시: PR 591 확인 지켜보기'])
+  // SCV's own session-start hook carries the record's end: the mod carries none of it
+  expect(seen.firstText[0]).not.toContain('## Turn')
+  expect(seen.firstText[0]).not.toContain('둘째 요청')
+  expect(await drawnText($)).toContain('비움 62% → 3% · 1초')
+  // a clear the person types afterwards, a compaction, a resume: nothing of the mod's is added
+  expect((await $.classic.SessionStart({ source: 'clear' } as never)).additionalContext ?? []).toEqual([])
+  expect((await $.classic.SessionStart({ source: 'compact' } as never)).additionalContext ?? []).toEqual([])
+  expect((await $.classic.SessionStart({ source: 'resume' } as never)).additionalContext ?? []).toEqual([])
+})
+
+test('clear T8 남은 일 없이 비우면 첫 글에 아무것도 싣지 않는다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const seen = clearEngine($, on, kit, { hasTurns: true })
+  await start($)
+  await spoken($, '고쳐 줘')
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear'])
+  expect(seen.cleared).toBe(1)
+  expect(seen.firstText).toEqual([])
+  expect(await drawnText($)).toContain('비움 62% → 3% · 1초')
+})
+
+test('clear T9 창의 글자가 비우기로 보인다 — 스위치 줄 · 기준 표시 · 한 뒤의 결과 한 줄', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withRecord(kit)
+  clearEngine($, on, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const line = await text(ui, /^컨텍스트가 /)
+  expect(line).toBe('컨텍스트가 50% 를 넘으면 자동으로 비우기 — 기록으로 이어 감')
+  expect(line).not.toContain('요약')
+  expect(await text(ui, /기준 \d+%$/)).toBe('비우기 기준 50%')
+  expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('비우기 기준 50% · 지금 62%')
+  expect(await drawnText($)).not.toContain('요약')
+  await endTurn($)
+  await settle()
+  expect(await text(ui, /^비움 /)).toBe('비움 62% → 3% · 1초')
+  await ui.unmount()
+})
+
+test('clear T6 (라) 창에서 돌리던 기어는 이 모드가 돌린 비우기에 멈추지 않는다 — 사람이 친 비우기에는 전처럼 멈춘다', async ($, on) => {
+  mock.clock(on, { now: 1_000_000 })
+  const kit = directKit(on, true)
+  withRecord(kit)
+  const seen = clearEngine($, on, kit)
+  let open = () => {}
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'gear-open-tidy' })
+  kit.spawnPlans.push({ gate: new Promise<void>(done => (open = done)), after: ['치운 파일 3개\n'], code: 0 })
+  await ui.press({ key: 'gear-run-tidy' })
+  await endTurn($)
+  await settle()
+
+  expect(seen.commands).toEqual(['clear'])
+  expect(kit.spawnEnds.count).toBe(0)
+  expect(await has(ui, 'gear-stop-tidy')).toBe(true)
+  await $.session.end({ reason: 'clear', sessionId: 'local-id', resume: { id: 'local-id' } } as never)
+  await settle()
+  expect(kit.spawnEnds.count).toBe(0)
+  expect(await has(ui, 'gear-stop-tidy')).toBe(false)
+  open()
+  await settle()
+  expect(kit.spawnEnds.count).toBe(1)
+  expect(await drawnText($)).not.toContain('치운 파일 3개')
+  await ui.unmount()
 })

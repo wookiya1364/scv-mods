@@ -1348,9 +1348,9 @@ export const actLabel = (act: MirrorAct): string => {
     case 'askMode':
       return `묻기 방식 → ${askModeView(act.to).name}`
     case 'lightSwitch':
-      return `자동 요약 → ${act.isOn ? '켬' : '끔'}`
+      return `자동 비우기 → ${act.isOn ? '켬' : '끔'}`
     case 'lightMark':
-      return `요약 기준 → ${moveLight(DEFAULT_LIGHT, act.percent).percent}%`
+      return `비우기 기준 → ${moveLight(DEFAULT_LIGHT, act.percent).percent}%`
     case 'gearPress':
       return `기어 실행 — ${act.name}`
     case 'gearSubmit':
@@ -2134,6 +2134,57 @@ const LIGHT_GAP_MS = 5 * 60_000
 export const lightDue = (settings: LightSettings, percent: number | null, isWorking: boolean, lastAt: number, at: number) =>
   settings.isOn && percent !== null && percent >= settings.percent && !isWorking && (lastAt === 0 || at - lastAt >= LIGHT_GAP_MS)
 
+// How a conversation that is due is made light: cleared when SCV has a record the new conversation starts from,
+// the engine's own summary when it has none (a clear would leave nothing), nothing when it is not due.
+export type LightWay = 'clear' | 'summary' | 'none'
+
+export const lightWay = (isDue: boolean, hasRecord: boolean): LightWay => (!isDue ? 'none' : hasRecord ? 'clear' : 'summary')
+
+// Whether a clear really happened: the session was seen to end as a clear, or it goes on under another id. The
+// command having returned is no proof by itself.
+export const wasCleared = (seen: { isEndSeen: boolean; idBefore: string | null; idAfter: string | null }) =>
+  seen.isEndSeen || (seen.idBefore !== null && seen.idAfter !== null && seen.idBefore !== seen.idAfter)
+
+// What is kept in the store before a clear, for the conversation that starts after it: how full the conversation
+// was, when the clear was asked for, and the work the turns left running.
+export type ClearKept = { before: number | null; at: number; board: JobBoard }
+
+const CLEAR_KEPT_MS = 2 * 60_000
+const JOB_KINDS: readonly string[] = ['command', 'watch', 'terminal']
+
+// The kept values read back at `at`: null for anything of another shape, and for values kept longer ago than a
+// clear takes (left by a clear that never came — not this conversation's).
+export const parseClearKept = (kept: unknown, at: number): ClearKept | null => {
+  const one = (kept ?? {}) as { before?: unknown; at?: unknown; board?: { jobs?: unknown; extra?: unknown } }
+  if (typeof one.at !== 'number' || at - one.at > CLEAR_KEPT_MS || at < one.at) return null
+  const jobs = (Array.isArray(one.board?.jobs) ? one.board.jobs : []).filter(
+    (job): job is Job => typeof job?.id === 'string' && typeof job?.title === 'string' && JOB_KINDS.includes(job?.kind),
+  )
+
+  return { before: typeof one.before === 'number' ? one.before : null, at: one.at, board: { jobs, extra: typeof one.board?.extra === 'number' ? one.board.extra : 0 } }
+}
+
+const JOB_KIND_WORD: Record<Job['kind'], string> = { command: '명령', watch: '감시', terminal: '터미널 탭의 명령' }
+
+// The work the turns left running, a line each for a conversation that knows nothing of it: what kind it is, its
+// name, and the file its output goes to when it has one.
+export const jobLines = (board: JobBoard): string[] => [
+  ...board.jobs.map(job => `- ${JOB_KIND_WORD[job.kind]}: ${cutLine(job.title, 200)}${job.output ? ` — 출력 파일 ${job.output}` : ''}`),
+  ...(board.extra > 0 ? [`- 그 밖에 ${board.extra}개 — 이름을 적어 두지 못함`] : []),
+]
+
+// Those lines under a heading, as the first text of the conversation after a clear; null when no work was left
+// (then nothing is carried).
+export const jobsBrief = (board: JobBoard): string | null => {
+  const lines = jobLines(board)
+  if (lines.length === 0) return null
+
+  return [
+    '[SCV 뒤에서 도는 일] 대화를 비우기 전의 턴이 남기고 간 일입니다. 아직 돌고 있을 수 있고, 끝났다는 알림이 이 대화로 올 수 있습니다 — 알림이 오면 아래의 일로 읽으세요. 이 목록만 보고 새 일을 시작하지는 마세요.',
+    ...lines,
+  ].join('\n')
+}
+
 type Said = { role: 'user' | 'assistant'; text: string; toolResults?: readonly unknown[] }
 
 // The last few turns as plain text: what the person wrote and the last thing Claude said in that turn, each cut
@@ -2183,12 +2234,21 @@ export const lightMessages = (brief: string, turns: readonly { role: 'user' | 'a
   [{ role: 'user' as const, text: brief }, { role: 'assistant' as const, text: '기록을 읽었음. 이어서 진행함.' }, ...turns].map(one => ({ ...one, toolUses: [] }))
 
 // The line the pane shows after a pass: how it was done, how full the conversation was and is, and how long it took.
-export const lightNote = (input: { kind: 'records' | 'summary' | 'skipped'; before: number | null; after: number | null; ms: number }) => {
-  if (input.kind === 'skipped') return '가볍게 하지 못함 — 다음 턴 끝에 다시 봄'
+// cleared: the conversation was cleared. records · summary: SCV's record or the engine's summary stands in for the
+// older part — with isClearFailed, after a clear that was tried and did not happen, which the line says first.
+export const lightNote = (input: {
+  kind: 'cleared' | 'records' | 'summary' | 'skipped'
+  before: number | null
+  after: number | null
+  ms: number
+  isClearFailed?: boolean
+}) => {
+  if (input.kind === 'skipped') return input.isClearFailed ? '비우지 못했고 기록으로 바꿔 끼우지도 못함 — 다음 턴 끝에 다시 봄' : '가볍게 하지 못함 — 다음 턴 끝에 다시 봄'
   const size =
     input.before !== null ? ` ${Math.round(input.before)}%${input.after !== null && input.after < input.before ? ` → ${Math.round(input.after)}%` : ''}` : ''
+  const how = input.kind === 'cleared' ? '비움' : `${input.isClearFailed ? '비우지 못해 ' : ''}${input.kind === 'records' ? '기록으로 바꿔 끼워 가볍게 함' : '요약해서 가볍게 함'}`
 
-  return `${input.kind === 'records' ? '기록으로 바꿔 끼워 가볍게 함' : '요약해서 가볍게 함'}${size} · ${Math.max(1, Math.round(input.ms / 1000))}초`
+  return `${how}${size} · ${Math.max(1, Math.round(input.ms / 1000))}초`
 }
 
 // ── the word dictionary (after pane 0.5.0) ─────────────────────────────────────────
