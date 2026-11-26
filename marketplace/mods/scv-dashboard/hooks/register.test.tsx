@@ -242,6 +242,10 @@ const engine = (
     const asked = isGear && e.argv[2] === 'ask' ? asks[e.argv[3] ?? ''] : undefined
     const tag = isGear && e.argv[2] === 'confirm' ? /\[기어 확인 ([0-9a-f]{8}:[0-9]+)\]/.exec(e.argv[4] ?? '')?.[1] : undefined
     const stdout = asked ?? (tag ? `${e.argv[6] === '실행' ? 'GEAR_CONFIRMED' : 'GEAR_DECLINED'}: ${tag}\n` : proc.stdout)
+    // SCV's own settings command writes one key of the project's settings file (when the command ends well)
+    const settingsAt = e.argv[1]?.endsWith('/scripts/settings-set.sh') === true && procEnd.exitCode === 0 ? Object.keys(extra).find(end => end.endsWith('scv/scv_settings.json')) : undefined
+    const [settingsKey, ...settingsValue] = (e.argv[2] ?? '').split('=')
+    if (settingsAt && settingsKey && settingsValue.length > 0) extra[settingsAt] = JSON.stringify({ ...(JSON.parse(extra[settingsAt] ?? '{}') as Record<string, unknown>), [settingsKey]: settingsValue.join('=') })
     return { value: { exitCode: procEnd.exitCode, stdout, stderr: procEnd.stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('session.id', () => ({ value: 'local-id' }))
@@ -3295,6 +3299,8 @@ const withProject = (kit: { extra: Record<string, string> }, opts: { settings?: 
   if (opts.isInstalled !== false) kit.extra['.claude/plugins/installed_plugins.json'] = INSTALLED
 }
 const has = async (ui: { find: (q: { type: 'Button'; key: string }) => Promise<unknown> }, key: string) => Boolean(await ui.find({ type: 'Button', key }))
+// the project's settings file as it stands now (SCV's settings command, answered by the kit, writes its keys)
+const settingsOf = (kit: { extra: Record<string, string> }) => JSON.parse(kit.extra['scv/scv_settings.json'] ?? '{}') as Record<string, string>
 
 test('pane T14 계획이 없어도 컨텍스트 · 사용 한도 · 묻기 방식 · 기어가 나온다', async ($, on) => {
   const kit = engine(on, {})
@@ -3767,9 +3773,9 @@ test('light T1 순수부 — 기준 · 최근 턴 · 기록 끝 · 바꿔 끼울
   const after = lightMessages(brief, lastTurns(said, 1))
   expect(after.map(one => one.role)).toEqual(['user', 'assistant', 'user', 'assistant'])
   expect(after[0]?.text).toBe(brief)
-  expect(lightNote({ kind: 'records', before: 62, after: 8, ms: 1200 })).toBe('기록으로 바꿔 끼워 가볍게 함 62% → 8% · 1초')
-  expect(lightNote({ kind: 'records', before: 62, after: 62, ms: 1200 })).toBe('기록으로 바꿔 끼워 가볍게 함 62% · 1초')
-  expect(lightNote({ kind: 'summary', before: null, after: null, ms: 70_000 })).toBe('요약해서 가볍게 함 · 70초')
+  expect(lightNote({ kind: 'records', before: 62, after: 8, ms: 1200 })).toBe('마지막 줄이기 62% → 8% · 1초 걸림 · 기록으로 바꿈')
+  expect(lightNote({ kind: 'records', before: 62, after: 62, ms: 1200 })).toBe('마지막 줄이기 62% · 1초 걸림 · 기록으로 바꿈')
+  expect(lightNote({ kind: 'summary', before: null, after: null, ms: 70_000 })).toBe('마지막 줄이기 70초 걸림 · 요약함')
   expect(lightNote({ kind: 'skipped', before: 62, after: null, ms: 1 })).toBe('가볍게 하지 못함 — 다음 턴 끝에 다시 봄')
 })
 
@@ -3785,7 +3791,8 @@ test('light T2 턴이 끝날 때 기준을 넘으면 기록으로 바꿔 끼운�
   await settle()
 
   expect(kit.compactions).toHaveLength(0)
-  expect(await drawnText($)).toContain('기록으로 바꿔 끼워 가볍게 함 62% → 8%')
+  expect(await drawnText($)).toContain('"마지막 줄이기"')
+  expect(await drawnText($)).toMatch(/62% → 8% · \d+초 걸림 · (비우지 못해 )?기록으로 바꿈/)
 })
 
 test('light T3 기록이 없으면 자동 요약으로 넘어간다', async ($, on) => {
@@ -3799,7 +3806,7 @@ test('light T3 기록이 없으면 자동 요약으로 넘어간다', async ($, 
   expect(kit.compactions).toHaveLength(1)
   expect(kit.compactions[0]?.trigger).toBe('manual')
   expect(kit.compactions[0]?.instructions).toContain('진행 중인 SCV 계획')
-  expect(await drawnText($)).toContain('요약해서 가볍게 함 62% → 8%')
+  expect(await drawnText($)).toContain('걸림 · 요약함')
 })
 
 test('light T4 기준 아래거나 꺼 두면 아무것도 하지 않는다', async ($, on) => {
@@ -3810,7 +3817,7 @@ test('light T4 기준 아래거나 꺼 두면 아무것도 하지 않는다', as
   await endTurn($)
   await settle()
   expect(kit.compactions).toHaveLength(0)
-  expect(await drawnText($)).not.toContain('가볍게 함 ')
+  expect(await drawnText($)).not.toContain('마지막 줄이기')
 })
 
 test('light T5 창의 한 줄과 끄기 버튼 — 끄면 기준을 넘어도 그대로 두고, 다음 세션에도 남는다', async ($, on) => {
@@ -3819,10 +3826,13 @@ test('light T5 창의 한 줄과 끄기 버튼 — 끄면 기준을 넘어도 �
   withUsage($, on, 62, kit)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await drawnText($)).toContain('컨텍스트가 50% 를 넘으면 자동으로 비우기 — 기록으로 이어 감')
+  expect(await drawnText($)).toContain('"50% 넘으면"')
   await ui.press({ key: 'light-toggle' })
-  expect(await drawnText($)).toContain('대화가 길어져도 그대로 둠')
-  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
+  await settle()
+  expect(await drawnText($)).toContain('"꺼짐"')
+  // kept in the project's settings file, by SCV's own settings command — not in the store
+  expect(settingsOf(kit).SCV_CLEAR_AUTO).toBe('off')
+  expect(kit.store.get('scv-dashboard:light')).toBeUndefined()
   await endTurn($)
   await settle()
   expect(kit.compactions).toHaveLength(0)
@@ -3858,20 +3868,22 @@ test('light T7 기준 막대 — ◀ ▶ 로 5% 씩 옮기고, 옮긴 기준이 
   withUsage($, on, 62, kit)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect(await drawnText($)).toContain('기준 50%')
+  expect(await drawnText($)).toContain('"50% 넘으면"')
   await ui.press({ key: 'light-up' })
   await ui.press({ key: 'light-up' })
   await ui.press({ key: 'light-up' })
   await ui.press({ key: 'light-up' })
-  expect(await drawnText($)).toContain('컨텍스트가 70% 를 넘으면 자동으로 비우기')
-  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: true, percent: 70 })
+  await settle()
+  expect(await drawnText($)).toContain('"70% 넘으면"')
+  expect(settingsOf(kit).SCV_CLEAR_PERCENT).toBe('70')
   expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('비우기 기준 70% · 지금 62%')
   await endTurn($)
   await settle()
   expect(kit.compactions).toHaveLength(0)
   await ui.press({ key: 'light-down' })
   await ui.press({ key: 'light-down' })
-  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: true, percent: 60 })
+  await settle()
+  expect(settingsOf(kit).SCV_CLEAR_PERCENT).toBe('60')
   await endTurn($)
   await settle()
   expect(kit.compactions).toHaveLength(1)
@@ -4934,7 +4946,7 @@ test('mirror-press T3 거울에서 묻기 방식 · 자동 비우기 · 기준 �
   expect(env.store.get('scv-dashboard:light')).toBeUndefined()
   // the mark at the end of its bar: a press changes nothing there, so nothing is sent
   await hostSends($, HOST_STATE({ light: { isOn: true, percent: 95 } }))
-  expect(await drawnText($)).toContain('기준 95%')
+  expect(await drawnText($)).toContain('"95% 넘으면"')
   await ui.press({ key: 'light-up' })
   expect(actsOf(env)).toHaveLength(4)
 
@@ -5156,9 +5168,10 @@ test('mirror-act T1 작업 세션은 시청자의 ACT 를 자기 버튼과 같�
   expect(kit.sent).toHaveLength(3)
 
   await actFrom($, { do: 'lightSwitch', isOn: false })
-  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
+  expect(settingsOf(kit).SCV_CLEAR_AUTO).toBe('off')
   await actFrom($, { do: 'lightMark', percent: 67 })
-  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 65 })
+  expect(settingsOf(kit).SCV_CLEAR_PERCENT).toBe('65')
+  expect(kit.store.get('scv-dashboard:light')).toBeUndefined()
   expect(lastSent(kit).light).toEqual({ isOn: false, percent: 65 })
   expect(await drawnText($)).toContain('거울에서: 비우기 기준 → 65%')
   expect(kit.sent).toHaveLength(5)
@@ -5342,14 +5355,15 @@ test('mirror-act T6 다른 세션을 거울로 보는 세션은 받은 ACT 를 �
 test('mirror-act T7 거울을 끄면 이 세션의 칸은 제 값으로 돌아온다 — 받아 둔 비우기 기준 · 기어 상태를 쓰지 않는다', async ($, on) => {
   on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, tokens: 80000, percent: 40 }, rateLimits: [] } }) as never)
   const env = await startPresser($, on, { light: { isOn: false, percent: 80 }, paneNote: '작업 세션의 한 줄', gearRuns: { tidy: { startedAt: 1, endedAt: 2, tail: '남의 결과', exitCode: 0, isStopped: false } }, gearOpen: 'tidy' })
-  expect(await drawnText($)).toContain('대화가 길어져도 그대로 둠')
+  expect(await drawnText($)).toContain('"꺼짐"')
   expect(await drawnText($)).toContain('남의 결과')
-  env.store.set('scv-dashboard:light', { isOn: true, percent: 60 })
-  withProject(env, { index: DIRECT })
+  // its own project keeps the mark in its settings file: that value comes back, not the store's and not the host's
+  env.store.set('scv-dashboard:light', { isOn: true, percent: 30 })
+  withProject(env, { index: DIRECT, settings: '{"SCV_CLEAR_PERCENT":"60"}' })
   await $.command.run({ command: 'scv-mirror', args: 'stop' } as never)
   const drawn = await drawnText($)
 
-  expect(drawn).toContain('컨텍스트가 60% 를 넘으면 자동으로 비우기')
+  expect(drawn).toContain('"60% 넘으면"')
   expect(drawn).not.toContain('작업 세션의 한 줄')
   expect(drawn).not.toContain('남의 결과')
   expect(drawn).not.toContain('여기서 누르면')
@@ -5447,10 +5461,10 @@ test('clear T1 순수부 — 어느 길로 갈지 · 비워졌는지 · 맡겨 �
   expect(parseClearKept(undefined, 2_000)).toBeNull()
   expect(parseClearKept({ before: '62', at: 1_000, board: { jobs: [{ id: 1 }, board.jobs[1]], extra: 'x' } }, 2_000)).toEqual({ before: null, at: 1_000, board: { jobs: [board.jobs[1]], extra: 0 } })
 
-  expect(lightNote({ kind: 'cleared', before: 62, after: 3, ms: 1200 })).toBe('비움 62% → 3% · 1초')
-  expect(lightNote({ kind: 'cleared', before: 62, after: null, ms: 400 })).toBe('비움 62% · 1초')
-  expect(lightNote({ kind: 'records', before: 62, after: 8, ms: 1200, isClearFailed: true })).toBe('비우지 못해 기록으로 바꿔 끼워 가볍게 함 62% → 8% · 1초')
-  expect(lightNote({ kind: 'summary', before: 62, after: 8, ms: 70_000, isClearFailed: true })).toBe('비우지 못해 요약해서 가볍게 함 62% → 8% · 70초')
+  expect(lightNote({ kind: 'cleared', before: 62, after: 3, ms: 1200 })).toBe('마지막 비우기 62% → 3% · 1초 걸림')
+  expect(lightNote({ kind: 'cleared', before: 62, after: null, ms: 400 })).toBe('마지막 비우기 62% 일 때 · 1초 걸림')
+  expect(lightNote({ kind: 'records', before: 62, after: 8, ms: 1200, isClearFailed: true })).toBe('마지막 줄이기 62% → 8% · 1초 걸림 · 비우지 못해 기록으로 바꿈')
+  expect(lightNote({ kind: 'summary', before: 62, after: 8, ms: 70_000, isClearFailed: true })).toBe('마지막 줄이기 62% → 8% · 70초 걸림 · 비우지 못해 요약함')
   expect(lightNote({ kind: 'skipped', before: 62, after: null, ms: 1, isClearFailed: true })).toBe('비우지 못했고 기록으로 바꿔 끼우지도 못함 — 다음 턴 끝에 다시 봄')
   expect(actLabel({ do: 'lightSwitch', isOn: false })).toBe('자동 비우기 → 끔')
   expect(actLabel({ do: 'lightMark', percent: 65 })).toBe('비우기 기준 → 65%')
@@ -5468,7 +5482,7 @@ test('clear T6 (가) 턴 끝에 기준을 넘으면 비우기 명령이 한 번 
   expect(seen.commands).toEqual(['clear'])
   expect(kit.compactions).toHaveLength(0)
   const drawn = await drawnText($)
-  expect(drawn).toContain('비움 62% → 3% · 1초')
+  expect(drawn).toContain('62% → 3% · 1초 걸림')
   expect(drawn).not.toContain('비우지 못')
   expect(kit.store.has(CLEAR_KEY)).toBe(false)
   // within five minutes of it nothing is tried again, whatever the figure
@@ -5493,8 +5507,8 @@ test('clear T6 (나) 비우기 명령이 거절되면 요약 명령이 한 번 �
   expect(seen.replaced[0]?.text).toContain('[SCV 이어 하기]')
   expect(seen.replaced[0]?.text).toContain('## Turn 2')
   const drawn = await drawnText($)
-  expect(drawn).toContain('비우지 못해 기록으로 바꿔 끼워 가볍게 함 62% → 8% · 1초')
-  expect(drawn).not.toContain('비움 ')
+  expect(drawn).toContain('62% → 8% · 1초 걸림 · 비우지 못해 기록으로 바꿈')
+  expect(drawn).not.toContain('마지막 비우기')
   expect(kit.store.has(CLEAR_KEY)).toBe(false)
   expect(seen.firstText).toEqual([])
 })
@@ -5510,8 +5524,8 @@ test('clear T6 (다) 비우기 명령이 돌았다고만 하고 비워지지 않
 
   expect(seen.commands).toEqual(['clear', 'compact'])
   const drawn = await drawnText($)
-  expect(drawn).toContain('비우지 못해 기록으로 바꿔 끼워 가볍게 함 62% → 8%')
-  expect(drawn).not.toContain('비움 ')
+  expect(drawn).toContain('걸림 · 비우지 못해 기록으로 바꿈')
+  expect(drawn).not.toContain('마지막 비우기')
 })
 
 test('clear T7 턴이 도는 중 · 기준 아래 · 꺼짐이면 아무것도 돌지 않고, 기록이 없으면 비우지 않고 엔진 요약으로 간다', async ($, on) => {
@@ -5533,12 +5547,12 @@ test('clear T7 턴이 도는 중 · 기준 아래 · 꺼짐이면 아무것도 �
   expect(seen.commands).toEqual([])
   expect(lightDue(DEFAULT_LIGHT, 62, true, 0, 1)).toBe(false)
   // switched off
-  kit.store.set('scv-dashboard:light', { isOn: false, percent: 50 })
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'light-toggle' })
   await ui.press({ key: 'light-toggle' })
   await ui.press({ key: 'light-toggle' })
-  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: false, percent: 50 })
+  await settle()
+  expect(settingsOf(kit).SCV_CLEAR_AUTO).toBe('off')
   await endTurn($)
   await settle()
   expect(seen.commands).toEqual([])
@@ -5549,7 +5563,7 @@ test('clear T7 턴이 도는 중 · 기준 아래 · 꺼짐이면 아무것도 �
   await settle()
   expect(seen.commands).toEqual(['compact'])
   expect(kit.compactions).toHaveLength(1)
-  expect(await drawnText($)).toContain('요약해서 가볍게 함 62% → 8%')
+  expect(await drawnText($)).toContain('걸림 · 요약함')
   expect(await drawnText($)).not.toContain('비우지 못')
   await ui.unmount()
 })
@@ -5574,7 +5588,7 @@ test('clear T8 비운 뒤 첫 글에 뒤에서 도는 일이 한 줄씩 실린�
   // SCV's own session-start hook carries the record's end: the mod carries none of it
   expect(seen.firstText[0]).not.toContain('## Turn')
   expect(seen.firstText[0]).not.toContain('둘째 요청')
-  expect(await drawnText($)).toContain('비움 62% → 3% · 1초')
+  expect(await drawnText($)).toContain('62% → 3% · 1초 걸림')
   // a clear the person types afterwards, a compaction, a resume: nothing of the mod's is added
   expect((await $.classic.SessionStart({ source: 'clear' } as never)).additionalContext ?? []).toEqual([])
   expect((await $.classic.SessionStart({ source: 'compact' } as never)).additionalContext ?? []).toEqual([])
@@ -5594,7 +5608,7 @@ test('clear T8 남은 일 없이 비우면 첫 글에 아무것도 싣지 않는
   expect(seen.commands).toEqual(['clear'])
   expect(seen.cleared).toBe(1)
   expect(seen.firstText).toEqual([])
-  expect(await drawnText($)).toContain('비움 62% → 3% · 1초')
+  expect(await drawnText($)).toContain('62% → 3% · 1초 걸림')
 })
 
 test('clear T9 창의 글자가 비우기로 보인다 — 스위치 줄 · 기준 표시 · 한 뒤의 결과 한 줄', async ($, on) => {
@@ -5604,15 +5618,18 @@ test('clear T9 창의 글자가 비우기로 보인다 — 스위치 줄 · 기�
   clearEngine($, on, kit)
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  const line = await text(ui, /^컨텍스트가 /)
-  expect(line).toBe('컨텍스트가 50% 를 넘으면 자동으로 비우기 — 기록으로 이어 감')
-  expect(line).not.toContain('요약')
-  expect(await text(ui, /기준 \d+%$/)).toBe('비우기 기준 50%')
+  expect(await text(ui, /^자동 비우기$/)).toBe('자동 비우기')
+  expect(await text(ui, /넘으면$/)).toBe('50% 넘으면')
+  // the words before 0.6.2 are gone: the long line, and the mark said a second time beside the bar
+  expect(await text(ui, /^컨텍스트가 /)).toBeUndefined()
+  expect(await text(ui, /^비우기 기준 /)).toBeUndefined()
   expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('비우기 기준 50% · 지금 62%')
   expect(await drawnText($)).not.toContain('요약')
   await endTurn($)
   await settle()
-  expect(await text(ui, /^비움 /)).toBe('비움 62% → 3% · 1초')
+  expect(await text(ui, /^마지막 비우기$/)).toBe('마지막 비우기')
+  expect(await text(ui, /걸림$/)).toBe('62% → 3% · 1초 걸림')
+  expect(await text(ui, /^비움 /)).toBeUndefined()
   await ui.unmount()
 })
 
@@ -6096,4 +6113,141 @@ test('remote T5 · T6 · T7 비운 뒤 자기 명령의 출력 줄은 줄인 직
   expect(stored[0]).toContain(`── 직전 대화 2 / 2 ──\n나: 요청 2\n\nClaude: ${'앞'.repeat(150)}\n…\n${'끝'.repeat(150)}`)
   expect(stored[0]).not.toContain('중')
   expect(stored[1]).toBe('<local-command-stdout>비용 줄</local-command-stdout>')
+})
+
+// ── pane 0.6.2: the auto-clear switch and its mark are the project's own (its settings file) · the card's words ──
+import { LIGHT_AUTO_KEY, LIGHT_PERCENT_KEY, lightFromSettings, lightLabel, lightSaidParts, lightSaveArgv } from './model'
+
+const settingsRuns = (kit: { runs: { argv: string[]; cwd?: string }[] }) => kit.runs.filter(one => one.argv[1]?.endsWith('/scripts/settings-set.sh'))
+const ON_50 = { isOn: true, percent: 50 }
+
+test('mark T1 · T2 · T3 설정 글에서 기준과 켜짐을 읽는다 — 값이 없거나 틀리면 켜짐 · 50%, 설정 글이 없으면 없음', async () => {
+  expect(lightFromSettings('{"SCV_CLEAR_PERCENT":"65","SCV_CLEAR_AUTO":"off"}')).toEqual({ isOn: false, percent: 65 })
+  expect(lightFromSettings('{"SCV_CLEAR_PERCENT":70}')).toEqual({ isOn: true, percent: 70 })
+  for (const text of ['{"SCV_LANG":"korean"}', '{"SCV_CLEAR_PERCENT":"300"}', '{"SCV_CLEAR_PERCENT":"abc"}', '{"SCV_CLEAR_PERCENT":"","SCV_CLEAR_AUTO":"on"}']) expect(lightFromSettings(text)).toEqual(ON_50)
+  for (const text of [null, undefined, '', 'not json', '[]']) expect(lightFromSettings(text)).toBeNull()
+  // the two keys, the command that writes the one that changed, and the words beside '자동 비우기'
+  expect([LIGHT_PERCENT_KEY, LIGHT_AUTO_KEY]).toEqual(['SCV_CLEAR_PERCENT', 'SCV_CLEAR_AUTO'])
+  expect(lightSaveArgv('/core', ON_50, { isOn: true, percent: 65 })).toEqual([['bash', '/core/scripts/settings-set.sh', 'SCV_CLEAR_PERCENT=65']])
+  expect(lightSaveArgv('/core', ON_50, { isOn: false, percent: 50 })).toEqual([['bash', '/core/scripts/settings-set.sh', 'SCV_CLEAR_AUTO=off']])
+  expect(lightSaveArgv('/core', { isOn: false, percent: 50 }, { isOn: true, percent: 55 }).map(one => one[2])).toEqual(['SCV_CLEAR_PERCENT=55', 'SCV_CLEAR_AUTO=on'])
+  expect(lightSaveArgv('/core', ON_50, ON_50)).toEqual([])
+  expect(lightLabel(ON_50)).toBe('50% 넘으면')
+  expect(lightLabel({ isOn: false, percent: 50 })).toBe('꺼짐')
+})
+
+test('mark T4 · T5 ▶ 와 끄기는 SCV 의 설정 명령으로 프로젝트 설정 파일에 쓴다 — 보관 칸에는 쓰지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'light-up' })
+  await settle()
+  expect(settingsRuns(kit).map(one => one.argv)).toEqual([['bash', `${CORE_DIR}/scripts/settings-set.sh`, 'SCV_CLEAR_PERCENT=55']])
+  expect(settingsRuns(kit)[0]?.cwd).toBe('/work')
+  expect(await text(ui, /넘으면$/)).toBe('55% 넘으면')
+  await ui.press({ key: 'light-toggle' })
+  await settle()
+  expect(settingsRuns(kit).at(-1)?.argv[2]).toBe('SCV_CLEAR_AUTO=off')
+  expect(await text(ui, /^꺼짐$/)).toBe('꺼짐')
+  expect(await labelOf(ui, 'light-toggle')).toBe('켜기')
+  expect(await has(ui, 'light-up')).toBe(false)
+  // the file holds both, its other key is as it was, and the store was never written
+  expect(settingsOf(kit)).toEqual({ SCV_LANG: 'korean', SCV_CLEAR_PERCENT: '55', SCV_CLEAR_AUTO: 'off' })
+  expect(kit.store.get('scv-dashboard:light')).toBeUndefined()
+  await ui.unmount()
+})
+
+test('mark T6 · T7 세션이 시작되면 설정 파일의 값이 보인다 — 값이 없는 프로젝트는 보관 칸의 값이 아니라 50%', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { settings: '{"SCV_CLEAR_PERCENT":"70"}' })
+  kit.store.set('scv-dashboard:light', { isOn: false, percent: 15 })
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /넘으면$/)).toBe('70% 넘으면')
+  // the file changed under the session (another session's press, an edit by hand): the next reading follows it
+  kit.extra['scv/scv_settings.json'] = '{"SCV_LANG":"korean"}'
+  await endTurn($)
+  await settle()
+  expect(await text(ui, /넘으면$/)).toBe('50% 넘으면')
+  await ui.unmount()
+})
+
+test('mark T8 설정 파일이 없는 폴더는 전처럼 보관 칸을 쓴다', async ($, on) => {
+  const kit = engine(on, {})
+  kit.store.set('scv-dashboard:light', { isOn: true, percent: 60 })
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /넘으면$/)).toBe('60% 넘으면')
+  await ui.press({ key: 'light-up' })
+  await settle()
+  expect(await text(ui, /넘으면$/)).toBe('65% 넘으면')
+  expect(settingsRuns(kit)).toHaveLength(0)
+  expect(kit.store.get('scv-dashboard:light')).toEqual({ isOn: true, percent: 65 })
+  await ui.unmount()
+})
+
+test('mark T9 기다리지 않고 세 번 눌러도 마지막 값이 파일에 남고, 다시 읽어도 옛 값으로 돌아가지 않는다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await Promise.all([ui.press({ key: 'light-up' }), ui.press({ key: 'light-up' }), ui.press({ key: 'light-up' })])
+  await settle()
+  expect(settingsRuns(kit).at(-1)?.argv[2]).toBe('SCV_CLEAR_PERCENT=65')
+  expect(settingsOf(kit).SCV_CLEAR_PERCENT).toBe('65')
+  await endTurn($)
+  await settle()
+  expect(await text(ui, /넘으면$/)).toBe('65% 넘으면')
+  await ui.unmount()
+})
+
+test('mark T10 설정 쓰기가 실패하면 칸에 알리고, 다시 읽으면 파일의 값으로 돌아간다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  kit.procEnd.exitCode = 1
+  await ui.press({ key: 'light-up' })
+  await settle()
+  expect(await text(ui, /^설정 파일에 /)).toBe('설정 파일에 저장하지 못함 — 다시 눌러 주세요')
+  expect(settingsOf(kit).SCV_CLEAR_PERCENT).toBeUndefined()
+  expect(kit.store.get('scv-dashboard:light')).toBeUndefined()
+  kit.procEnd.exitCode = 0
+  await endTurn($)
+  await settle()
+  expect(await text(ui, /넘으면$/)).toBe('50% 넘으면')
+  await ui.unmount()
+})
+
+test('mark T12 비운 결과 줄 — 이름과 값으로 나뉘고, 이름이 없는 글은 값만이다', async () => {
+  expect(lightSaidParts('마지막 비우기 62% → 3% · 1초 걸림')).toEqual({ name: '마지막 비우기', value: '62% → 3% · 1초 걸림' })
+  expect(lightSaidParts('마지막 줄이기 62% → 8% · 1초 걸림 · 기록으로 바꿈')).toEqual({ name: '마지막 줄이기', value: '62% → 8% · 1초 걸림 · 기록으로 바꿈' })
+  expect(lightSaidParts('가볍게 하지 못함 — 다음 턴 끝에 다시 봄')).toEqual({ name: null, value: '가볍게 하지 못함 — 다음 턴 끝에 다시 봄' })
+  // a line from a session on an older pane is drawn as it came
+  expect(lightSaidParts('비움 50% · 1초')).toEqual({ name: null, value: '비움 50% · 1초' })
+})
+
+test('mark T13 거울에서 누르면 거울 세션은 파일을 쓰지 않고, 작업 세션이 자기 프로젝트의 설정 파일에 쓴다', async ($, on) => {
+  const kit = await hostKit($, on)
+  await actFrom($, { do: 'lightMark', percent: 65 })
+  await settle()
+  expect(settingsRuns(kit).map(one => one.argv[2])).toEqual(['SCV_CLEAR_PERCENT=65'])
+  expect(lastSent(kit).light).toEqual({ isOn: true, percent: 65 })
+})
+
+test('mark T13 (거울 쪽) 거울 세션의 ▶ 는 요청만 보낸다 — 설정 명령은 돌지 않는다', async ($, on) => {
+  on('session.usage', () => ({ value: { startedAt: 0, context: { window: 200000, tokens: 80000, percent: 40 }, rateLimits: [] } }) as never)
+  const env = await startPresser($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'light-up' })
+  await settle()
+  expect(actsOf(env).at(-1)).toBe('{"do":"lightMark","percent":55}')
+  expect(settingsRuns(env)).toHaveLength(0)
+  await ui.unmount()
 })

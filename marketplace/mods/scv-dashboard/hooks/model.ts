@@ -2069,6 +2069,39 @@ export const moveLight = (settings: LightSettings, percent: number): LightSettin
   percent: Math.min(LIGHT_MAX, Math.max(LIGHT_MIN, Math.round(percent / LIGHT_STEP) * LIGHT_STEP)),
 })
 
+// After 0.6.1 the switch and its mark are a project's own: two keys of its SCV settings file, read again each
+// time the pane reads the project, so a cleared conversation and a new session find what the person set.
+export const LIGHT_PERCENT_KEY = 'SCV_CLEAR_PERCENT'
+export const LIGHT_AUTO_KEY = 'SCV_CLEAR_AUTO'
+
+// The switch and its mark as the settings text holds them. A key that is missing or of another shape is the
+// default (on, at 50%). null: there is no settings text to read (not an SCV project), so the store's value stands.
+export const lightFromSettings = (settingsText: string | null | undefined): LightSettings | null => {
+  if (!settingsText) return null
+  try {
+    const one = JSON.parse(settingsText) as Record<string, unknown> | null
+    if (!one || typeof one !== 'object' || Array.isArray(one)) return null
+    const mark = one[LIGHT_PERCENT_KEY]
+    const auto = one[LIGHT_AUTO_KEY]
+
+    return parseLight({
+      isOn: !(typeof auto === 'string' && auto.trim().toLowerCase() === 'off'),
+      percent: typeof mark === 'number' ? mark : typeof mark === 'string' && mark.trim() !== '' ? Number(mark) : Number.NaN,
+    })
+  } catch {
+    return null
+  }
+}
+
+// SCV's own settings command for each of the two values that changed, the mark first: nothing when neither did.
+export const lightSaveArgv = (core: string, was: LightSettings, next: LightSettings): string[][] => [
+  ...(was.percent !== next.percent ? [['bash', `${core}/scripts/settings-set.sh`, `${LIGHT_PERCENT_KEY}=${next.percent}`]] : []),
+  ...(was.isOn !== next.isOn ? [['bash', `${core}/scripts/settings-set.sh`, `${LIGHT_AUTO_KEY}=${next.isOn ? 'on' : 'off'}`]] : []),
+]
+
+// What the pane says beside '자동 비우기': where the mark stands, or that the switch is off.
+export const lightLabel = (settings: LightSettings) => (settings.isOn ? `${settings.percent}% 넘으면` : '꺼짐')
+
 // The bar as a picture: the filled part is how full the conversation is now (red once it is at the mark), the
 // knob is where the mark stands.
 export const lightBarSvg = (mark: number, fill: number | null, width = 180, height = 18): string => {
@@ -2368,6 +2401,9 @@ export const resumeBrief = (input: { recordPath: string; tail: string; plans: re
 export const lightMessages = (brief: string, turns: readonly { role: 'user' | 'assistant'; text: string }[]) =>
   [{ role: 'user' as const, text: brief }, { role: 'assistant' as const, text: '기록을 읽었음. 이어서 진행함.' }, ...turns].map(one => ({ ...one, toolUses: [] }))
 
+// The names a pass's line starts with: a clear, and a pass that put a record or a summary in the older part's place.
+export const LIGHT_SAID_NAMES = ['마지막 비우기', '마지막 줄이기'] as const
+
 // The line the pane shows after a pass: how it was done, how full the conversation was and is, and how long it took.
 // cleared: the conversation was cleared. records · summary: SCV's record or the engine's summary stands in for the
 // older part — with isClearFailed, after a clear that was tried and did not happen, which the line says first.
@@ -2380,10 +2416,25 @@ export const lightNote = (input: {
 }) => {
   if (input.kind === 'skipped') return input.isClearFailed ? '비우지 못했고 기록으로 바꿔 끼우지도 못함 — 다음 턴 끝에 다시 봄' : '가볍게 하지 못함 — 다음 턴 끝에 다시 봄'
   const size =
-    input.before !== null ? ` ${Math.round(input.before)}%${input.after !== null && input.after < input.before ? ` → ${Math.round(input.after)}%` : ''}` : ''
-  const how = input.kind === 'cleared' ? '비움' : `${input.isClearFailed ? '비우지 못해 ' : ''}${input.kind === 'records' ? '기록으로 바꿔 끼워 가볍게 함' : '요약해서 가볍게 함'}`
+    input.before === null
+      ? null
+      : input.after !== null && input.after < input.before
+        ? `${Math.round(input.before)}% → ${Math.round(input.after)}%`
+        : input.kind === 'cleared'
+          ? `${Math.round(input.before)}% 일 때`
+          : `${Math.round(input.before)}%`
+  const took = `${Math.max(1, Math.round(input.ms / 1000))}초 걸림`
+  const how = input.kind === 'cleared' ? null : `${input.isClearFailed ? '비우지 못해 ' : ''}${input.kind === 'records' ? '기록으로 바꿈' : '요약함'}`
 
-  return `${how}${size} · ${Math.max(1, Math.round(input.ms / 1000))}초`
+  return `${input.kind === 'cleared' ? LIGHT_SAID_NAMES[0] : LIGHT_SAID_NAMES[1]} ${[size, took, how].filter(one => one !== null).join(' · ')}`
+}
+
+// A pass's line as the pane draws it: its name (drawn as the other rows' names are) and the rest. A line with no
+// such name — a pass that did not happen, a line from a session on an older pane — is all value.
+export const lightSaidParts = (text: string): { name: string | null; value: string } => {
+  const name = LIGHT_SAID_NAMES.find(one => text.startsWith(`${one} `))
+
+  return name ? { name, value: text.slice(name.length + 1) } : { name: null, value: text }
 }
 
 // ── the word dictionary (after pane 0.5.0) ─────────────────────────────────────────
