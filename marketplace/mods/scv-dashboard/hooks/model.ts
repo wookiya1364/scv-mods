@@ -2264,6 +2264,9 @@ export const lastTurns = (messages: readonly Said[], turns = 3, max = 1500): { r
 export type Talk = { user: string; answer: string }
 
 const TALK_ROOM = 3
+const TALK_SIDE = 150
+const NOT_TYPED = '(입력 없이 시작한 턴 — 일이 끝났다는 알림 등)'
+const NO_ANSWER = '(답 글 없음)'
 const MACHINE_TEXT = /^<[a-z][a-z-]*>/
 
 // What a turn began with, as the person's own words: none when nothing was typed, or when a machine wrote the text
@@ -2282,7 +2285,7 @@ export const talkNotices = (talks: readonly Talk[], recordPath: string | null): 
     : [
         `[SCV] 대화를 비웠습니다. 비우기 전 마지막 대화 ${talks.length}개를 아래에 다시 보입니다 — Claude 는 이 글을 읽지 않고, 기록을 따로 받았습니다.${recordPath ? ` 전체 기록: ${recordPath}` : ''}`,
         ...talks.map((talk, index) =>
-          [`── 직전 대화 ${index + 1} / ${talks.length} ──`, `나: ${talk.user || '(입력 없이 시작한 턴 — 일이 끝났다는 알림 등)'}`, '', `Claude: ${talk.answer || '(답 글 없음)'}`].join('\n'),
+          [`── 직전 대화 ${index + 1} / ${talks.length} ──`, `나: ${talk.user || NOT_TYPED}`, '', `Claude: ${talk.answer || NO_ANSWER}`].join('\n'),
         ),
       ]
 
@@ -2292,6 +2295,27 @@ export const talkNotices = (talks: readonly Talk[], recordPath: string | null): 
 export const TALK_COMMAND = 'scv-last-talk'
 export const TALK_STORED = '[SCV] 비우기 전 마지막 대화를 화면에 다시 보였습니다 — 표시용 줄이며 할 일이 아닙니다.'
 export const NO_TALK = '[SCV] 다시 보일 직전 대화가 없습니다.'
+
+// A long text with its middle left out: the first and the last `room` characters, an ellipsis line between. A text of
+// up to twice the room is whole.
+export const trimTalk = (text: string, room = TALK_SIDE): string => {
+  const letters = Array.from(text)
+
+  return letters.length <= room * 2 ? text : `${letters.slice(0, room).join('')}\n…\n${letters.slice(-room).join('')}`
+}
+
+// What the conversation stores for the output row of this mod's command, the part every other screen and the model
+// read: one plain line that says it is for show, then every remembered exchange with each side trimmed. The one
+// plain line alone when no exchange is remembered.
+export const storedTalkPage = (talks: readonly Talk[]): string =>
+  talks.length === 0
+    ? TALK_STORED
+    : [
+        `[SCV] 비우기 전 마지막 대화 ${talks.length}개의 앞뒤를 화면에 다시 보였습니다 — 표시용 줄이며 할 일이 아닙니다.`,
+        ...talks.map((talk, index) =>
+          [`── 직전 대화 ${index + 1} / ${talks.length} ──`, `나: ${trimTalk(talk.user) || NOT_TYPED}`, '', `Claude: ${trimTalk(talk.answer) || NO_ANSWER}`].join('\n'),
+        ),
+      ].join('\n\n')
 
 // The last exchanges as one page for the conversation, markdown: the notices with a blank line between. '' when none.
 export const talkPage = (talks: readonly Talk[], recordPath: string | null): string => talkNotices(talks, recordPath).join('\n\n')

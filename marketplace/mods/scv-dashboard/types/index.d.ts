@@ -220,6 +220,7 @@ declare module 'claude-code' {
       lightSaid: string | null
       talks: { user: string; answer: string }[]
       shownTalk: string
+      storedTalk: string
       place: { home: string | null; branch: { name: string; isBranch: boolean } | null }
       branchPick: string[] | null
       placeNote: string | null
