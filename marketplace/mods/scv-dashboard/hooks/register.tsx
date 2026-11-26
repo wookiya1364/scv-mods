@@ -130,6 +130,7 @@ import {
   jobsBrief,
   keepTalk,
   talkPage,
+  storedTalkPage,
   typedBy,
   isEchoOf,
   isTalkOutput,
@@ -236,9 +237,11 @@ const lightSaid = atom({ plugin: 'scv-dashboard', key: 'lightSaid' } as const, n
 // The last exchanges of the main conversation, whole: shown again to the person right after a clear of this mod's.
 // talkRun.typed: what the turn now running began with (null between turns).
 // shownTalk: the page of them the conversation shows now, in the output row of this mod's own command.
+// storedTalk: the trimmed page the conversation stores for that row, which other screens and the model read.
 // talkRow.isNext: that command's echo was just stored, so the output row comes next.
 const talks = atom({ plugin: 'scv-dashboard', key: 'talks' } as const, [] as Talk[])
 const shownTalk = atom({ plugin: 'scv-dashboard', key: 'shownTalk' } as const, '' as string)
+const storedTalk = atom({ plugin: 'scv-dashboard', key: 'storedTalk' } as const, '' as string)
 const talkRun = { typed: null as string | null }
 const talkRow = { isNext: false }
 const LIGHT_KEY = 'scv-dashboard:light'
@@ -325,11 +328,12 @@ const runningBoard = async ($: Api): Promise<JobBoard> => {
 // Shows the last exchanges in the emptied conversation, for the person to read: the mod runs its own command, whose
 // output row every surface draws (a notice row is stored, and the desktop app does not draw it), and that row is
 // drawn with the page in place of its words. No hook of a mod answers a command the mod itself runs, so the row the
-// engine stores holds its own line for an unanswered command: the session.append hook replaces those words with one
-// plain line, the only part the model reads. No turn starts. No exchange, a refusal or a failure: nothing is shown.
-const showTalk = async ($: Api, page: string) => {
+// engine stores holds its own line for an unanswered command: the session.append hook replaces those words with the
+// trimmed page (one plain line, then each exchange's first and last part), which other screens and the model read. No turn starts. No exchange, a refusal or a failure: nothing is shown.
+const showTalk = async ($: Api, page: string, stored: string) => {
   if (page === '') return
   await update($, shownTalk, () => page)
+  await update($, storedTalk, () => stored)
   await $.command.run({ command: TALK_COMMAND }).catch(() => undefined)
 }
 
@@ -340,7 +344,9 @@ const showTalk = async ($: Api, page: string) => {
 const clearNow = async ($: Api, before: number | null, at: number, recordPath: string | null): Promise<boolean> => {
   const key = clearKey(await $.session.cwd().catch(() => ''))
   const idBefore = await $.session.id().catch(() => null)
-  const page = talkPage(await read($, talks), recordPath)
+  const remembered = await read($, talks)
+  const page = talkPage(remembered, recordPath)
+  const stored = storedTalkPage(remembered)
   const kept: ClearKept = { before, at, board: await runningBoard($) }
   await $.store.set(key, kept).catch(() => undefined)
   lightRun.isClearing = true
@@ -351,7 +357,7 @@ const clearNow = async ($: Api, before: number | null, at: number, recordPath: s
   lightRun.isCleared = false
   await $.store.delete(key).catch(() => undefined)
   if (isCleared) await sayCleared($, before, at)
-  if (isCleared) await showTalk($, page)
+  if (isCleared) await showTalk($, page, stored)
 
   return isCleared
 }
@@ -1900,7 +1906,8 @@ export const register: Register = on => {
   })
 
   // The rows of this mod's own command as the conversation stores them: the echo names the command, and the output
-  // row after it holds the engine's words — replaced by one plain line, so the model reads no error that is none.
+  // row after it holds the engine's words — replaced by the trimmed page of the last exchanges (one plain line when
+  // none was shown), so another screen shows them too and the model reads no error that is none.
   // Another command's echo ends the wait for that output row.
   on('session.append', { door: 'command' }, async ($, e, next) => {
     const text = e.message.content.map(block => (block.type === 'text' && typeof block.text === 'string' ? block.text : '')).join('')
@@ -1911,7 +1918,8 @@ export const register: Register = on => {
     }
     if (!isTalkOutput(text, talkRow.isNext)) return next(e)
     talkRow.isNext = false
-    const content = e.message.content.map(block => (block.type === 'text' && typeof block.text === 'string' ? { ...block, text: swapOutput(block.text, TALK_STORED) } : block))
+    const words = (await read($, storedTalk)) || TALK_STORED
+    const content = e.message.content.map(block => (block.type === 'text' && typeof block.text === 'string' ? { ...block, text: swapOutput(block.text, words) } : block))
 
     return next({ ...e, message: { ...e.message, content } })
   })

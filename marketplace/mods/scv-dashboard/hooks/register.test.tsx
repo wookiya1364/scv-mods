@@ -6024,3 +6024,76 @@ test('clear T20 자기 명령의 출력 줄을 그릴 때 — 보일 대화가 �
 
   expect(words).toEqual([NO_TALK, '비용 줄'])
 })
+
+import { storedTalkPage, trimTalk } from './model'
+
+test('remote T1 · T2 긴 글은 앞 150자 + 줄임표 + 끝 150자로 줄고, 300자 이하는 그대로다', () => {
+  const short = '가'.repeat(300)
+  expect(trimTalk(short)).toBe(short)
+  expect(trimTalk('')).toBe('')
+
+  const head = '앞'.repeat(150)
+  const middle = '중'.repeat(100)
+  const tail = '끝'.repeat(150)
+  const cut = trimTalk(`${head}${middle}${tail}`)
+  expect(cut).toBe(`${head}\n…\n${tail}`)
+  expect(cut).not.toContain('중')
+  // the room is a parameter: another number keeps another length
+  expect(trimTalk('abcdefghij', 2)).toBe('ab\n…\nij')
+})
+
+test('remote T3 · T4 저장할 글 — 머리말 한 줄과 직전 대화마다 줄인 글, 대화가 없으면 지금의 한 줄 안내', () => {
+  expect(storedTalkPage([])).toBe(TALK_STORED)
+
+  const long = `${'앞'.repeat(150)}${'중'.repeat(100)}${'끝'.repeat(150)}`
+  const page = storedTalkPage([
+    { user: '첫 요청', answer: long },
+    { user: '', answer: '측정이 끝났습니다' },
+    { user: long, answer: '' },
+  ])
+  const blocks = page.split('\n\n── ')
+  expect(blocks).toHaveLength(4)
+  expect(blocks[0]).toContain('비우기 전 마지막 대화 3개')
+  expect(blocks[0]).toContain('할 일이 아닙니다')
+  expect(page).not.toContain('중')
+  expect(page).toContain(`── 직전 대화 1 / 3 ──\n나: 첫 요청\n\nClaude: ${'앞'.repeat(150)}\n…\n${'끝'.repeat(150)}`)
+  expect(page).toContain('── 직전 대화 2 / 3 ──\n나: (입력 없이 시작한 턴 — 일이 끝났다는 알림 등)\n\nClaude: 측정이 끝났습니다')
+  expect(page.endsWith(`── 직전 대화 3 / 3 ──\n나: ${'앞'.repeat(150)}\n…\n${'끝'.repeat(150)}\n\nClaude: (답 글 없음)`)).toBe(true)
+})
+
+test('remote T5 · T6 · T7 비운 뒤 자기 명령의 출력 줄은 줄인 직전 대화로 저장되고, 화면에는 전체가 그려지고, 다른 명령의 줄은 그대로다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  await start($)
+  const long = `${'앞'.repeat(150)}${'중'.repeat(100)}${'끝'.repeat(150)}`
+  await exchange($, '요청 1', '답 1')
+  opts.percent = 62
+  await exchange($, '요청 2', long)
+  expect(seen.commands).toEqual(['clear'])
+  // the screen of this app: the whole answer, as before
+  expect(seen.pages).toHaveLength(1)
+  expect(seen.pages[0]).toContain(`Claude: ${long}`)
+
+  // the rows the conversation stores: clearEngine keeps the words of every system row (an output row is one)
+  seen.notices.length = 0
+  const stored = seen.notices
+  const row = (text: string, door: string, type = 'system') =>
+    $.session.append({ message: { type, content: [{ type: 'text', text }] }, door, origin: { kind: 'plugin', name: 'scv-dashboard' }, uuid: `row-${door}-${type}-${text.length}` } as never)
+  const echo = `<command-name>/${TALK_COMMAND}</command-name>`
+  await row(echo, 'command', 'user')
+  await row(`<local-command-stdout>${UNANSWERED}</local-command-stdout>`, 'command')
+  await row('<command-name>/cost</command-name>', 'command', 'user')
+  await row('<local-command-stdout>비용 줄</local-command-stdout>', 'command')
+
+  expect(stored).toHaveLength(2)
+  expect(stored[0]?.startsWith('<local-command-stdout>[SCV] ')).toBe(true)
+  expect(stored[0]?.endsWith('</local-command-stdout>')).toBe(true)
+  expect(stored[0]).toContain('비우기 전 마지막 대화 2개')
+  expect(stored[0]).toContain('── 직전 대화 1 / 2 ──\n나: 요청 1\n\nClaude: 답 1')
+  expect(stored[0]).toContain(`── 직전 대화 2 / 2 ──\n나: 요청 2\n\nClaude: ${'앞'.repeat(150)}\n…\n${'끝'.repeat(150)}`)
+  expect(stored[0]).not.toContain('중')
+  expect(stored[1]).toBe('<local-command-stdout>비용 줄</local-command-stdout>')
+})
