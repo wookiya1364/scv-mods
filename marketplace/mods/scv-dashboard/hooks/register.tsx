@@ -145,6 +145,10 @@ import {
   paneSections,
   parseLight,
   moveLight,
+  lightFromSettings,
+  lightSaveArgv,
+  lightLabel,
+  lightSaidParts,
   lightBarSvg,
   LIGHT_STEP,
   NO_PLACE,
@@ -245,6 +249,11 @@ const storedTalk = atom({ plugin: 'scv-dashboard', key: 'storedTalk' } as const,
 const talkRun = { typed: null as string | null }
 const talkRow = { isNext: false }
 const LIGHT_KEY = 'scv-dashboard:light'
+// The switch and its mark being written to the project's settings file: pending — writes asked for and not yet
+// over; gen — goes up with each one, so a reading of the file begun before a write is not taken for the newest;
+// tail — the writes in a row, each after the one before it.
+const lightWrite = { pending: 0, gen: 0, tail: Promise.resolve() as Promise<unknown> }
+const LIGHT_UNSAVED = '설정 파일에 저장하지 못함 — 다시 눌러 주세요'
 // Where the session works: the person's home folder (to write a folder as '~/…') and the branch checked out.
 const place = atom({ plugin: 'scv-dashboard', key: 'place' } as const, NO_PLACE as Place)
 // The branches to pick from, while the person has the branch line open; and what the last change came to.
@@ -636,8 +645,10 @@ const refresh = async ($: Api) => {
   const project = root === current.root && current.cwd ? current.cwd : await projectOf($, root)
   if (current.cwd && project !== current.cwd) await loadRuns($, project)
   const core = current.core && project === current.cwd ? current.core : await findCore($, project)
+  const gen = lightWrite.gen
   const next = { ...(await readSources($, project)), root, core }
   await update($, snapshot, () => next)
+  await syncLight($, current, next, gen)
   await update($, now, () => at)
   await loadSignals($, next.cwd)
   await readPlace($, root)
@@ -706,10 +717,42 @@ const switchAskMode = async ($: Api, next: AskMode) => {
   await update($, paneNote, () => (filled ? `바로 바꾸지 못해 입력창에 넣음: ${command}` : `바꾸지 못함 — 입력창에 ${command} 를 넣어 보내 주세요`))
 }
 
-// The auto-summary switch and its mark, changed and kept across sessions.
+// Whether this project keeps the switch and its mark in its own settings file: it has one, and SCV's settings
+// command is there to write it. Elsewhere they stay in the store, as before 0.6.2.
+const lightInFile = (shot: Pick<Snapshot, 'core' | 'settingsText'>) => (shot.core ? lightFromSettings(shot.settingsText) : null)
+
+// The switch and its mark follow the project's settings file each time the project is read — after a clear and
+// in a new session too. Not while a write is out or when one began after this reading did (the file read is the
+// older one). A project that keeps none, come to from one that did, takes the store's.
+const syncLight = async ($: Api, was: Snapshot, next: Snapshot, gen: number) => {
+  if (lightWrite.pending > 0 || lightWrite.gen !== gen) return
+  const kept = lightInFile(next)
+  if (kept) return void (await update($, light, one => (one.isOn === kept.isOn && one.percent === kept.percent ? one : kept)))
+  if (!lightInFile(was)) return
+  const stored = await $.store.get(LIGHT_KEY).catch(() => undefined)
+  await update($, light, () => parseLight(stored))
+}
+
+// The auto-clear switch and its mark, changed and kept: in the project's settings file through SCV's own settings
+// command (the writes go one after another, each with the value the pane shows by then, so presses in a row end
+// with the last one in the file), or in the store where the project keeps no settings file.
 const setLight = async ($: Api, change: (one: LightSettings) => LightSettings) => {
+  const was = await read($, light)
   const next = await update($, light, change)
-  await $.store.set(LIGHT_KEY, next).catch(() => undefined)
+  const shot = await read($, snapshot)
+  const core = shot.core
+  if (!core || !lightInFile(shot)) return void (await $.store.set(LIGHT_KEY, next).catch(() => undefined))
+  lightWrite.pending += 1
+  lightWrite.gen += 1
+  const job = lightWrite.tail.then(async () => {
+    for (const argv of lightSaveArgv(core, was, await read($, light))) {
+      const ran = await $.process.run(argv, { ...(shot.cwd ? { cwd: shot.cwd } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+      if (ran?.exitCode !== 0) return void (await update($, lightSaid, () => LIGHT_UNSAVED))
+    }
+  })
+  lightWrite.tail = job.catch(() => undefined)
+  await lightWrite.tail
+  lightWrite.pending -= 1
 }
 
 // ── the word dictionary (after 0.5.0) ──────────────────────────────────────────────
@@ -1024,7 +1067,8 @@ const dropControls = async ($: Api, isOwnAgain: boolean) => {
   typedValues.clear()
   if (!isOwnAgain) return
   const keptLight = await $.store.get(LIGHT_KEY).catch(() => undefined)
-  await update($, light, () => parseLight(keptLight))
+  const inFile = lightInFile(await read($, snapshot))
+  await update($, light, () => inFile ?? parseLight(keptLight))
 }
 
 // Takes a state another session sent, while this session is mirroring; anything else is dropped.
@@ -2383,6 +2427,7 @@ export const register: Register = on => {
 
     const lightState = await read($, light)
     const lightLine = await read($, lightSaid)
+    const said = lightLine ? lightSaidParts(lightLine) : null
     const fillNow = await read($, contextFill)
     // Mirroring, each of these goes to the working session, with the value to end at; a press that would change
     // nothing there (the mark at the end of its bar, the branch already checked out) sends nothing.
@@ -2450,7 +2495,10 @@ export const register: Register = on => {
               ) : null}
               {context ? (
                 <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-                  <Text dimColor>{lightState.isOn ? `컨텍스트가 ${lightState.percent}% 를 넘으면 자동으로 비우기 — 기록으로 이어 감` : '대화가 길어져도 그대로 둠'}</Text>
+                  <Box flexDirection="row" gap={1}>
+                    <Text bold>자동 비우기</Text>
+                    <Text dimColor>{lightLabel(lightState)}</Text>
+                  </Box>
                   <Box flexDirection="row">
                     {hasControls ? [<Button key="light-toggle" label={lightState.isOn ? '끄기' : '켜기'} onPress={() => void switchLight().catch(() => undefined)} />] : []}
                   </Box>
@@ -2461,10 +2509,16 @@ export const register: Register = on => {
                   <Button key="light-down" label="◀" onPress={() => void stepLight(-LIGHT_STEP).catch(() => undefined)} />
                   {Svg ? <Svg source={lightBarSvg(lightState.percent, fillNow)} alt={`비우기 기준 ${lightState.percent}% · 지금 ${context}`} /> : null}
                   <Button key="light-up" label="▶" onPress={() => void stepLight(LIGHT_STEP).catch(() => undefined)} />
-                  <Text dimColor>{`비우기 기준 ${lightState.percent}%`}</Text>
                 </Box>
               ) : null}
-              {lightLine ? <Text dimColor>{lightLine}</Text> : null}
+              {said?.name ? (
+                <Box flexDirection="row" gap={1}>
+                  <Text bold>{said.name}</Text>
+                  <Text dimColor>{said.value}</Text>
+                </Box>
+              ) : said ? (
+                <Text dimColor>{said.value}</Text>
+              ) : null}
               {sentNote('limits')}
             </Box>,
             '#4f8cff',
