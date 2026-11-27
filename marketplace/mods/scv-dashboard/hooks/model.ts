@@ -32,6 +32,7 @@ import type {
   UsageLimit,
   WorkEntry,
 } from '../types'
+import { cleanLang, langChoice } from './lang'
 
 const STATUS_ORDER = ['in_progress', 'paused', 'testing', 'planned', 'done', 'archived']
 
@@ -1243,10 +1244,14 @@ export type MirrorAct =
   | { do: 'branchPick'; to: string }
   | { do: 'wordsSave'; avoid: string; use: string; forms: string; was: string | null }
   | { do: 'wordsRemove'; avoid: string }
+  | { do: 'lang'; to: string }
 
-// The acts a working session of this version takes; it says so in its state (`acts`), and a viewer shows its
-// controls only for a host that says at least this. 1 would be the fill act alone (a host that takes only that one says nothing).
-export const MIRROR_ACTS = 2
+// The acts a working session of this version takes; it says so in its state (`acts`). A viewer shows its controls
+// only for a host that says at least MIRROR_ACTS_MIN (1 would be the fill act alone — a host that takes only that
+// one says nothing), and the language row's only for one that says at least MIRROR_ACTS_LANG.
+export const MIRROR_ACTS = 3
+export const MIRROR_ACTS_MIN = 2
+export const MIRROR_ACTS_LANG = 3
 
 export type MirrorMessage =
   | { kind: 'hello'; address: string }
@@ -1331,6 +1336,8 @@ export const parseAct = (json: string): MirrorAct | null => {
     }
     case 'wordsRemove':
       return typeof act.avoid === 'string' && isWordText(act.avoid) ? { do: 'wordsRemove', avoid: act.avoid } : null
+    case 'lang':
+      return typeof act.to === 'string' && cleanLang(act.to) === act.to ? { do: 'lang', to: act.to } : null
     default:
       return null
   }
@@ -1367,6 +1374,8 @@ export const actLabel = (act: MirrorAct): string => {
       return `낱말 저장 — ${act.avoid} → ${act.use}`
     case 'wordsRemove':
       return `낱말 지우기 — ${act.avoid}`
+    case 'lang':
+      return `언어 → ${langChoice(act.to).name}`
   }
 }
 

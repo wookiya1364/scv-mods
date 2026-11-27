@@ -6251,3 +6251,356 @@ test('mark T13 (거울 쪽) 거울 세션의 ▶ 는 요청만 보낸다 — 설
   expect(settingsRuns(env)).toHaveLength(0)
   await ui.unmount()
 })
+
+// ── pane 0.7.0: the language row · every drawn text in the project's SCV language ──────────
+import { LANG_KEY, PACKS, cleanLang, langChoice, langFromSettings, langSaveArgv, packFile, packFor, packRequest, parsePack, sayProps, toLang } from './lang'
+import { WORDS } from './words'
+
+const EN = '{"SCV_LANG":"english"}'
+const JA = '{"SCV_LANG":"japanese"}'
+// a gear index and a plan a person wrote in English, so any Korean left on the screen is the pane's own
+const EN_INDEX = ['make-list\tgear\tpure\tnone\tlines\tmake a list\tlist things', 'push-tags\ttooth\toutward\tnone\tlines\tpush the tags\t', 'ci-all\tgear\teffect\tnone\tverdict\trun every test\trun tests\tos=mac'].join('\n')
+const EN_PLAN = () => ({ a: plan({ title: 'Dashboard', status: 'in_progress', steps: ['[x] read', '[~] build', '[!] ship', 'check'], tests: ['first', 'second'] }) })
+// every drawn text that still holds Korean, the texts a test put there itself left out
+const koreanLeft = (drawn: string, own: readonly string[] = []) => [
+  ...new Set(
+    own
+      .reduce((text, one) => text.split(one).join(''), drawn)
+      .match(/"(?:[^"\\]|\\.)*[가-힣](?:[^"\\]|\\.)*"/g) ?? [],
+  ),
+]
+// the pane in a language, opened as far as its buttons go: each press's screen, all in one text
+const drawnOpened = async ($: Engine, on: On, settings: string) => {
+  const kit = engine(on, EN_PLAN())
+  withProject(kit, { settings, index: EN_INDEX })
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/main\n'
+  on('session.usage', () => ({ value: { rateLimits: LIMITS, context: { percent: 40 } } }) as never)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const screens = [await drawnText($)]
+  for (const key of ['more-toggle', 'tests-toggle', 'step-2', 'step-3', 'gear-open-make-list', 'gear-open-push-tags', 'words-toggle', 'words-add', 'lang-open']) {
+    if (!(await has(ui, key))) continue
+    await ui.press({ key })
+    await settle()
+    screens.push(await drawnText($))
+  }
+  await ui.unmount()
+
+  return { kit, drawn: screens.join('\n') }
+}
+
+test('lang T1 · T2 설정 글에서 언어를 읽는다 — 값이 없으면 한국어, 설정 글이 없으면 없음', () => {
+  expect(['english', 'japanese', 'korean', 'French'].map(one => langFromSettings(JSON.stringify({ SCV_LANG: one })))).toEqual(['english', 'japanese', 'korean', 'french'])
+  expect(langFromSettings('{"SCV_CLEAR_PERCENT":"50"}')).toBe('korean')
+  expect(langFromSettings('{"SCV_LANG":""}')).toBe('korean')
+  expect(langFromSettings('{"SCV_LANG":3}')).toBe('korean')
+  for (const text of [null, undefined, '', 'not json', '[]']) expect(langFromSettings(text)).toBeNull()
+  // a name as the file keeps it: lower case, the three known names for their aliases, nothing a file name cannot take
+  expect([' EN ', '한국어', '日本語', 'Français', 'Tiếng Việt'].map(cleanLang)).toEqual(['english', 'korean', 'japanese', 'français', 'tiếng việt'])
+  for (const bad of ['', '   ', '../x', 'a/b', 'x'.repeat(41), 3, null]) expect(cleanLang(bad)).toBeNull()
+  expect(langChoice('korean')).toEqual({ pick: 'korean', name: '한국어' })
+  expect(langChoice('japanese')).toEqual({ pick: 'japanese', name: '日本語' })
+  expect(langChoice('français')).toEqual({ pick: 'other', name: 'français' })
+  expect(LANG_KEY).toBe('SCV_LANG')
+  expect(langSaveArgv('/core', 'english')).toEqual(['bash', '/core/scripts/settings-set.sh', 'SCV_LANG=english'])
+  expect(packFile('tiếng việt')).toBe('scv/dashboard-lang/tiếng-việt.json')
+})
+
+test('lang T3 영어를 고르면 창의 글 전부가 영어로 보인다 — 한글이 남은 글 0개', async ($, on) => {
+  const { drawn } = await drawnOpened($, on, EN)
+  for (const label of ['Folder', 'Branch', 'Context', 'Usage limit', 'Auto-clear', 'Language', 'Ask mode', 'Test results']) expect(drawn).toContain(`"${label}"`)
+  // the one Korean text is a language's own name in the list
+  expect(koreanLeft(drawn, ['"한국어"'])).toEqual([])
+})
+
+test('lang T4 일본어를 고르면 창의 글 전부가 일본어로 보인다 — 한글이 남은 글 0개', async ($, on) => {
+  const { drawn } = await drawnOpened($, on, JA)
+  for (const label of ['フォルダ', 'ブランチ', 'コンテキスト', '使用上限', '自動クリア', '言語']) expect(drawn).toContain(`"${label}"`)
+  expect(koreanLeft(drawn, ['"한국어"'])).toEqual([])
+})
+
+test('lang T5 · T6 한국어일 때 글은 그대로이고, 언어 칸은 위쪽 칸의 맨 아래에 있다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const drawn = await drawnText($)
+  const at = (label: string) => drawn.indexOf(`"${label}"`)
+  expect(['폴더', '컨텍스트', '자동 비우기', '언어', '묻기 방식'].map(at).every(one => one >= 0)).toBe(true)
+  expect(at('폴더') < at('컨텍스트') && at('컨텍스트') < at('자동 비우기') && at('자동 비우기') < at('언어') && at('언어') < at('묻기 방식')).toBe(true)
+  // the bar's ▶ is drawn before the language row too
+  expect(drawn.indexOf('"light-up"') < at('언어')).toBe(true)
+  expect(await labelOf(ui, 'lang-open')).toBe('한국어 ▾')
+  expect(toLang(null)('폴더')).toBe('폴더')
+  expect(toLang(packFor('korean', null))('약 3분 2초 남음(추정)')).toBe('약 3분 2초 남음(추정)')
+  await ui.unmount()
+})
+
+test('lang T7 언어를 고르면 SCV 의 설정 명령으로 그 값만 쓰고, 창이 그 언어로 보인다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit, { settings: '{"SCV_LANG":"korean","SCV_CLEAR_PERCENT":"45"}' })
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'lang-open' })
+  expect(((await ui.find({ type: 'Select', key: 'lang-pick' }))?.props.options as { value: string; label: string }[]).map(one => one.label)).toEqual(['한국어', 'English', '日本語', '기타'])
+  await ui.select({ key: 'lang-pick', value: 'english' })
+  await settle()
+  expect(settingsRuns(kit).map(one => one.argv)).toEqual([['bash', `${CORE_DIR}/scripts/settings-set.sh`, 'SCV_LANG=english']])
+  expect(settingsRuns(kit)[0]?.cwd).toBe('/work')
+  expect(await labelOf(ui, 'lang-open')).toBe('English ▾')
+  expect(await text(ui, /^Folder$/)).toBe('Folder')
+  expect(await text(ui, /^Language changed/)).toBe('Language changed — English from the next message')
+  await ui.press({ key: 'lang-open' })
+  await ui.select({ key: 'lang-pick', value: 'japanese' })
+  await settle()
+  expect(settingsRuns(kit).map(one => one.argv[2])).toEqual(['SCV_LANG=english', 'SCV_LANG=japanese'])
+  expect(await labelOf(ui, 'lang-open')).toBe('日本語 ▾')
+  expect(await text(ui, /^フォルダ$/)).toBe('フォルダ')
+  // the same language again writes nothing; the other key is as it was
+  await ui.press({ key: 'lang-open' })
+  await ui.select({ key: 'lang-pick', value: 'japanese' })
+  await settle()
+  expect(settingsRuns(kit)).toHaveLength(2)
+  expect(settingsOf(kit)).toEqual({ SCV_LANG: 'japanese', SCV_CLEAR_PERCENT: '45' })
+  await ui.unmount()
+})
+
+test('lang T7 (실패) 설정 쓰기가 실패하면 언어는 그대로이고 칸에 알린다', async ($, on) => {
+  const kit = engine(on, {})
+  withProject(kit)
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  kit.procEnd.exitCode = 1
+  await ui.press({ key: 'lang-open' })
+  await ui.select({ key: 'lang-pick', value: 'english' })
+  await settle()
+  expect(await text(ui, /^언어를 바꾸지 못함/)).toBe('언어를 바꾸지 못함 — 다시 눌러 주세요')
+  expect(await labelOf(ui, 'lang-open')).toBe('한국어 ▾')
+  expect(settingsOf(kit).SCV_LANG).toBe('korean')
+  await ui.unmount()
+})
+
+test('lang T8 사용자가 쓴 글은 번역하지 않는다 — 계획 제목 · 단계 이름 · 브랜치 이름', async ($, on) => {
+  const kit = engine(on, { a: plan({ title: '결제 화면 고치기', status: 'in_progress', steps: ['[~] 환불 단추 넣기', '끝 확인'] }) })
+  withProject(kit, { settings: EN, index: EN_INDEX })
+  kit.extra['/work/.git/HEAD'] = 'ref: refs/heads/feat/환불\n'
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const drawn = await drawnText($)
+  expect(drawn).toContain('결제 화면 고치기')
+  expect(drawn).toContain('1. 환불 단추 넣기')
+  expect(await labelOf(ui, 'branch-open')).toBe('feat/환불 ▾')
+  expect(drawn).toContain('"Branch"')
+  expect(drawn).toContain('"Steps"')
+  // texts shaped like the pane's own but written by a person stay as written
+  const say = toLang(PACKS.english ?? null)
+  for (const own of ['내가 쓴 메모', '기초', '캐시 초기화', '1단계 구현', 'feat/환불']) expect(say(own)).toBe(own)
+  await ui.unmount()
+})
+
+test('lang T9 숫자와 이름이 낀 글은 틀로 바뀐다 — 숫자는 그대로, 둘레의 글만', () => {
+  const en = toLang(PACKS.english ?? null)
+  const ja = toLang(PACKS.japanese ?? null)
+  expect(en('약 3분 12초 남음(추정)')).toBe('about 3m 12s left (estimate)')
+  expect(en('통과 4 · 실패 1 · 결과 없음 2')).toBe('Pass 4 · Fail 1 · No result 2')
+  expect(en('50% 넘으면')).toBe('above 50%')
+  expect(en('5시간 72% · 17:40 초기화 · 7일 31%')).toBe('5h 72% · resets 17:40 · 7d 31%')
+  expect(en('3단계 진행 중 · 막힘 없음 · 약 2분 5초 남음(추정)')).toBe('Step 3 in progress · Nothing blocked · about 2m 5s left (estimate)')
+  expect(en('1 · 3~5단계 막힘 · 막힘 2 · 남은 시간 추정 불가')).toBe('Step 1 · 3~5 blocked · Blocked 2 · Time left unknown')
+  expect(en('결과를 읽거나 다음을 정하는 중 (14:02부터)')).toBe('Reading a result or deciding what is next (since 14:02)')
+  expect(en('62% → 8% · 1초 걸림 · 비우지 못해 기록으로 바꿈')).toBe('62% → 8% · took 1s · could not clear, replaced with the record')
+  // a part a person wrote stays inside a text the pane made
+  expect(en('T1 내 시험 — 통과')).toBe('T1 내 시험 — pass')
+  expect(en('할 일 2/5 · 시험 쓰기')).toBe('To do 2/5 · 시험 쓰기')
+  expect(en('14:02 빌드 끝')).toBe('14:02 빌드 done')
+  expect(ja('약 3분 12초 남음(추정)')).toBe('残り約 3分12秒(推定)')
+  expect(ja('통과 4 · 실패 1 · 결과 없음 2')).toBe('合格 4 · 失敗 1 · 結果なし 2')
+  // every key has both languages, and a slot a key names is in both
+  for (const [key, texts] of Object.entries(WORDS)) {
+    expect(texts.every(one => one !== '')).toBe(true)
+    const slots = [...key.matchAll(/\{[#=]?(\d)\}/g)].map(one => one[1]).sort()
+    for (const one of texts) expect([...one.matchAll(/\{(\d)\}/g)].map(found => found[1]).sort()).toEqual(slots)
+  }
+  // an element's texts are said, what a person typed or picks by is not
+  expect(sayProps({ label: '저장', placeholder: '값을 적기', value: '저장', key: '저장', children: ['폴더', 3, null], options: [{ value: '기타', label: '기타' }] }, en)).toEqual({
+    label: 'Save',
+    placeholder: 'Type a value',
+    value: '저장',
+    key: '저장',
+    children: ['Folder', 3, null],
+    options: [{ value: '기타', label: 'Other' }],
+  })
+})
+
+test('lang T10 기타 언어: 저장한 번역이 있으면 그것으로, 없는 글은 영어로 보인다', async ($, on) => {
+  const sent: string[] = []
+  on('prompt.submit', (_, e) => {
+    sent.push(e.text)
+
+    return { text: e.text }
+  })
+  const kit = engine(on, {})
+  withProject(kit, { settings: '{"SCV_LANG":"french"}', index: EN_INDEX })
+  kit.extra['scv/dashboard-lang/french.json'] = '{"폴더":"Dossier","컨텍스트":"Contexte"}'
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const drawn = await drawnText($)
+  expect(drawn).toContain('"Dossier"')
+  expect(drawn).toContain('"Contexte"')
+  expect(drawn).toContain('"Auto-clear"')
+  expect(koreanLeft(drawn)).toEqual([])
+  expect(await labelOf(ui, 'lang-open')).toBe('french ▾')
+  expect(await has(ui, 'lang-ask')).toBe(false)
+  expect(sent).toEqual([])
+  await ui.unmount()
+})
+
+test('lang T11 기타 언어: 저장한 번역이 없으면 영어로 보이고 번역을 한 번만 요청한다', async ($, on) => {
+  const sent: string[] = []
+  on('prompt.submit', (_, e) => {
+    sent.push(e.text)
+
+    return { text: e.text }
+  })
+  const kit = engine(on, {})
+  withProject(kit, { index: EN_INDEX })
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'lang-open' })
+  await ui.select({ key: 'lang-pick', value: 'other' })
+  await ui.input({ key: 'lang-name', text: 'Français' })
+  await settle()
+  expect(settingsRuns(kit).map(one => one.argv[2])).toEqual(['SCV_LANG=français'])
+  expect(sent).toHaveLength(1)
+  expect(sent[0]).toContain('français')
+  expect(sent[0]).toContain('scv/dashboard-lang/français.json')
+  expect(sent[0]).toContain('/hooks/words.ts')
+  expect(sent[0]).toBe(packRequest({ lang: 'français', file: 'scv/dashboard-lang/français.json', source: `${sent[0]?.match(/Read (\S+)\/hooks\/words\.ts/)?.[1]}/hooks/words.ts` }))
+  expect(await text(ui, /^Asked Claude/)).toBe('Asked Claude for the français translation — shown in English until it is there')
+  expect(await labelOf(ui, 'lang-open')).toBe('français ▾')
+  expect(koreanLeft(await drawnText($))).toEqual([])
+  // the project read again and again: no second request
+  for (let i = 0; i < 3; i += 1) {
+    await endTurn($)
+    await settle()
+  }
+  expect(sent).toHaveLength(1)
+  expect(settingsRuns(kit)).toHaveLength(1)
+  // once the file is there the pane draws with it
+  kit.extra['scv/dashboard-lang/français.json'] = '{"폴더":"Dossier"}'
+  await endTurn($)
+  await settle()
+  expect(await text(ui, /^Dossier$/)).toBe('Dossier')
+  await ui.unmount()
+})
+
+test('lang T12 저장한 번역이 깨졌으면 영어로 보이고 터지지 않는다', async ($, on) => {
+  expect(parsePack('not json')).toBeNull()
+  expect(parsePack('[1,2]')).toBeNull()
+  expect(parsePack(null)).toBeNull()
+  expect(parsePack('{"폴더": 3, "브랜치": ""}')).toEqual({})
+  expect(parsePack('{"폴더":"Dossier","x":7}')).toEqual({ 폴더: 'Dossier' })
+  expect(toLang(packFor('french', parsePack('{"폴더": 3}')))('폴더')).toBe('Folder')
+  expect(toLang(packFor('french', null))('브랜치')).toBe('Branch')
+  const kit = engine(on, {})
+  withProject(kit, { settings: '{"SCV_LANG":"french"}', index: EN_INDEX })
+  kit.extra['scv/dashboard-lang/french.json'] = '{ this is not json'
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^Folder$/)).toBe('Folder')
+  expect(await text(ui, /^No french/)).toBe('No french translation yet — shown in English')
+  expect(await labelOf(ui, 'lang-ask')).toBe('Ask for translation')
+  await ui.unmount()
+})
+
+test('lang T13 설정 파일이 없는 폴더에는 언어 칸이 없고 글은 한국어다', async ($, on) => {
+  const kit = engine(on, {})
+  withUsage($, on, 40, kit)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const drawn = await drawnText($)
+  expect(drawn).toContain('"컨텍스트"')
+  expect(drawn).not.toContain('"언어"')
+  expect(await has(ui, 'lang-open')).toBe(false)
+  expect(settingsRuns(kit)).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('lang T14 거울에서 고르면 거울 세션은 요청만 보내고, 작업 세션이 자기 설정 파일에 쓴다', async ($, on) => {
+  const ok = (act: unknown) => parseAct(JSON.stringify(act))
+  expect(ok({ do: 'lang', to: 'english' })).toEqual({ do: 'lang', to: 'english' })
+  expect(ok({ do: 'lang', to: 'français' })).toEqual({ do: 'lang', to: 'français' })
+  for (const bad of ['English', '../x', '', 7]) expect(ok({ do: 'lang', to: bad })).toBeNull()
+  expect(actLabel({ do: 'lang', to: 'japanese' })).toBe('언어 → 日本語')
+  const kit = await hostKit($, on)
+  await actFrom($, { do: 'lang', to: 'english' })
+  await settle()
+  expect(settingsRuns(kit).map(one => one.argv[2])).toEqual(['SCV_LANG=english'])
+  expect(JSON.parse(lastSent(kit).snapshot.settingsText as string).SCV_LANG).toBe('english')
+})
+
+test('lang T14 (거울 쪽) 거울 세션의 언어 칸은 요청만 보낸다 — 설정 명령은 돌지 않는다', async ($, on) => {
+  const env = await startPresser($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'lang-open' })
+  await ui.select({ key: 'lang-pick', value: 'english' })
+  await settle()
+  expect(actsOf(env).at(-1)).toBe('{"do":"lang","to":"english"}')
+  expect(settingsRuns(env)).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('lang T14 (옛 작업 세션) 언어 바꾸기를 모르는 작업 세션의 거울에는 언어 칸의 단추가 없다', async ($, on) => {
+  await startPresser($, on, { acts: 2 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await has(ui, 'lang-open')).toBe(false)
+  expect(await has(ui, 'light-up')).toBe(true)
+  expect(await text(ui, /^한국어$/)).toBe('한국어')
+  await ui.unmount()
+})
+
+test('lang T15 창이 띄우는 알림도 고른 언어로 나온다', async ($, on) => {
+  const kit = directKit(on)
+  kit.extra['scv/scv_settings.json'] = EN
+  await start($)
+  await $.session.receive(hello())
+  await settle()
+  expect(kit.toasts.at(-1)).toBe("SCV: another session is viewing this session's pane (session_viewer)")
+  expect(kit.toasts.filter(one => /[가-힣]/.test(one))).toEqual([])
+})
+
+test('lang T16 영어로 그려도 느려지지 않는다 — 한국어로 그리는 시간의 1.5배 안', async ($, on) => {
+  const kit = engine(on, EN_PLAN())
+  withProject(kit, { index: Array.from({ length: 20 }, (_, i) => `gear-${i}\tgear\tpure\tnone\tlines\tdo thing ${i}\twhen ${i}`).join('\n') })
+  on('session.usage', () => ({ value: { rateLimits: LIMITS, context: { percent: 40 } } }) as never)
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const median = async () => {
+    const took: number[] = []
+    for (let i = 0; i < 30; i += 1) {
+      const from = performance.now()
+      await drawnText($)
+      took.push(performance.now() - from)
+    }
+
+    return took.sort((a, b) => a - b)[15] ?? 0
+  }
+  await drawnText($)
+  const korean = await median()
+  await ui.press({ key: 'lang-open' })
+  await ui.select({ key: 'lang-pick', value: 'english' })
+  await settle()
+  expect(await text(ui, /^Folder$/)).toBe('Folder')
+  await drawnText($)
+  const english = await median()
+  const out = (globalThis as { console?: { log: (line: string) => void } }).console
+  out?.log(`lang T16 그리는 시간(가운데 값, 서른 번): 한국어 ${korean.toFixed(2)} ms · 영어 ${english.toFixed(2)} ms · ${(english / korean).toFixed(2)}배`)
+  expect(english).toBeLessThanOrEqual(korean * 1.5 + 1)
+  await ui.unmount()
+})

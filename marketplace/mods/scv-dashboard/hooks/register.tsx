@@ -3,6 +3,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { ActNote, AgentState, BigProof, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, ViewPicks, Viewers, WordsView, WorkEntry } from '../types'
 import type { FileFact, MirrorAct } from './model'
+import { LANG_OPTIONS, cleanLang, langChoice, langFromSettings, langSaveArgv, packFile, packFor, packRequest, parsePack, sayElements, toLang } from './lang'
 import {
   STEP_TOOL,
   isMirrorDue,
@@ -166,6 +167,8 @@ import {
   submitWithGear,
   usedGear,
   MIRROR_ACTS,
+  MIRROR_ACTS_LANG,
+  MIRROR_ACTS_MIN,
   fromMirrorLine,
   isActText,
   parseAct,
@@ -254,6 +257,17 @@ const LIGHT_KEY = 'scv-dashboard:light'
 // tail — the writes in a row, each after the one before it.
 const lightWrite = { pending: 0, gen: 0, tail: Promise.resolve() as Promise<unknown> }
 const LIGHT_UNSAVED = '설정 파일에 저장하지 못함 — 다시 눌러 주세요'
+// The pane's language (after 0.6.2). langPack: the saved table of a language the pane carries none for, as its
+// project file reads (key: the project and language it was read for). langPick: the language row open — its list,
+// or the box for another language's name. langNote: what the last pick came to. langTyped: the name being typed.
+// langSaid: the step that says a text in the language, built once per language and saved table. langWrite: the
+// writes of the setting, one after another.
+const langPack = atom({ plugin: 'scv-dashboard', key: 'langPack' } as const, { key: '', text: null } as { key: string; text: string | null })
+const langPick = atom({ plugin: 'scv-dashboard', key: 'langPick' } as const, null as 'list' | 'other' | null)
+const langNote = atom({ plugin: 'scv-dashboard', key: 'langNote' } as const, null as string | null)
+const langTyped = { name: '' }
+const langSaid = { key: '\u0000', say: (text: string) => text }
+const langWrite = { tail: Promise.resolve() as Promise<unknown> }
 // Where the session works: the person's home folder (to write a folder as '~/…') and the branch checked out.
 const place = atom({ plugin: 'scv-dashboard', key: 'place' } as const, NO_PLACE as Place)
 // The branches to pick from, while the person has the branch line open; and what the last change came to.
@@ -648,6 +662,7 @@ const refresh = async ($: Api) => {
   const gen = lightWrite.gen
   const next = { ...(await readSources($, project)), root, core }
   await update($, snapshot, () => next)
+  await syncLangPack($, next)
   await syncLight($, current, next, gen)
   await update($, now, () => at)
   await loadSignals($, next.cwd)
@@ -697,6 +712,73 @@ const fillPrompt = async ($: Api, command: string) => {
   const filled = await $.prompt.fill(planPromptFill(command, box.text)).catch(() => ({ isFilled: false }))
 
   return filled.isFilled
+}
+
+// ── the pane's language (after 0.6.2) ──────────────────────────────────────────────
+
+const packKeyOf = (shot: Pick<Snapshot, 'cwd' | 'settingsText'>) => {
+  const lang = langFromSettings(shot.settingsText)
+
+  return lang && langChoice(lang).pick === 'other' ? { lang, key: `${shot.cwd}\n${lang}` } : null
+}
+
+// The saved table of the project's language, read with the project: only for a language the pane carries no
+// table for. A language it carries (or none) keeps nothing.
+const syncLangPack = async ($: Api, shot: Snapshot) => {
+  const own = packKeyOf(shot)
+  const text = own ? await readText($, `${shot.cwd ? `${shot.cwd}/` : ''}${packFile(own.lang)}`) : null
+  await update($, langPack, one => (one.key === (own?.key ?? '') && one.text === text ? one : { key: own?.key ?? '', text }))
+}
+
+// The step that says a drawn text in the project's language. A viewer draws its working session's language, with
+// no saved table (it reads no file), so a language the pane carries none for is English there.
+const sayOf = async ($: Api) => {
+  const shot = await read($, snapshot)
+  const lang = langFromSettings(shot.settingsText)
+  const own = packKeyOf(shot)
+  const kept = await read($, langPack)
+  const saved = own && kept.key === own.key ? kept.text : null
+  const key = `${lang ?? ''}\n${saved ?? ''}`
+  if (langSaid.key !== key) {
+    langSaid.key = key
+    langSaid.say = toLang(packFor(lang, parsePack(saved)))
+  }
+
+  return langSaid.say
+}
+
+// The session is asked, once per press, to translate the pane's table into a language it carries none for and to
+// write it where the pane reads it. Where the message cannot be sent it goes into the prompt box.
+const askPack = async ($: Api, lang: string) => {
+  const text = packRequest({ lang, file: packFile(lang), source: `${$.plugin.root}/hooks/words.ts` })
+  const isSent = await $.prompt.submit({ text, asUser: true }).then(
+    () => true,
+    () => false,
+  )
+  if (isSent) return void (await update($, langNote, () => `${lang} 번역을 Claude 에게 요청함 — 생길 때까지 영어로 보임`))
+  const isFilled = await fillPrompt($, text)
+  await update($, langNote, () => (isFilled ? '번역 요청을 보내지 못함 — 입력창에 넣음' : '번역 요청을 보내지 못함'))
+}
+
+// A pick of the language row: the project's SCV language, written through SCV's own settings command (one key,
+// the writes one after another). The pane then reads the project again and draws in it; Claude answers in it from
+// the next message. A language the pane carries no table for, with none saved yet, is asked for once here.
+const setLang = async ($: Api, typed: string) => {
+  const lang = cleanLang(typed)
+  if (!lang) return void (await update($, langNote, () => '언어 이름으로 쓸 수 없는 글 — 글자와 숫자, 띄어쓰기만'))
+  await update($, langPick, () => null)
+  const job = langWrite.tail.then(async () => {
+    const shot = await read($, snapshot)
+    const was = langFromSettings(shot.settingsText)
+    if (!shot.core || was === null || was === lang) return
+    const ran = await $.process.run(langSaveArgv(shot.core, lang), { ...(shot.cwd ? { cwd: shot.cwd } : {}), timeoutMs: 15_000 }).catch(() => undefined)
+    if (ran?.exitCode !== 0) return void (await update($, langNote, () => '언어를 바꾸지 못함 — 다시 눌러 주세요'))
+    await refresh($)
+    if (langChoice(lang).pick === 'other' && !(await read($, langPack)).text) return askPack($, lang)
+    await update($, langNote, () => `언어를 바꿈 — 다음 메시지부터 ${langChoice(lang).name}`)
+  })
+  langWrite.tail = job.catch(() => undefined)
+  await langWrite.tail
 }
 
 // A press switches the ask mode through SCV's own settings command, so the next message already follows it.
@@ -895,7 +977,7 @@ const STEP_TOOL_SPEC = {
 // then Claude's own notification tool, which reaches the phone while Remote Control is connected and skips itself
 // when the person is at the screen, and a toast. A way that fails leaves the others to go.
 const alert = async ($: Api, text: string) => {
-  const line = buildAlertText([text])
+  const line = buildAlertText([(await sayOf($))(text)])
   const sent = await $.ui.notify(line, { title: 'SCV' }).catch(() => undefined)
   if (!sent?.isSent) {
     for (const argv of [
@@ -1023,7 +1105,7 @@ const textOrNull = (value: unknown) => (typeof value === 'string' ? value : null
 const takeControls = async ($: Api, state: Partial<MirrorState>) => {
   const acts = typeof state.acts === 'number' ? state.acts : 0
   await update($, hostActs, () => acts)
-  if (acts < MIRROR_ACTS) return
+  if (acts < MIRROR_ACTS_MIN) return
   await update($, light, () => parseLight(state.light))
   await update($, lightSaid, () => textOrNull(state.lightSaid))
   await update($, branchPick, () => (Array.isArray(state.branchPick) ? state.branchPick.filter((one): one is string => typeof one === 'string') : null))
@@ -1109,7 +1191,7 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, actNote, () => null)
   const at = await $.clock.now()
   const name = typeof state.hostName === 'string' ? state.hostName : (mirrored.name ?? null)
-  if (mirrored.at === 0) $.ui.toast(`SCV: ${hostLabel(mirrored.host, name)} 의 상태를 받았습니다`)
+  if (mirrored.at === 0) $.ui.toast((await sayOf($))(`SCV: ${hostLabel(mirrored.host, name)} 의 상태를 받았습니다`))
   await update($, mirror, value => (value ? { ...value, at, name, ...(sentAt !== undefined ? { hostAt: sentAt } : {}) } : value))
 }
 
@@ -1189,6 +1271,8 @@ const doAct = async ($: Api, act: Exclude<MirrorAct, { do: 'fill' }>) => {
       return void (await saveWord($, { avoid: act.avoid, use: act.use, forms: act.forms }, act.was))
     case 'wordsRemove':
       return removeWord($, act.avoid)
+    case 'lang':
+      return setLang($, act.to)
   }
 }
 
@@ -1399,7 +1483,7 @@ const endRun = async ($: Api, go: GearGo, how: { code: number; tail: string }) =
     took >= 1000 ? formatDuration(took) : null,
   ])
   if (took >= GEAR_RUN_MS) return alert($, said)
-  if (go.from === 'band') await Promise.resolve($.ui.toast(`SCV: ${said}`)).catch(() => undefined)
+  if (go.from === 'band') await Promise.resolve($.ui.toast((await sayOf($))(`SCV: ${said}`))).catch(() => undefined)
 }
 
 // A run that stands before a step the person has not said yes to: the card asks, with that step's own lines.
@@ -1797,7 +1881,7 @@ export const register: Register = on => {
     if (message.kind === 'hello') {
       const isNew = !(message.address in (await read($, viewers)))
       await update($, viewers, value => ({ ...value, [message.address]: { sent: '', at: 0, misses: 0 } }))
-      if (isNew) $.ui.toast(`SCV: 다른 세션이 이 세션의 칸을 봅니다 (${message.address})`)
+      if (isNew) $.ui.toast((await sayOf($))(`SCV: 다른 세션이 이 세션의 칸을 봅니다 (${message.address})`))
       await pushMirror($)
     } else if (message.kind === 'bye') {
       await update($, viewers, ({ [message.address]: _gone, ...rest }) => rest)
@@ -1985,7 +2069,8 @@ export const register: Register = on => {
       return next(e)
     }
     drawnHint.name = gear.name
-    const elements = $.ui.resolve(e)
+    const say = await sayOf($)
+    const elements = sayElements($.ui.resolve(e), say)
     const { Box, Text, Button } = elements
     const hasCore = Boolean((await read($, snapshot)).core) && !(await read($, mirror))
     // 사용함: the pane runs the gear itself where it can — at once, or after its values are set or its question is
@@ -2003,7 +2088,7 @@ export const register: Register = on => {
       await update($, gearDismissed, () => gear.name)
       await openPane($).catch(() => undefined)
       const said = did === 'run' ? '창에서 바로 돌림 — 결과는 SCV 칸의 기어 줄에' : did === 'values' ? 'SCV 칸에서 값을 정하면 바로 돌림' : '밖으로 나가는 일 — SCV 칸에서 [실행]을 눌러야 돌아감'
-      await Promise.resolve($.ui.toast(`SCV: ${said}`)).catch(() => undefined)
+      await Promise.resolve($.ui.toast(say(`SCV: ${said}`))).catch(() => undefined)
     }
 
     return (
@@ -2152,7 +2237,8 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const elements = $.ui.resolve(e)
+    const say = await sayOf($)
+    const elements = sayElements($.ui.resolve(e), say)
     const { Box, Text, Button } = elements
     const Select = 'Select' in elements ? elements.Select : undefined
     const Svg = 'Svg' in elements ? elements.Svg : undefined
@@ -2179,11 +2265,12 @@ export const register: Register = on => {
     const askAgain = async () => {
       if (!mirrored) return
       const { sent } = await askMirror($, mirrored.host)
-      $.ui.toast(sent.isDelivered ? 'SCV: 작업 세션에 다시 요청했습니다' : `SCV: 다시 요청을 보내지 못했습니다 — ${sent.reason}`)
+      $.ui.toast(say(sent.isDelivered ? 'SCV: 작업 세션에 다시 요청했습니다' : `SCV: 다시 요청을 보내지 못했습니다 — ${sent.reason}`))
     }
     // The controls of the cards (ask mode, the summary switch, gears, branch, words): this session's own — or,
     // mirroring, the working session's, pressed from here, when its state says it takes such presses.
-    const canAct = Boolean(mirrored) && (await read($, hostActs)) >= MIRROR_ACTS
+    const canAct = Boolean(mirrored) && (await read($, hostActs)) >= MIRROR_ACTS_MIN
+    const canActLang = Boolean(mirrored) && (await read($, hostActs)) >= MIRROR_ACTS_LANG
     const hasControls = !mirrored || canAct
     const liveThere = await read($, hostLive)
     const isHeld = (name: string) => (mirrored ? liveThere.includes(name) : liveRuns.has(name))
@@ -2448,9 +2535,80 @@ export const register: Register = on => {
     const whereNote = await read($, placeNote)
     const folder = shot.root ? shortPath(shot.root, where.home) : null
     const branchLabel = where.branch ? (where.branch.isBranch ? where.branch.name : `${where.branch.name} (브랜치 없음)`) : null
+    // The language row (after 0.6.2), last in the card: the project's SCV language, picked from the languages the
+    // pane carries or typed by name. Only where the project has a settings file; a viewer's press goes to the working
+    // session, and only to one that takes it.
+    const langNow = langFromSettings(shot.settingsText)
+    const langView = langNow ? langChoice(langNow) : null
+    const langOpen = await read($, langPick)
+    const langLine = await read($, langNote)
+    const canPickLang = hasControls && (mirrored ? canActLang : Boolean(shot.core))
+    const isPackMissing = !mirrored && langView?.pick === 'other' && !parsePack((await read($, langPack)).text)
+    const pickLang = async (to: string) => {
+      if (to === 'other') return void (await update($, langPick, () => 'other' as const))
+      if (!mirrored) return setLang($, to)
+      await update($, langPick, () => null)
+      const lang = cleanLang(to)
+      if (!lang) return void (await update($, langNote, () => '언어 이름으로 쓸 수 없는 글 — 글자와 숫자, 띄어쓰기만'))
+      if (lang !== langNow) await pressAct('limits', { do: 'lang', to: lang })
+    }
+    const langRows = () =>
+      langView
+        ? [
+            <Box key="lang-row" flexDirection="row" gap={1} alignItems="center">
+              <Text bold>언어</Text>
+              {canPickLang ? (
+                <Button
+                  key="lang-open"
+                  label={`${langView.name} ${langOpen ? '▴' : '▾'}`}
+                  onPress={() => void Promise.all([update($, langPick, value => (value ? null : ('list' as const))), update($, langNote, () => null)]).catch(() => undefined)}
+                />
+              ) : (
+                <Text dimColor>{langView.name}</Text>
+              )}
+            </Box>,
+            ...(langOpen && canPickLang
+              ? [
+                  <Box key="lang-list" flexDirection="column">
+                    {Select ? (
+                      <Select key="lang-pick" label="언어 고르기" options={[...LANG_OPTIONS]} value={langOpen === 'other' ? 'other' : langView.pick} onSelect={(value: string) => void pickLang(value).catch(() => undefined)} />
+                    ) : (
+                      LANG_OPTIONS.map(one => <Button key={`lang-to-${one.value}`} label={one.label} onPress={() => void pickLang(one.value).catch(() => undefined)} />)
+                    )}
+                    {langOpen !== 'other' ? null : Input ? (
+                      <Input
+                        key="lang-name"
+                        label="다른 언어"
+                        placeholder="언어 이름 — 예: français"
+                        value={langView.pick === 'other' ? langView.name : ''}
+                        submitLabel="이 언어로"
+                        onInput={(value: string) => void (langTyped.name = value)}
+                        onSubmit={(value: string) => {
+                          langTyped.name = value
+                          void pickLang(cleanLang(value) ?? '').catch(() => undefined)
+                        }}
+                      />
+                    ) : (
+                      <Text dimColor>이 화면에는 입력 칸이 없어 값을 적을 수 없습니다.</Text>
+                    )}
+                  </Box>,
+                ]
+              : []),
+            ...(langLine ? [<Text key="lang-note" dimColor>{langLine}</Text>] : []),
+            ...(isPackMissing && !langLine
+              ? [
+                  <Box key="lang-missing" flexDirection="row" gap={1} alignItems="center">
+                    <Text dimColor>{`${langView.name} 번역이 아직 없음 — 영어로 보임`}</Text>
+                    {canPickLang ? <Button key="lang-ask" label="번역 요청" onPress={() => void askPack($, langView.name).catch(() => undefined)} /> : null}
+                  </Box>,
+                ]
+              : []),
+          ]
+        : []
+
     // The folder and branch the session works in, then context · usage; a row only for a value this session has.
     const limitsCard = () =>
-      usage || context || folder
+      usage || context || folder || langView
         ? card(
             <Box flexDirection="column">
               {folder ? (
@@ -2519,6 +2677,7 @@ export const register: Register = on => {
               ) : said ? (
                 <Text dimColor>{said.value}</Text>
               ) : null}
+              {langRows()}
               {sentNote('limits')}
             </Box>,
             '#4f8cff',
