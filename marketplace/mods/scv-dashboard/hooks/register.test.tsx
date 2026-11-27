@@ -6606,7 +6606,7 @@ test('lang T16 영어로 그려도 느려지지 않는다 — 한국어로 그�
 })
 
 // ── pane: the task list is shown again after a clear ─────────────────────────────
-import { afterClearBrief, listToolOf, repinBrief, repinOf, REPIN_PROMPT, REPIN_TAG } from './model'
+import { afterClearBrief, isListClosed, listToolOf, repinBrief, repinOf, REPIN_PROMPT, REPIN_TAG, WRAP_TOOL } from './model'
 import type { Repin } from './model'
 
 const LIST_TOOL = 'mcp__ccd_turn__update_plan'
@@ -6618,11 +6618,18 @@ const REPIN_ITEMS: Repin['items'] = [
 const REPIN_DONE: Repin['items'] = REPIN_ITEMS.map(item => ({ ...item, status: 'completed' as const }))
 const asTasks = (items: Repin['items']) => items.map((item, i) => ({ id: String(i + 1), subject: item.content, status: item.status }))
 
-test('repin T1 · T2 순수부 — 목록을 통째로 보내는 도구만 가리고, 끝나지 않은 할 일이 있을 때만 다시 띄울 것이 있다', () => {
+test('repin T1 · T2 순수부 — 목록을 통째로 보내는 도구만 가리고, 목록이 있으면 모두 끝난 것도 다시 띄울 것이 있다', () => {
   expect([LIST_TOOL, 'TodoWrite', 'TaskCreate', 'Bash'].map(listToolOf)).toEqual([LIST_TOOL, 'TodoWrite', null, null])
 
   expect(repinOf(asTasks(REPIN_ITEMS), LIST_TOOL)).toEqual({ tool: LIST_TOOL, items: REPIN_ITEMS })
-  expect(repinOf(asTasks(REPIN_DONE), LIST_TOOL)).toBeNull()
+  expect(repinOf(asTasks(REPIN_DONE), LIST_TOOL)).toEqual({ tool: LIST_TOOL, items: REPIN_DONE })
+  // a closed list goes as all done, whatever state the model had last sent
+  expect(repinOf(asTasks(REPIN_ITEMS), LIST_TOOL, true)).toEqual({ tool: LIST_TOOL, items: REPIN_DONE })
+  expect(repinOf([], LIST_TOOL, true)).toBeNull()
+  // closed: wrapped up after the list last changed, and no work left running
+  expect(isListClosed(true, NO_JOBS)).toBe(true)
+  expect(isListClosed(false, NO_JOBS)).toBe(false)
+  expect(isListClosed(true, { jobs: [], extra: 1 })).toBe(false)
   expect(repinOf([], LIST_TOOL)).toBeNull()
   expect(repinOf(asTasks(REPIN_ITEMS), null)).toBeNull()
 })
@@ -6700,7 +6707,7 @@ test('repin T6 · T7 · T10 비운 뒤 직전 대화 줄 다음에 글을 한 �
   expect(kit.store.has(CLEAR_KEY)).toBe(false)
 })
 
-test('repin T8 모두 끝난 목록이면 비운 뒤에도 글을 보내지 않는다', async ($, on) => {
+test('repin T8 모두 끝난 목록도 비운 뒤에 다시 띄운다 — 끝난 일이 보인다', async ($, on) => {
   const kit = nowEngine(on)
   withProject(kit)
   withRecord(kit)
@@ -6714,11 +6721,71 @@ test('repin T8 모두 끝난 목록이면 비운 뒤에도 글을 보내지 않�
   })
   await start($)
 
-  // a list all done: cleared, and nothing sent or carried
+  // a list all done: cleared, the line is sent once and the list is carried as it stands
   await listedTurn($, opts, REPIN_DONE, 62)
   expect(seen.cleared).toBe(1)
-  expect(submitted).toEqual([])
-  expect(seen.firstText.join('\n')).not.toContain('비우기 전 할 일 목록')
+  expect(submitted).toEqual([REPIN_PROMPT])
+  expect(seen.firstText.join('\n')).toContain(repinBrief({ tool: LIST_TOOL, items: REPIN_DONE }) ?? 'none')
+})
+
+// A turn in which the list tool is called with `items`, then the calls in `after`, ending `percent` full.
+const wrappedTurn = async ($: Engine, opts: { percent: number }, after: Record<string, unknown>[], percent: number) => {
+  await $.turn.start({ text: '고쳐 줘', turnId: 't1' })
+  await $.tool.call({ tool: LIST_TOOL, items: REPIN_ITEMS } as never)
+  for (const call of after) await $.tool.call(call as never)
+  opts.percent = percent
+  await $.turn.complete({ turnId: 't1', answer: '끝났습니다', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+  await settle()
+}
+
+test('repin T13 마무리 호출로 끝난 턴의 목록은 모두 끝난 것으로 다시 띄운다 — 앱이 그때 목록을 닫는다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  on('prompt.submit', (_, e) => ({ text: e.text }) as never)
+  await start($)
+  await wrappedTurn($, opts, [{ tool: WRAP_TOOL, recap: '끝났습니다' }], 62)
+
+  expect(seen.cleared).toBe(1)
+  expect(seen.firstText.join('\n')).toContain(repinBrief({ tool: LIST_TOOL, items: REPIN_DONE }) ?? 'none')
+})
+
+test('repin T14 마무리 호출 뒤에도 뒤에서 도는 일이 있으면 목록은 보낸 그대로 다시 띄운다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  on('prompt.submit', (_, e) => ({ text: e.text }) as never)
+  await start($)
+  await wrappedTurn(
+    $,
+    opts,
+    [
+      { tool: 'Bash', command: 'npm run measure', description: '측정 128판', run_in_background: true },
+      { tool: WRAP_TOOL, recap: '뒤에서 도는 중입니다' },
+    ],
+    62,
+  )
+
+  expect(seen.cleared).toBe(1)
+  expect(seen.firstText.join('\n')).toContain(repinBrief({ tool: LIST_TOOL, items: REPIN_ITEMS }) ?? 'none')
+})
+
+test('repin T15 마무리 호출 뒤에 목록을 다시 보내면 그 목록은 보낸 그대로 다시 띄운다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  on('prompt.submit', (_, e) => ({ text: e.text }) as never)
+  await start($)
+  await wrappedTurn($, opts, [{ tool: WRAP_TOOL, recap: '끝났습니다' }, { tool: LIST_TOOL, items: REPIN_ITEMS }], 62)
+
+  expect(seen.cleared).toBe(1)
+  expect(seen.firstText.join('\n')).toContain(repinBrief({ tool: LIST_TOOL, items: REPIN_ITEMS }) ?? 'none')
 })
 
 test('repin T8 목록이 없으면 비운 뒤에도 글을 보내지 않는다', async ($, on) => {
