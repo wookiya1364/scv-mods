@@ -218,6 +218,9 @@ declare module 'claude-code' {
       gearAsks: GearAsks
       light: { isOn: boolean; percent: number }
       lightSaid: string | null
+      langPack: { key: string; text: string | null }
+      langPick: 'list' | 'other' | null
+      langNote: string | null
       talks: { user: string; answer: string }[]
       shownTalk: string
       storedTalk: string
