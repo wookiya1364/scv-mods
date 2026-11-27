@@ -129,6 +129,11 @@ import {
   wasCleared,
   parseClearKept,
   jobsBrief,
+  afterClearBrief,
+  listToolOf,
+  repinBrief,
+  repinOf,
+  REPIN_PROMPT,
   keepTalk,
   talkPage,
   storedTalkPage,
@@ -320,6 +325,10 @@ const sayCleared = async ($: Api, before: number | null, at: number) => {
 // A conversation starts after a clear. When this mod kept values for it (its own clear, moments ago): the clear is
 // taken as seen, the pane says so, and the work the turns left running comes back as the text to hand the new
 // conversation — null when no work was left, and for a clear this mod kept nothing for (the person's own).
+// The tool the task list was last made with, when it sends the whole list at once (the list is shown again with it
+// after a clear). The module's own: a reload starts it over, and the next call of such a tool sets it again.
+const listRun = { tool: null as string | null }
+
 const afterClear = async ($: Api): Promise<string | null> => {
   const key = clearKey(await $.session.cwd().catch(() => ''))
   const kept = parseClearKept(await $.store.get(key).catch(() => undefined), await $.clock.now())
@@ -328,7 +337,7 @@ const afterClear = async ($: Api): Promise<string | null> => {
   lightRun.isCleared = lightRun.isClearing
   await sayCleared($, kept.before, kept.at)
 
-  return jobsBrief(kept.board)
+  return afterClearBrief(jobsBrief(kept.board), repinBrief(kept.repin))
 }
 
 // Asks the terminal for its tabs when the board holds a tab's command, as a turn of the main conversation ends —
@@ -370,7 +379,8 @@ const clearNow = async ($: Api, before: number | null, at: number, recordPath: s
   const remembered = await read($, talks)
   const page = talkPage(remembered, recordPath)
   const stored = storedTalkPage(remembered)
-  const kept: ClearKept = { before, at, board: await runningBoard($) }
+  const repin = repinOf(await read($, tasks), listRun.tool)
+  const kept: ClearKept = { before, at, board: await runningBoard($), ...(repin ? { repin } : {}) }
   await $.store.set(key, kept).catch(() => undefined)
   lightRun.isClearing = true
   lightRun.isCleared = false
@@ -381,6 +391,10 @@ const clearNow = async ($: Api, before: number | null, at: number, recordPath: s
   await $.store.delete(key).catch(() => undefined)
   if (isCleared) await sayCleared($, before, at)
   if (isCleared) await showTalk($, page, stored)
+  // The list from before the clear is shown again by the model, in a turn this prompt starts (the app draws the list
+  // only for a call the model makes in a turn). Not awaited: the call resolves when that turn starts, and this runs
+  // while the turn before it is still ending.
+  if (isCleared && repin) void $.prompt.submit({ text: REPIN_PROMPT }).catch(() => undefined)
 
   return isCleared
 }
@@ -2184,6 +2198,7 @@ export const register: Register = on => {
       const before = await read($, tasks)
       const listed = applyTaskEvent(before, e.tool, input, at)
       await update($, tasks, () => listed)
+      listRun.tool = listToolOf(e.tool) ?? listRun.tool
       for (const subject of newlyDone(before, listed)) await update($, doneLog, list => applyDone(list, { at, text: `${subject} 끝`, isOk: true }))
     } else {
       await update($, agents, list => applyAgentEvent(list, { kind: 'tool', id: e.agentId ?? '', tool: e.tool, target: describeTool(e.tool, input), at }))
