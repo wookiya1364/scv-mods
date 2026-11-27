@@ -2190,7 +2190,36 @@ export const wasCleared = (seen: { isEndSeen: boolean; idBefore: string | null; 
 
 // What is kept in the store before a clear, for the conversation that starts after it: how full the conversation
 // was, when the clear was asked for, and the work the turns left running.
-export type ClearKept = { before: number | null; at: number; board: JobBoard }
+// The tools that send the whole task list in one call: the desktop app's and the terminal's. A list built an item at
+// a time (TaskCreate) is not sent again.
+const LIST_TOOLS: readonly string[] = [PLAN_TOOL, 'TodoWrite']
+const REPIN_ROOM = 50
+const REPIN_WIDTH = 300
+
+// The tool a call made the task list with, when it is one that sends the whole list at once; null for any other.
+export const listToolOf = (tool: string): string | null => (LIST_TOOLS.includes(tool) ? tool : null)
+
+// The task list to show again after a clear: the tool it was made with, and its items in order.
+export type Repin = { tool: string; items: { content: string; status: Task['status'] }[] }
+
+// What is shown again after a clear: the list as it stands with the tool that made it. Null with no such tool, an
+// empty list, or a list all done — then no turn is spent.
+export const repinOf = (tasks: readonly Task[], tool: string | null): Repin | null =>
+  tool === null || !tasks.some(task => task.status !== 'completed')
+    ? null
+    : { tool, items: tasks.slice(0, REPIN_ROOM).map(task => ({ content: cutLine(task.subject, REPIN_WIDTH), status: task.status })) }
+
+// A kept list read back: null for anything of another shape (a value an older version kept has none).
+const parseRepin = (kept: unknown): Repin | null => {
+  const one = (kept ?? {}) as { tool?: unknown; items?: unknown }
+  if (typeof one.tool !== 'string' || listToolOf(one.tool) === null || !Array.isArray(one.items) || one.items.length === 0) return null
+  const items = one.items as { content?: unknown; status?: unknown }[]
+  if (!items.every(item => typeof item?.content === 'string' && TASK_STATES.includes(String(item.status)))) return null
+
+  return { tool: one.tool, items: items.map(item => ({ content: String(item.content), status: item.status as Task['status'] })) }
+}
+
+export type ClearKept = { before: number | null; at: number; board: JobBoard; repin?: Repin }
 
 const CLEAR_KEPT_MS = 2 * 60_000
 const JOB_KINDS: readonly string[] = ['command', 'watch', 'terminal', 'agent']
@@ -2204,8 +2233,43 @@ export const parseClearKept = (kept: unknown, at: number): ClearKept | null => {
     (job): job is Job => typeof job?.id === 'string' && typeof job?.title === 'string' && JOB_KINDS.includes(job?.kind),
   )
 
-  return { before: typeof one.before === 'number' ? one.before : null, at: one.at, board: { jobs, extra: typeof one.board?.extra === 'number' ? one.board.extra : 0 } }
+  const repin = parseRepin((kept as { repin?: unknown } | null | undefined)?.repin)
+
+  return {
+    before: typeof one.before === 'number' ? one.before : null,
+    at: one.at,
+    board: { jobs, extra: typeof one.board?.extra === 'number' ? one.board.extra : 0 },
+    ...(repin ? { repin } : {}),
+  }
 }
+
+// The task list from before a clear, for the model alone: the tool to call and the very input to send it, one line.
+// Null when there is no list to show again.
+export const repinBrief = (repin: Repin | null | undefined): string | null => {
+  if (!repin) return null
+  const input =
+    repin.tool === 'TodoWrite'
+      ? { todos: repin.items.map(item => ({ content: item.content, status: item.status, activeForm: item.content })) }
+      : { items: repin.items, scope: 'continuation' }
+
+  return [
+    `[SCV 비우기 전 할 일 목록] 대화를 비우기 전에 떠 있던 할 일 목록입니다. 대시보드가 곧 "<${REPIN_TAG}>" 로 감싼 글을 보내면, 첫 도구 호출로 ${repin.tool} 에 아래 값을 그대로 보내 목록을 다시 띄우고, 지금 상태를 한 줄로 말한 뒤 턴을 끝내세요. 그 턴에서 남은 일을 새로 시작하지 마세요.`,
+    JSON.stringify(input),
+  ].join('\n')
+}
+
+// What the model is handed after a clear, as one text: each part that is there, a blank line between. Null with none.
+export const afterClearBrief = (...parts: (string | null)[]): string | null => {
+  const there = parts.filter((part): part is string => part !== null && part !== '')
+
+  return there.length === 0 ? null : there.join('\n\n')
+}
+
+// The prompt this mod sends right after its clear, so a turn starts and the model shows the list again. One tag
+// around it: SCV reads a prompt that is such a block alone as a machine's, not the person's. The list itself is in
+// the brief above, not here — the row the person sees stays short.
+export const REPIN_TAG = 'scv-dashboard'
+export const REPIN_PROMPT = `<${REPIN_TAG}>\n비우기 전 할 일 목록을 다시 띄우세요 — 목록과 방법은 이 대화 첫머리의 "[SCV 비우기 전 할 일 목록]" 안내에 있습니다. 첫 도구 호출로 띄우고, 지금 상태를 한 줄로 말한 뒤 끝내세요. 남은 일을 새로 시작하지 마세요.\n</${REPIN_TAG}>`
 
 const JOB_KIND_WORD: Record<Job['kind'], string> = { command: '명령', watch: '감시', terminal: '터미널 탭의 명령', agent: '하위 작업' }
 

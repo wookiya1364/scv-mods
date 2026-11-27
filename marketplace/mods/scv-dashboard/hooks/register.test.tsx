@@ -6604,3 +6604,206 @@ test('lang T16 영어로 그려도 느려지지 않는다 — 한국어로 그�
   expect(english).toBeLessThanOrEqual(korean * 1.5 + 1)
   await ui.unmount()
 })
+
+// ── pane: the task list is shown again after a clear ─────────────────────────────
+import { afterClearBrief, listToolOf, repinBrief, repinOf, REPIN_PROMPT, REPIN_TAG } from './model'
+import type { Repin } from './model'
+
+const LIST_TOOL = 'mcp__ccd_turn__update_plan'
+const REPIN_ITEMS: Repin['items'] = [
+  { content: '코드 읽기', status: 'completed' },
+  { content: '시험 쓰기', status: 'in_progress' },
+  { content: '고치기', status: 'pending' },
+]
+const REPIN_DONE: Repin['items'] = REPIN_ITEMS.map(item => ({ ...item, status: 'completed' as const }))
+const asTasks = (items: Repin['items']) => items.map((item, i) => ({ id: String(i + 1), subject: item.content, status: item.status }))
+
+test('repin T1 · T2 순수부 — 목록을 통째로 보내는 도구만 가리고, 끝나지 않은 할 일이 있을 때만 다시 띄울 것이 있다', () => {
+  expect([LIST_TOOL, 'TodoWrite', 'TaskCreate', 'Bash'].map(listToolOf)).toEqual([LIST_TOOL, 'TodoWrite', null, null])
+
+  expect(repinOf(asTasks(REPIN_ITEMS), LIST_TOOL)).toEqual({ tool: LIST_TOOL, items: REPIN_ITEMS })
+  expect(repinOf(asTasks(REPIN_DONE), LIST_TOOL)).toBeNull()
+  expect(repinOf([], LIST_TOOL)).toBeNull()
+  expect(repinOf(asTasks(REPIN_ITEMS), null)).toBeNull()
+})
+
+test('repin T3 보관한 값에서 다시 띄울 것을 읽는다 — 옛 모양과 엉뚱한 상태는 목록 없이 나머지만', () => {
+  const repin: Repin = { tool: LIST_TOOL, items: REPIN_ITEMS }
+
+  expect(parseClearKept({ before: 62, at: 1_000, board: NO_JOBS, repin }, 2_000)).toEqual({ before: 62, at: 1_000, board: NO_JOBS, repin })
+  const old = parseClearKept({ before: 62, at: 1_000, board: NO_JOBS }, 2_000)
+  expect(old).toEqual({ before: 62, at: 1_000, board: NO_JOBS })
+  expect(old?.repin).toBeUndefined()
+  const odd = parseClearKept({ before: 62, at: 1_000, board: NO_JOBS, repin: { tool: LIST_TOOL, items: [{ content: 'x', status: 'someday' }] } }, 2_000)
+  expect(odd).toEqual({ before: 62, at: 1_000, board: NO_JOBS })
+  expect(parseClearKept({ before: 62, at: 1_000, board: NO_JOBS, repin: { tool: 'TaskCreate', items: REPIN_ITEMS } }, 2_000)?.repin).toBeUndefined()
+})
+
+test('repin T4 · T5 안내 글 — 도구 이름과 그대로 보낼 값이 실리고, 뒤에서 도는 일 안내와 하나로 이어진다', () => {
+  const brief = repinBrief({ tool: LIST_TOOL, items: REPIN_ITEMS }) ?? ''
+  const [head, json] = brief.split('\n')
+  expect(head).toContain('[SCV 비우기 전 할 일 목록]')
+  expect(head).toContain(LIST_TOOL)
+  expect(head).toContain(`<${REPIN_TAG}>`)
+  expect(head).toContain('새로 시작하지 마세요')
+  expect(JSON.parse(json ?? '{}')).toEqual({ items: REPIN_ITEMS, scope: 'continuation' })
+
+  const todo = repinBrief({ tool: 'TodoWrite', items: REPIN_ITEMS }) ?? ''
+  expect(todo.split('\n')[0]).toContain('TodoWrite')
+  expect(JSON.parse(todo.split('\n')[1] ?? '{}')).toEqual({ todos: REPIN_ITEMS.map(item => ({ ...item, activeForm: item.content })) })
+  expect(repinBrief(null)).toBeNull()
+  expect(repinBrief(undefined)).toBeNull()
+
+  expect(afterClearBrief('뒤의 일', '목록')).toBe('뒤의 일\n\n목록')
+  expect(afterClearBrief('뒤의 일', null)).toBe('뒤의 일')
+  expect(afterClearBrief(null, '목록')).toBe('목록')
+  expect(afterClearBrief(null, null)).toBeNull()
+
+  expect(REPIN_PROMPT.startsWith(`<${REPIN_TAG}>\n`)).toBe(true)
+  expect(REPIN_PROMPT.endsWith(`\n</${REPIN_TAG}>`)).toBe(true)
+  expect(REPIN_PROMPT.split('\n')).toHaveLength(3)
+})
+
+// A turn in which the list tool is called with `items`, ending with the conversation `percent` full.
+const listedTurn = async ($: Engine, opts: { percent: number }, items: Repin['items'] | null, percent: number) => {
+  await $.turn.start({ text: '고쳐 줘', turnId: 't1' })
+  if (items) await $.tool.call({ tool: LIST_TOOL, items } as never)
+  opts.percent = percent
+  await $.turn.complete({ turnId: 't1', answer: '하는 중입니다', durationMs: 1, isAborted: false, reason: 'answer' } as never)
+  await settle()
+}
+
+test('repin T6 · T7 · T10 비운 뒤 직전 대화 줄 다음에 글을 한 번 보내고, 비운 뒤의 안내에 비우기 전 목록이 실린다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  const submitted: { text: string; pages: number; cleared: number }[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push({ text: e.text, pages: seen.pages.length, cleared: seen.cleared })
+
+    return { text: e.text } as never
+  })
+  await start($)
+  await listedTurn($, opts, REPIN_ITEMS, 62)
+
+  expect(seen.commands).toEqual(['clear'])
+  // one prompt, the tagged line, sent once the clear was seen and the last exchanges were drawn
+  expect(submitted).toEqual([{ text: REPIN_PROMPT, pages: 1, cleared: 1 }])
+  // the list itself goes to the model alone, in what the new conversation starts with
+  expect(seen.firstText.join('\n')).toContain(repinBrief({ tool: LIST_TOOL, items: REPIN_ITEMS }) ?? 'none')
+  // the row of the last exchanges is as before: no list in it
+  expect(seen.pages[0]).toContain('직전 대화 1 / 1')
+  expect(seen.pages[0]).not.toContain('시험 쓰기')
+  // the kept values are used once
+  expect(kit.store.has(CLEAR_KEY)).toBe(false)
+})
+
+test('repin T8 모두 끝난 목록이면 비운 뒤에도 글을 보내지 않는다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  const submitted: string[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+
+    return { text: e.text } as never
+  })
+  await start($)
+
+  // a list all done: cleared, and nothing sent or carried
+  await listedTurn($, opts, REPIN_DONE, 62)
+  expect(seen.cleared).toBe(1)
+  expect(submitted).toEqual([])
+  expect(seen.firstText.join('\n')).not.toContain('비우기 전 할 일 목록')
+})
+
+test('repin T8 목록이 없으면 비운 뒤에도 글을 보내지 않는다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  const submitted: string[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+
+    return { text: e.text } as never
+  })
+  await start($)
+  await listedTurn($, opts, null, 62)
+
+  expect(seen.cleared).toBe(1)
+  expect(submitted).toEqual([])
+  expect(seen.firstText.join('\n')).not.toContain('비우기 전 할 일 목록')
+})
+
+test('repin T9 사람이 직접 비운 뒤에는 글을 보내지 않고 안내에도 목록이 없다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  const submitted: string[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+
+    return { text: e.text } as never
+  })
+  await start($)
+  await listedTurn($, opts, REPIN_ITEMS, 10)
+  // the person's own /clear: the session ends as a clear and starts anew, with nothing kept by the mod
+  await $.session.end({ reason: 'clear', sessionId: 'local-id', resume: { id: 'local-id' } } as never)
+  const started = await $.classic.SessionStart({ source: 'clear' } as never)
+  await settle()
+
+  expect(seen.commands).toEqual([])
+  expect(submitted).toEqual([])
+  expect((started.additionalContext ?? []).join('\n')).not.toContain('비우기 전 할 일 목록')
+})
+
+test('repin T8 거울 세션은 비우지도 글을 보내지도 않는다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  kit.proc.stdout = JSON.stringify({ sessionId: 'local-id', bridgeSessionId: 'session_viewer' })
+  const opts = { hasTurns: true, percent: 10 }
+  const seen = clearEngine($, on, kit, opts)
+  const submitted: string[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+
+    return { text: e.text } as never
+  })
+  await start($)
+  const asked = await $.command.run({ command: 'scv-mirror', args: 'session_host' } as never)
+  expect(asked.text).toContain('거울 요청을 보냈습니다')
+  await listedTurn($, opts, REPIN_ITEMS, 62)
+
+  expect(seen.commands).not.toContain('clear')
+  expect(submitted).toEqual([])
+})
+
+test('repin T8 비우기가 확인되지 않으면 끝나지 않은 목록이 있어도 글을 보내지 않는다', async ($, on) => {
+  const kit = nowEngine(on)
+  withProject(kit)
+  withRecord(kit)
+  const opts = { hasTurns: true, percent: 10, clear: 'idle' as const }
+  const seen = clearEngine($, on, kit, opts)
+  const submitted: string[] = []
+  on('prompt.submit', (_, e) => {
+    submitted.push(e.text)
+
+    return { text: e.text } as never
+  })
+  await start($)
+  await listedTurn($, opts, REPIN_ITEMS, 62)
+
+  // the clear was asked for and changed nothing
+  expect(seen.commands[0]).toBe('clear')
+  expect(seen.cleared).toBe(0)
+  expect(submitted).toEqual([])
+})
