@@ -4,30 +4,77 @@ Claude Code mods for the SCV workflow.
 
 ## Mods
 
-- **scv-dashboard** — the SCV dashboard, in an "SCV" pane beside the chat in the Claude desktop app (local sessions). It reads the session folder's `scv/promote/*/PLAN.md` and `TESTS.md` (read only; with no plan in progress, the newest archived plans under `scv/archive/` stand in) and shows:
-  - a one-line summary at the top (where the work stands · anything stuck · time left) and the next thing to do, with buttons that put its command in the prompt box (keeping what you typed; copied instead where the box will not take it) or copy it, and the same command offered as the prompt box's dim suggestion (Tab) when a turn ends; the plan status in plain words
-  - plan progress (Suggested path steps done / total) with a traffic-light bar, and the stage flow as connected step nodes (done · doing · blocked · waiting, with a "지금 여기" tag where the work stands); steps are read from `[x]` / `[~]` / `[!]` marks merged with the step signals Claude sends while it works (the `scv_step` tool the mod registers, which asks no permission and changes no file; Claude is told about it only while a plan is open in `scv/promote`), else estimated from the plan status
-  - what Claude is doing now: the step, the tool and its file or command, elapsed time, the todo list, and one line per subagent at work (five at most, the rest counted)
-  - while you were away: what happened since your last message — steps finished, test runs and their outcome, and what waits on you
-  - an estimated finish time from how long the steps took (always marked as an estimate)
-  - blocked cards: waiting for your answer, waiting for your permission, a turn stopped by an error or a refusal, a failed test run
-  - test results per TESTS.md scenario, from test commands run in a session; the last results are kept in the mod's own store per project folder, so a new session still shows them
-  - the usage limits: how much of the 5-hour and 7-day windows is used and when the 5-hour one resets
-  - alerts when Claude waits for your answer or your permission, a test run fails, a turn of 2 minutes or more finishes, a turn stops on an error or a refusal, or a usage window passes 90% (once per window): the app's notification, else the system's own, and Claude's own notification tool, which also reaches your phone while Remote Control is connected
-  - the project is the nearest folder at or above the session's folder that holds `scv/`, so a session opened in a subfolder still sees its plans
-  - press a step node to see what that step does, in plain words from the plan's pipeline table (its 하는 일 column), and what was done during it in this session; a step line names its pipeline steps after a dash: `3. Draw the pane — \`render\``
-  - a plan picker when there are several plans; buttons to expand each section
+- **scv-dashboard** — the SCV dashboard: an "SCV" pane beside the chat in the Claude desktop app. It shows where the plan stands, what Claude is doing now, and what waits on you, without reading the conversation.
 
-  It opens when a session starts; if you close it, it reopens on your next message, or type `/scv-dashboard`. The terminal is not a target.
+<p align="center"><img src="assets/dashboard.png" width="420" alt="The SCV pane in the Claude desktop app: folder and branch, context and usage limits, auto-clear, language, ask mode, gears, the plan's step flow, the word dictionary" /></p>
 
-  A Remote Control viewer (the desktop app on another computer, claude.ai, the phone) cannot draw the pane. To see it on another computer, mirror it — see [Mirror: the pane on another computer](#mirror-the-pane-on-another-computer).
+<p align="center"><sub>A real session, shown in Korean — the pane also speaks English and Japanese.</sub></p>
+
+## scv-dashboard: what the pane shows
+
+It opens when a session starts. If you close it, it reopens on your next message, or type `/scv-dashboard`.
+
+The project is the nearest folder at or above the session's folder that holds `scv/`. The pane reads that folder's plans (`scv/promote/*/PLAN.md` and `TESTS.md`); with no plan in progress, the newest archived plans stand in.
+
+**Always on top**
+
+- the folder and the branch — press the branch name to switch branch (git refuses a switch that would lose uncommitted work; no switch while Claude is working)
+- context used and the usage limits (5-hour and 7-day windows, and when the 5-hour one resets)
+- the ask mode (ask everywhere, or only at the start and the end) with a button that switches it
+- auto-clear: on or off, and the threshold (%) on a slider
+- the language of the pane: 한국어, English, 日本語, or type another language's name
+- the gears of the project, each with a [Run] button
+- the word dictionary: add, edit, delete
+
+**The plan**
+
+- a one-line summary: where the work stands, anything stuck, time left (an estimate, marked as one)
+- the next thing to do, with a button that puts its command in the prompt box
+- the step flow as connected nodes: done, doing, doing in the background, blocked, waiting
+- press a step to see what it does, what was done during it, and its evidence (pictures, videos, pages to open); a picture opens full size
+- a plan picker when there are several plans
+
+**The work**
+
+- what Claude is doing now: the step, the tool and its file or command, elapsed time, the task list, one line per subagent
+- background work, with the last line of its log
+- test results per `TESTS.md` scenario, kept per project so a new session still shows them
+- what happened since your last message
+
+**What waits on you**
+
+- cards: waiting for your answer, waiting for your permission, a turn stopped by an error or a refusal, a failed test run
+- alerts for the same, for a turn of 2 minutes or more that finished, and for a usage window past 90%; they also reach your phone while Remote Control is connected
+
+Sections you do not need now fold under "more"; a blocked card never folds.
+
+## scv-dashboard: what the pane does
+
+| You press | What happens |
+|---|---|
+| [Run] on a gear | the pane runs it — no model call |
+| [Run] on a gear that takes values | value fields open first |
+| [Run] on a gear that reaches outside | it shows the step and waits for [Run] · [Cancel] |
+| [Stop] | the running gear stops |
+| the ask-mode button | the mode switches from the next message |
+| the auto-clear switch · slider | saved in the project's settings |
+| a language | the pane's text and Claude's answers follow it |
+| the branch name | a branch list; pick one to switch |
+| the next-step button | its command goes into the prompt box |
+
+**Auto-clear.** When a turn ends with the context past the threshold, the pane clears the conversation instead of summarizing it; the new conversation starts from the end of the SCV record. Right after, it shows the last three exchanges again (`/scv-last-talk`) and has Claude bring the task list back. The settings are `SCV_CLEAR_AUTO` and `SCV_CLEAR_PERCENT` in `scv/scv_settings.json` (default: on, 50%). A project with no SCV record is summarized as before.
+
+**Language.** The choice is `SCV_LANG` in `scv/scv_settings.json`, the same setting that decides the language Claude answers in. For a language other than the three built in, Claude translates the pane's text once and saves it under `scv/dashboard-lang/`.
+
+**Not drawn everywhere.** The pane is drawn only in a session opened in the desktop app. The terminal has no pane, and a Remote Control viewer (the desktop app on another computer, claude.ai, the phone) cannot draw it. To see it on another computer, mirror it — see [Mirror: the pane on another computer](#mirror-the-pane-on-another-computer).
 
 ## Mirror: the pane on another computer
 
 1. In the working session on computer A, type `/scv-dashboard`. It prints the session's address (its Remote Control id while Remote Control is on).
 2. On computer B, open a session in that computer's own desktop app and type `/scv-mirror <address>`.
 3. B's SCV pane now shows A's state, sent between the two sessions and never read by either model.
-4. `/scv-mirror` alone says what it mirrors; `/scv-mirror stop` ends it.
+4. The buttons work on B too: a press is sent to A's session, which does it (scv-dashboard 0.6.0 or later).
+5. `/scv-mirror` alone says what it mirrors; `/scv-mirror stop` ends it.
 
 ```mermaid
 %%{init: {'theme':'base', 'themeVariables': {'primaryColor':'#1e1e1e','primaryTextColor':'#fff','primaryBorderColor':'#9096a8','lineColor':'#e7e9f0','secondaryColor':'#2d2d2d','tertiaryColor':'#1e1e1e','background':'#171922','edgeLabelBackground':'#171922'}}}%%
@@ -61,7 +108,7 @@ Each mod has a version number, shown by `/scv:mods` and `claude plugin list`. Wh
 
 ## Install
 
-At the prompt of a terminal session:
+With SCV installed, type `/scv:mods-install` and pick `scv-dashboard`. Without it, at the prompt of a terminal session:
 
 ```
 /plugin install scv-dashboard --marketplace wookiya1364/scv-mods
@@ -79,7 +126,7 @@ This repository is public, so anyone can install the mods with the lines above; 
 
 ## Update
 
-`/scv:mods` (SCV 0.70.0 or later) updates every installed mod and lists them with their versions. From a shell instead:
+`/scv:update` updates SCV and every installed mod; `/scv:mods` (SCV 0.70.0 or later) updates only the mods and lists them with their versions. From a shell instead:
 
 ```
 claude plugin marketplace update scv-mods
