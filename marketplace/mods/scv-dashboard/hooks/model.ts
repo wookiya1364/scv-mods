@@ -2202,12 +2202,20 @@ export const listToolOf = (tool: string): string | null => (LIST_TOOLS.includes(
 // The task list to show again after a clear: the tool it was made with, and its items in order.
 export type Repin = { tool: string; items: { content: string; status: Task['status'] }[] }
 
-// What is shown again after a clear: the list as it stands with the tool that made it. Null with no such tool, an
-// empty list, or a list all done — then no turn is spent.
-export const repinOf = (tasks: readonly Task[], tool: string | null): Repin | null =>
-  tool === null || !tasks.some(task => task.status !== 'completed')
+// The desktop app's wrap-up tool: the app checks every step of its task list off when the model calls it.
+export const WRAP_TOOL = 'mcp__ccd_turn__wrap_up'
+
+// A list is closed when the turn was wrapped up after the list last changed and no work is left running: the app
+// then showed every step as done, whatever state the model had last sent. With work left running the list stands.
+export const isListClosed = (isWrapped: boolean, board: JobBoard): boolean => isWrapped && board.jobs.length === 0 && board.extra === 0
+
+// What is shown again after a clear: the list as it stands with the tool that made it — a list all done as well, so
+// the person sees what was finished beside what is in progress and what is left. A closed list goes as all done.
+// Null with no such tool or an empty list — then no turn is spent.
+export const repinOf = (tasks: readonly Task[], tool: string | null, isClosed = false): Repin | null =>
+  tool === null || tasks.length === 0
     ? null
-    : { tool, items: tasks.slice(0, REPIN_ROOM).map(task => ({ content: cutLine(task.subject, REPIN_WIDTH), status: task.status })) }
+    : { tool, items: tasks.slice(0, REPIN_ROOM).map(task => ({ content: cutLine(task.subject, REPIN_WIDTH), status: isClosed ? ('completed' as const) : task.status })) }
 
 // A kept list read back: null for anything of another shape (a value an older version kept has none).
 const parseRepin = (kept: unknown): Repin | null => {

@@ -133,6 +133,8 @@ import {
   listToolOf,
   repinBrief,
   repinOf,
+  isListClosed,
+  WRAP_TOOL,
   REPIN_PROMPT,
   keepTalk,
   talkPage,
@@ -327,7 +329,8 @@ const sayCleared = async ($: Api, before: number | null, at: number) => {
 // conversation — null when no work was left, and for a clear this mod kept nothing for (the person's own).
 // The tool the task list was last made with, when it sends the whole list at once (the list is shown again with it
 // after a clear). The module's own: a reload starts it over, and the next call of such a tool sets it again.
-const listRun = { tool: null as string | null }
+// isWrapped: the model called the app's wrap-up tool after the list last changed — the app then checked the list off.
+const listRun = { tool: null as string | null, isWrapped: false }
 
 const afterClear = async ($: Api): Promise<string | null> => {
   const key = clearKey(await $.session.cwd().catch(() => ''))
@@ -379,8 +382,9 @@ const clearNow = async ($: Api, before: number | null, at: number, recordPath: s
   const remembered = await read($, talks)
   const page = talkPage(remembered, recordPath)
   const stored = storedTalkPage(remembered)
-  const repin = repinOf(await read($, tasks), listRun.tool)
-  const kept: ClearKept = { before, at, board: await runningBoard($), ...(repin ? { repin } : {}) }
+  const board = await runningBoard($)
+  const repin = repinOf(await read($, tasks), listRun.tool, isListClosed(listRun.isWrapped, board))
+  const kept: ClearKept = { before, at, board, ...(repin ? { repin } : {}) }
   await $.store.set(key, kept).catch(() => undefined)
   lightRun.isClearing = true
   lightRun.isCleared = false
@@ -2199,6 +2203,7 @@ export const register: Register = on => {
       const listed = applyTaskEvent(before, e.tool, input, at)
       await update($, tasks, () => listed)
       listRun.tool = listToolOf(e.tool) ?? listRun.tool
+      listRun.isWrapped = (e.tool as string) === WRAP_TOOL || (listRun.isWrapped && listToolOf(e.tool) === null)
       for (const subject of newlyDone(before, listed)) await update($, doneLog, list => applyDone(list, { at, text: `${subject} 끝`, isOk: true }))
     } else {
       await update($, agents, list => applyAgentEvent(list, { kind: 'tool', id: e.agentId ?? '', tool: e.tool, target: describeTool(e.tool, input), at }))
