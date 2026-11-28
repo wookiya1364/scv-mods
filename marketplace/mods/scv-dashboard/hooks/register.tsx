@@ -9,6 +9,10 @@ import {
   CARD_TOOL,
   joinViewOf,
   lanesOf,
+  detourOf,
+  originOf,
+  detourWords,
+  planJump,
   nowWords,
   paneOrder,
   cardTitle,
@@ -224,7 +228,7 @@ import {
   wordsRemoveCommand,
   wordsSaid,
 } from './model'
-import type { AskMode, BranchNow, ClearKept, Talk, ConfirmStop, Flight, IconName, JobEnd, LaneFocus, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, TabSeen, TagTone, WordDraft } from './model'
+import type { AskMode, BranchNow, ClearKept, Talk, ConfirmStop, Flight, IconName, JobEnd, JumpTarget, LaneFocus, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, TabSeen, TagTone, WordDraft } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -3092,7 +3096,7 @@ export const register: Register = on => {
     const tagEl = (label: string, tone: TagTone) => {
       const picture = tagSvg(say(label), tone)
 
-      return Svg ? <Svg source={picture.source} alt={label} width={picture.width} height={picture.height} /> : <Text color={tone === 'away' ? STATE_COLOR.yourTurn : ACCENT}>{`[${label}]`}</Text>
+      return Svg ? <Svg source={picture.source} alt={label} width={picture.width} height={picture.height} /> : <Text color={tone === 'away' ? STATE_COLOR.yourTurn : tone === 'idle' ? NOTE_COLOR : ACCENT}>{`[${label}]`}</Text>
     }
     const iconEl = (name: IconName, color: string, alt: string) => (Svg ? <Svg source={iconSvg(name, color)} alt={alt} width={16} height={16} /> : null)
     const dotEl = (state: StageState) => (Svg ? <Svg source={dotSvg(state)} alt={STATE_LABEL[state]} width={8} height={8} /> : <Text color={STATE_COLOR[state]}>{STATE_MARK[state]}</Text>)
@@ -3241,7 +3245,15 @@ export const register: Register = on => {
     // When the job done alongside ended: the last step of it this session heard was done ('' when it heard none).
     const partnerDoneAt = reported.reduce((latest, one) => (one.plan === plan.joinedWith && one.state === 'done' && one.at > latest ? one.at : latest), 0)
     const joinNow = joinViewOf(plan, plans, stages, partnerDoneAt > 0 ? formatReset(new Date(partnerDoneAt).toISOString(), offsetAt(partnerDoneAt), false) : '')
-    const nowTop = nowCardOf(plan, plans, lanesNow, joinNow)
+    // One plan first (a pause): the plan in view waits for another, or was made to be done before another. Two
+    // jobs at once come first — a split plan draws its two columns, never this.
+    const stagesFor = (one: Plan) => (one.slug === plan.slug ? stages : deriveStages(mergeMarks(one, reported)).stages)
+    const detourNow = lanesNow ? null : detourOf(plans, plan.slug, stagesFor)
+    const originNow = lanesNow ? null : originOf(plans, plan.slug, stagesFor)
+    const waitNow = detourNow && detourNow.side === 'paused' ? detourNow : null
+    // The step the box of the plan done first hangs under: the step the waiting plan resumes from.
+    const waitUnder = waitNow ? Math.min(waitNow.at, stages.length) : 0
+    const nowTop = nowCardOf(plan, plans, lanesNow, joinNow, detourNow)
     // Steps worked on at the same time are all 'here'; the one opened by default is the step this session's work
     // goes to (the last it said it started), else the first of them.
     const isHere = (state: StageState | undefined) => state === 'doing' || state === 'blocked' || state === 'yourTurn'
@@ -3266,6 +3278,13 @@ export const register: Register = on => {
       const next = pressFocus(ownFocus, otherFocus, plan.slug, pressed)
       void update($, focusLane, () => next.other)
       void update($, focusStep, () => next.own)
+    }
+    // A press on a plan's name or on a line that points at a step of it: the pane shows that plan, with that step open.
+    const goPlan = (target: JumpTarget) => () => {
+      const next = planJump(target)
+      void update($, focusLane, () => next.other)
+      void update($, focusStep, () => next.own)
+      void update($, chosen, () => next.chosen)
     }
     // Where the flow draws its line as pictures, what hangs under a step stands beside that line (blockRow), so it
     // needs no indent of its own.
@@ -3311,6 +3330,62 @@ export const register: Register = on => {
         </Box>
       </Box>
     ) : null
+    const waitSay = waitNow ? detourWords(waitNow) : null
+    const waitEl =
+      waitNow && waitSay ? (
+        <Box key="detour" flexDirection="column" paddingLeft={hangPad} gap="xs" {...(Svg ? { flexGrow: 1, flexShrink: 1, minWidth: 0 } : {})}>
+          <Box flexDirection="row" gap={1} alignItems="center">
+            {iconEl('branch', NOTE_COLOR, '나감')}
+            <Text dimColor>{waitSay.left}</Text>
+          </Box>
+          <Box key="detour-box" flexDirection="column" borderStyle="round" borderColor="#30363d" paddingX={1} flexShrink={1} minWidth={0}>
+            {tagEl('먼저 하는 계획', 'here')}
+            <Button key="detour-plan" plain onPress={goPlan({ plan: waitNow.first.slug, step: null })}>
+              {waitNow.first.title}
+            </Button>
+            {waitNow.stages.map((stage, k) => (
+              <Box flexDirection="row">
+                <Box flexShrink={0} alignItems="flex-start" {...(Svg ? { paddingTop: DOT_PAD } : {})}>
+                  {dotEl(stage.state)}
+                </Box>
+                <Box flexDirection="row" flexWrap="wrap" flexShrink={1} alignItems="center" overflow="hidden">
+                  <Button key={`detour-step-${k + 1}`} plain onPress={goPlan({ plan: waitNow.first.slug, step: k })}>
+                    {`${k + 1}. ${stage.name}`}
+                  </Button>
+                  <Text color={STATE_COLOR[stage.state]}>{` · ${STATE_LABEL[stage.state]}`}</Text>
+                </Box>
+              </Box>
+            ))}
+          </Box>
+          <Box flexDirection="row" gap={1} alignItems="center">
+            {iconEl('back', NOTE_COLOR, '돌아옴')}
+            <Button key="detour-back" plain onPress={goPlan({ plan: waitNow.paused.slug, step: waitNow.at - 1 })}>
+              {waitSay.back}
+            </Button>
+          </Box>
+        </Box>
+      ) : null
+    // The plan done first says where it came from over its steps and where the work returns under them.
+    const originSay = originNow ? detourWords(originNow) : null
+    const originEl =
+      originNow && originSay ? (
+        <Box key="origin" flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+          {iconEl('branch', NOTE_COLOR, '나온 곳')}
+          {tagEl('나온 곳', 'idle')}
+          <Button key="origin-plan" plain onPress={goPlan({ plan: originNow.paused.slug, step: originNow.at - 1 })}>
+            {originSay.origin}
+          </Button>
+        </Box>
+      ) : null
+    const returnEl =
+      originNow && originSay ? (
+        <Box key="origin-return" flexDirection="row" gap={1} alignItems="center" flexWrap="wrap">
+          {iconEl('back', NOTE_COLOR, '돌아감')}
+          <Button key="origin-return-plan" plain onPress={goPlan({ plan: originNow.paused.slug, step: originNow.at - 1 })}>
+            {originSay.ret}
+          </Button>
+        </Box>
+      ) : null
     const redoAt = joinNow?.redo ? joinNow.redo.step - 1 : -1
     const joinEl = joinNow ? (
       <Box key="join" flexDirection="column" paddingLeft={hangPad} gap="xs" {...(Svg ? { flexGrow: 1, flexShrink: 1, minWidth: 0 } : {})}>
@@ -3340,29 +3415,6 @@ export const register: Register = on => {
             <Text color={joinNow.redo.state === 'doing' ? ACCENT : STATE_COLOR[joinNow.redo.state]}>{wordOf(joinNow.redo.state, redoAt)}</Text>
           </Box>
         ) : null}
-      </Box>
-    ) : null
-    // What is being done now, as a card over the step flow: both jobs with their tags, or the redo after a join.
-    const nowTopEl = nowTop ? (
-      <Box key="now-card" flexDirection="column" borderStyle="round" borderColor="#30363d" paddingX={1} marginBottom={1}>
-        <Box flexDirection="row" gap={1}>
-          <Box width={9} flexShrink={0}>
-            <Text dimColor>지금</Text>
-          </Box>
-          <Text>{nowTop.now}</Text>
-        </Box>
-        {nowTop.jobs.map(job => (
-          <Box flexDirection="row" gap={1} alignItems="center" paddingLeft={10}>
-            {tagEl(job.label, job.tone)}
-            <Text>{job.title}</Text>
-          </Box>
-        ))}
-        <Box flexDirection="row" gap={1}>
-          <Box width={9} flexShrink={0}>
-            <Text dimColor>돌아갈 곳</Text>
-          </Box>
-          <Text dimColor={nowTop.back === '없음'}>{nowTop.back}</Text>
-        </Box>
       </Box>
     ) : null
     const toggleMotion = async () => {
@@ -3475,7 +3527,45 @@ export const register: Register = on => {
       turn,
       nowLine({ tasks: todo, step: current && here >= 0 ? { number: here + 1, name: current.name } : null, tool: state.tool, jobs: board.jobs, extra: board.extra, isWorking: state.isWorking, turnStartedAt: state.turnStartedAt }),
     )
-    // What is being done now: a card over the step flow while two jobs run or a redo is open, else one line under the steps.
+    // What is being done now, as a card over the step flow: both jobs with their tags, the redo after a join, or —
+    // while one plan waits for another — the two plans and the step the work returns to. A name or a place a
+    // press can go to is a button. The plan done first has no words of its own here: the pane's line stands.
+    const nowTopEl = nowTop ? (
+      <Box key="now-card" flexDirection="column" borderStyle="round" borderColor="#30363d" paddingX={1} marginBottom={1}>
+        <Box flexDirection="row" gap={1}>
+          <Box width={9} flexShrink={0}>
+            <Text dimColor>지금</Text>
+          </Box>
+          <Text>{nowTop.now || nowText.replace(/^지금: /, '')}</Text>
+        </Box>
+        {nowTop.jobs.map(job => (
+          <Box flexDirection="row" gap={1} alignItems="center" paddingLeft={10}>
+            {tagEl(job.label, job.tone)}
+            {job.to ? (
+              <Button key={`now-job-${job.to.plan}`} plain onPress={goPlan(job.to)}>
+                {job.title}
+              </Button>
+            ) : (
+              <Text>{job.title}</Text>
+            )}
+          </Box>
+        ))}
+        <Box flexDirection="row" gap={1}>
+          <Box width={9} flexShrink={0}>
+            <Text dimColor>돌아갈 곳</Text>
+          </Box>
+          {nowTop.backTo ? (
+            <Button key="now-back" plain onPress={goPlan(nowTop.backTo)}>
+              {nowTop.back}
+            </Button>
+          ) : (
+            <Text dimColor={nowTop.back === '없음'}>{nowTop.back}</Text>
+          )}
+        </Box>
+      </Box>
+    ) : null
+    // What is being done now: a card over the step flow while two jobs run, a redo is open or one plan waits for
+    // another, else one line under the steps.
     const isNowFirst = order.indexOf('now') < order.indexOf('steps')
     const nowEl = !order.includes('now') ? null : isNowFirst ? nowTopEl : <Text key="now-line">{nowText}</Text>
     // The steps the flow draws as rows of their own: a join's redo is drawn inside that join's record instead.
@@ -3487,9 +3577,11 @@ export const register: Register = on => {
       .map(({ stage, i }) => {
         const isSplitHere = lanesNow !== null && lanesNow.under === i + 1 && stage.state === 'doing'
         const isRecheck = joinNow !== null && joinNow.under === i + 1 && isRedoOpen(joinNow) && stage.state === 'done'
-        const shown: StageState = isRecheck ? 'doing' : stage.state
+        // The step a waiting plan resumes from stands still: drawn as a step that waits, whatever its last mark.
+        const isWaitHere = waitUnder === i + 1 && stage.state !== 'done'
+        const shown: StageState = isRecheck ? 'doing' : isWaitHere ? 'waiting' : stage.state
 
-        return { stage, i, isSplitHere, isRecheck, shown }
+        return { stage, i, isSplitHere, isRecheck, isWaitHere, shown }
       })
     // The flow's line outside the step pictures. railFill: the piece that takes whatever height is left (a row
     // taller than its picture, what hangs under a step), in the colour of the line that leaves that step.
@@ -3556,10 +3648,11 @@ export const register: Register = on => {
               <Text bold>단계 흐름{isEstimated ? ' (추정)' : ''}</Text>
               {Svg ? <Button key="motion-toggle" label={isMotionOn ? '움직임 끄기' : '움직임 켜기'} onPress={() => void toggleMotion().catch(() => undefined)} /> : null}
             </Box>
+            {originEl}
             <Box flexDirection="column">
               {lanesNow && lanesEl && lanesNow.under === 0 ? hangRow(lanesEl, null) : null}
               {joinNow && joinEl && joinNow.under === 0 ? hangRow(joinEl, null) : null}
-              {flowRows.flatMap(({ stage, i, isSplitHere, isRecheck, shown }, at) => {
+              {flowRows.flatMap(({ stage, i, isSplitHere, isRecheck, isWaitHere, shown }, at) => {
                 // The line runs from each node to the next without a break: a step's picture draws the piece from
                 // the step before and the piece below its node, and under the picture the line takes whatever
                 // height the row has left. The title's line is level with the node.
@@ -3586,7 +3679,15 @@ export const register: Register = on => {
                         {`${i + 1}. ${stage.name}`}
                       </Button>
                       <Text color={STATE_COLOR[shown]}>
-                        {isSplitHere ? '두 일이 동시에 도는 중' : isRecheck ? '다시 확인 중' : isHere(stage.state) ? `${wordOf(stage.state, i)}  ◀ 지금 여기` : wordOf(stage.state, i)}
+                        {isSplitHere
+                          ? '두 일이 동시에 도는 중'
+                          : isRecheck
+                            ? '다시 확인 중'
+                            : isWaitHere && waitSay
+                              ? waitSay.paused
+                              : isHere(stage.state)
+                                ? `${wordOf(stage.state, i)}  ◀ 지금 여기`
+                                : wordOf(stage.state, i)}
                       </Text>
                     </Box>
                   </Box>
@@ -3596,9 +3697,11 @@ export const register: Register = on => {
                   row,
                   ...(lanesNow && lanesEl && lanesNow.under === i + 1 ? [hangRow(lanesEl, after)] : []),
                   ...(joinNow && joinEl && joinNow.under === i + 1 ? [hangRow(joinEl, after)] : []),
+                  ...(waitEl && waitUnder === i + 1 ? [hangRow(waitEl, after)] : []),
                 ]
               })}
             </Box>
+            {returnEl}
             {isNowFirst ? null : nowEl}
             <Text dimColor>{`완료 ${count.done} · 진행 ${count.doing} · 막힘 ${count.blocked} · 대기 ${count.waiting} — 단계를 누르면 자세히`}</Text>
             {focusedStage && focused !== null ? (
