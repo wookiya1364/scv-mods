@@ -29,6 +29,19 @@ export type Plan = {
   pausedBy: string
   resumeAt: string
   returnTo: string
+  // Two jobs at once (a split): the plan worked on alongside, when the two were split, and — on the plan whose work
+  // went to a separate folder — the step it was split at and that folder. After the join: the plan it was joined
+  // with, when, the step the record hangs under, and the results that changed (joined by ' · '). '' when absent.
+  splitWith?: string
+  splitOn?: string
+  splitAt?: string
+  splitDir?: string
+  joinedWith?: string
+  joinedOn?: string
+  joinedAt?: string
+  joinedChanged?: string
+  // The step a join added to do the changed results again (its number in the plan); '' when it added none.
+  joinedRedo?: string
   // The plan's `## 변경 이력` entries — headline only, newest first (step progress, added steps, pauses, choice answers).
   history: string[]
 }
@@ -40,6 +53,13 @@ export type Stage = { name: string; state: StageState; refs: string[]; role?: st
 // to open) and/or a command's output. A step with no file stands on the pure functions its plan line names.
 export type EvidenceFile = { path: string; size: number; kind: 'image' | 'video' | 'document' }
 export type Evidence = { files: EvidenceFile[]; output?: string }
+// A question the model opened with the question tool, kept while it is open: each question's text, its options'
+// labels (to the letter) and whether several may be picked.
+export type OpenQuestion = { questions: { question: string; options: string[]; isMulti: boolean }[]; at: number }
+// What Claude sent with the card tool right before a question: what it understood (lines, each with its label) and
+// proof a person can look at. It belongs to the next question only.
+export type CardLine = { label: string; text: string }
+export type CardExtra = { lines: CardLine[]; files: EvidenceFile[]; at: number }
 // The proof picture a person asked to see large: the plan, the step's place in its flow (from 0) and the file's place
 // among that step's proof files.
 export type BigProof = { plan: string; step: number; index: number }
@@ -211,6 +231,11 @@ declare module 'claude-code' {
       tasks: Task[]
       history: { slug: string; done: number; at: number }[]
       now: number
+      motion: boolean
+      question: OpenQuestion | null
+      cardExtra: CardExtra | null
+      cardNote: string | null
+      cardBig: number | null
       note: string | null
       paneNote: string | null
       gearRuns: Record<string, GearRun>
@@ -233,6 +258,7 @@ declare module 'claude-code' {
       gearsAll: boolean
       gearRecent: string[]
       focusStep: number | null
+      focusLane: { plan: string; step: number } | null
       bigProof: BigProof | null
       stepLog: Record<string, WorkEntry[]>
       stepFunctions: Record<string, StepFunctions>

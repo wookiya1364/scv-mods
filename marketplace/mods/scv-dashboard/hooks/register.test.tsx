@@ -65,8 +65,14 @@ import {
   isBackgroundStart,
   turnStateOf,
   NODE_COLOR,
+  hasMotion,
+  justDoneOf,
+  motionOf,
+  nodeMotionSvg,
+  stepPictureOf,
+  MOTION_WIDTH,
 } from './model'
-import type { Plan } from '../types'
+import type { Plan, StepSignal } from '../types'
 
 const PANE = {
   plugin: 'scv-dashboard',
@@ -6874,3 +6880,1187 @@ test('repin T8 비우기가 확인되지 않으면 끝나지 않은 목록이 �
   expect(seen.cleared).toBe(0)
   expect(submitted).toEqual([])
 })
+
+const STATES = ['done', 'doing', 'blocked', 'waiting', 'yourTurn'] as const
+
+test('motion T4 일하는 중인 단계의 그림에만 번지는 고리가 든다', () => {
+  const repeating = STATES.filter(state => nodeMotionSvg(state, 'waiting', false).includes('infinite'))
+  expect(repeating).toEqual(['doing'])
+  const moving = STATES.filter(state => nodeMotionSvg(state, 'waiting', false).includes('animation'))
+  expect(moving).toEqual(['doing'])
+
+  const doing = nodeMotionSvg('doing', 'waiting', false)
+  expect(doing).toContain('@keyframes')
+  // a device that asks for less motion gets a still ring
+  expect(doing).toContain('prefers-reduced-motion')
+  // the node stays as in the still picture; the line to the next step is solid (2026-11-28: it was dashed after a
+  // step not finished) — grey after such a step — so it reads as one line with the piece that stretches beside
+  // what hangs under a step, which can only be solid
+  expect(doing).toContain(`fill="${NODE_COLOR.doing}"`)
+  expect(doing).toContain('<line ')
+  expect(doing).toContain(`stroke="${NODE_COLOR.waiting}" stroke-width="2.5"`)
+  expect(doing).not.toContain('stroke-dasharray')
+  expect(hasMotion('doing', 'waiting', false)).toBe(true)
+  expect(hasMotion('doing', null, false)).toBe(true)
+})
+
+test('motion T5 방금 끝난 단계를 고른다 — 정한 시간 안에 끝난 것 중 가장 나중 것', () => {
+  const at = 1_000_000
+  const signal = (step: number, state: StepSignal['state'], ago: number, plan = 'p'): StepSignal => ({ plan, step, state, note: '', at: at - ago })
+
+  expect(justDoneOf([signal(2, 'done', 3000)], 'p', at)).toBe(2)
+  expect(justDoneOf([signal(2, 'done', 60_000)], 'p', at)).toBe(null)
+  expect(justDoneOf([signal(1, 'doing', 1000)], 'p', at)).toBe(null)
+  expect(justDoneOf([signal(2, 'done', 4000), signal(3, 'done', 1000)], 'p', at)).toBe(3)
+  // another plan's step is not this plan's
+  expect(justDoneOf([signal(2, 'done', 1000, 'q')], 'p', at)).toBe(null)
+  // a step that went back to work after it finished has not just finished
+  expect(justDoneOf([signal(2, 'done', 3000), signal(2, 'doing', 1000)], 'p', at)).toBe(null)
+  // the time allowed can be set
+  expect(justDoneOf([signal(2, 'done', 3000)], 'p', at, 2000)).toBe(null)
+})
+
+test('motion T6 방금 끝난 단계에만 내려가는 빛이 한 번 든다', () => {
+  const just = nodeMotionSvg('done', 'doing', true)
+  expect(just).toContain('animation')
+  expect(just).toContain('forwards')
+  expect(just).not.toContain('infinite')
+  expect(just).toContain('prefers-reduced-motion')
+  expect(just).toContain(`fill="${NODE_COLOR.done}"`)
+  expect(hasMotion('done', 'doing', true)).toBe(true)
+
+  // the last step has no line to run down, and a step that finished long ago is still
+  expect(nodeMotionSvg('done', null, true)).not.toContain('animation')
+  expect(nodeMotionSvg('done', 'doing', false)).not.toContain('animation')
+  expect(hasMotion('done', null, true)).toBe(false)
+  expect(hasMotion('done', 'doing', false)).toBe(false)
+  // only a finished step runs the light
+  expect(STATES.filter(state => state !== 'done' && state !== 'doing' && hasMotion(state, 'waiting', true))).toEqual([])
+})
+
+test('motion T7 내 차례에는 움직이지 않고, 끈 스위치도 그렇다', () => {
+  expect(motionOf(true, 'working')).toBe(true)
+  expect(motionOf(true, 'background')).toBe(true)
+  expect(motionOf(true, 'yourTurn')).toBe(false)
+  expect(motionOf(false, 'working')).toBe(false)
+  expect(motionOf(false, 'yourTurn')).toBe(false)
+})
+
+test('motion T10 그림은 크기 한도 안이고, 모든 상태의 그림이 같은 너비로 그려진다', () => {
+  const sources = STATES.flatMap(state => [nodeMotionSvg(state, 'waiting', false), nodeMotionSvg(state, 'waiting', true), nodeMotionSvg(state, null, true)])
+  const longest = Math.max(...sources.map(source => source.length))
+  expect(longest).toBeLessThan(131_072)
+  // every picture of the moving flow has one width, so the names beside them line up
+  const widths = new Set(sources.map(source => /<svg[^>]* width="(\d+)"/.exec(source)?.[1]))
+  expect(widths.size).toBe(1)
+})
+
+// ── the moving flow, drawn in the pane ──
+
+// The switch of the moving flow, kept in the mod's own store (true or absent: on).
+const MOTION_STORE = 'scv-dashboard:motion'
+const isStepIcon = (icon: { props: { alt?: unknown } }) => /^\d+단계 /.test(String(icon.props.alt ?? ''))
+
+test('motion T7 (순수부) 움직이지 않을 때의 그림은 같은 너비의 멈춘 그림이다 — 진행 중인 단계도', () => {
+  for (const state of STATES)
+    for (const next of ['waiting', null] as const)
+      for (const isJustDone of [true, false]) {
+        const still = nodeMotionSvg(state, next, isJustDone, 44, false)
+        expect(still).not.toContain('animation')
+        expect(still).toContain(`width="${MOTION_WIDTH}"`)
+        expect(stepPictureOf(true, false, state, next, isJustDone)).toEqual({ source: still, width: MOTION_WIDTH, isInteractive: false })
+      }
+  // a still step in progress keeps its ring, as the still picture of before does
+  expect(nodeMotionSvg('doing', 'waiting', false, 44, false)).toContain('opacity="0.5"')
+  // moving: only a picture with something to move asks for the frame that lets it move
+  expect(stepPictureOf(true, true, 'doing', 'waiting', false)).toEqual({ source: nodeMotionSvg('doing', 'waiting', false), width: MOTION_WIDTH, isInteractive: true })
+  expect(stepPictureOf(true, true, 'done', 'doing', true)).toEqual({ source: nodeMotionSvg('done', 'doing', true), width: MOTION_WIDTH, isInteractive: true })
+  expect(stepPictureOf(true, true, 'done', 'doing', false).isInteractive).toBe(false)
+  expect(stepPictureOf(true, true, 'waiting', null, false).isInteractive).toBe(false)
+})
+
+test('motion T7 (창) 내 차례에는 어느 단계 그림도 움직이지 않고, 일하는 중과 뒤에서 도는 일이 있을 때는 진행 중인 단계가 움직인다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  turnEngine(on)
+  on('tool.call', () => ({ result: {} }))
+  await start($)
+  const icons = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const found = (await ui.findAll({ type: 'Svg' })).filter(isStepIcon)
+    await ui.unmount()
+
+    return found
+  }
+
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const working = await icons()
+  expect(working.map(icon => icon.props.alt)).toEqual(['1단계 완료', '2단계 진행 중', '3단계 대기'])
+  expect(working.map(icon => String(icon.props.source).includes('infinite'))).toEqual([false, true, false])
+  expect(working.map(icon => icon.props.isInteractive === true)).toEqual([false, true, false])
+  expect(working.map(icon => icon.props.width)).toEqual([MOTION_WIDTH, MOTION_WIDTH, MOTION_WIDTH])
+
+  await turnEnd($, 'answer', 5_000)
+  const yours = await icons()
+  expect(yours.map(icon => icon.props.alt)).toEqual(['1단계 완료', '2단계 사용자 차례', '3단계 대기'])
+  expect(yours.filter(icon => String(icon.props.source).includes('animation'))).toEqual([])
+  expect(yours.filter(icon => icon.props.isInteractive !== undefined)).toEqual([])
+  // the pictures keep their width, so the names beside them do not jump when the turn changes hands
+  expect(yours.map(icon => icon.props.width)).toEqual([MOTION_WIDTH, MOTION_WIDTH, MOTION_WIDTH])
+
+  // work left running behind the conversation is not the person's turn: the step in progress moves
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: 'Bash', command: 'sleep 600', run_in_background: true } as never)
+  await turnEnd($, 'answer', 5_000)
+  const behind = await icons()
+  expect(behind.map(icon => String(icon.props.source).includes('infinite'))).toEqual([false, true, false])
+  expect(behind.map(icon => icon.props.isInteractive === true)).toEqual([false, true, false])
+})
+
+test('motion T6 (창) 단계가 끝난 순간에만 그 단계의 그림에 내려가는 빛이 들고, 정한 시간이 지나면 멈춘 그림이다', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000_000 })
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) }, undefined, {}, true)
+  await start($)
+  await signal($, 1, 'done')
+  const icons = async () => {
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const found = (await ui.findAll({ type: 'Svg' })).filter(isStepIcon)
+    await ui.unmount()
+
+    return found
+  }
+
+  const just = await icons()
+  expect(just.map(icon => String(icon.props.source).includes('forwards'))).toEqual([true, false, false, false, false])
+  expect(just.map(icon => icon.props.isInteractive === true)).toEqual([true, true, false, false, false])
+  expect(String(just[1]?.props.source)).toContain('infinite')
+
+  await clock.advance(9_000)
+  const later = await icons()
+  expect(later.map(icon => String(icon.props.source).includes('forwards'))).toEqual([false, false, false, false, false])
+  expect(later.map(icon => icon.props.isInteractive === true)).toEqual([false, true, false, false, false])
+})
+
+test('motion T8 움직임을 끄면 지금과 같은 그림이다 — 글이 다른 그림 0개, 움직이는 틀 0개', async ($, on) => {
+  // the ten cases: five states, each with and without a next step — whatever else is true of the step
+  const differing = STATES.flatMap(state =>
+    (['waiting', null] as const).flatMap(next =>
+      [true, false].flatMap(isJustDone =>
+        [true, false].filter(isMoving => {
+          const picture = stepPictureOf(false, isMoving, state, next, isJustDone)
+
+          return picture.source !== nodeIconSvg(state, next) || picture.isInteractive || picture.width !== 22
+        }),
+      ),
+    ),
+  )
+  expect(differing).toEqual([])
+
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', '[!] c', 'd'] }) })
+  store.set(MOTION_STORE, false)
+  await start($)
+  await signal($, 1, 'done')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const icons = (await ui.findAll({ type: 'Svg' })).filter(isStepIcon)
+  const states = ['done', 'doing', 'waiting', 'waiting'] as const
+  expect(icons.map(icon => String(icon.props.source))).toEqual(states.map((state, i) => nodeIconSvg(state, states[i + 1] ?? null)))
+  expect(icons.filter(icon => icon.props.isInteractive !== undefined)).toEqual([])
+  expect(icons.map(icon => icon.props.width)).toEqual([22, 22, 22, 22])
+  await ui.unmount()
+})
+
+test('motion T9 스위치는 창에서 누르고, 끈 값이 남아 다시 연 창도 멈춘 그림이다', async ($, on) => {
+  const { store } = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // on at first: nothing is kept yet
+  expect(store.get(MOTION_STORE)).toBeUndefined()
+  expect((await ui.find({ type: 'Button', key: 'motion-toggle' }))?.props.label).toBe('움직임 끄기')
+  expect((await ui.findAll({ type: 'Svg' })).filter(isStepIcon).some(icon => String(icon.props.source).includes('animation'))).toBe(true)
+
+  await ui.press({ key: 'motion-toggle' })
+  await settle()
+  expect(store.get(MOTION_STORE)).toBe(false)
+  expect((await ui.find({ type: 'Button', key: 'motion-toggle' }))?.props.label).toBe('움직임 켜기')
+  expect((await ui.findAll({ type: 'Svg' })).filter(isStepIcon).filter(icon => String(icon.props.source).includes('animation'))).toEqual([])
+  await ui.unmount()
+
+  // the pane opened again as a new session reads the kept value
+  await start($)
+  const again = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await again.find({ type: 'Button', key: 'motion-toggle' }))?.props.label).toBe('움직임 켜기')
+  const still = (await again.findAll({ type: 'Svg' })).filter(isStepIcon)
+  expect(still.filter(icon => String(icon.props.source).includes('animation'))).toEqual([])
+  expect(still.filter(icon => icon.props.isInteractive !== undefined)).toEqual([])
+
+  await again.press({ key: 'motion-toggle' })
+  await settle()
+  expect(store.get(MOTION_STORE)).toBe(true)
+  expect((await again.findAll({ type: 'Svg' })).filter(isStepIcon).some(icon => String(icon.props.source).includes('animation'))).toBe(true)
+  await again.unmount()
+})
+
+test('motion T10 (창) 단계 서른 개인 창을 움직임을 켜고 그려도 느려지지 않는다 — 끈 창의 1.5배 안', async ($, on) => {
+  const steps = Array.from({ length: 30 }, (_, i) => `단계 ${i + 1} — \`f${i + 1}\``)
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps }) })
+  await start($)
+  await signal($, 1, 'done')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const median = async () => {
+    const took: number[] = []
+    for (let i = 0; i < 30; i += 1) {
+      const from = performance.now()
+      await drawnText($)
+      took.push(performance.now() - from)
+    }
+
+    return took.sort((a, b) => a - b)[15] ?? 0
+  }
+  const icons = (await ui.findAll({ type: 'Svg' })).filter(isStepIcon)
+  expect(icons).toHaveLength(30)
+  // one step has just finished and one is in progress
+  expect(icons.filter(icon => icon.props.isInteractive === true)).toHaveLength(2)
+  const longest = Math.max(...icons.map(icon => String(icon.props.source).length))
+  expect(longest).toBeLessThan(131_072)
+
+  await drawnText($)
+  const moving = await median()
+  await ui.press({ key: 'motion-toggle' })
+  await settle()
+  await drawnText($)
+  const still = await median()
+  const out = (globalThis as { console?: { log: (line: string) => void } }).console
+  out?.log(`motion T10 그리는 시간(가운데 값, 서른 번): 켬 ${moving.toFixed(2)} ms · 끔 ${still.toFixed(2)} ms · ${(moving / still).toFixed(2)}배 · 가장 긴 그림 ${longest}자`)
+  expect(moving).toBeLessThanOrEqual(still * 1.5 + 1)
+  await ui.unmount()
+})
+
+// ── the person's turn as a card ──
+import { answerOf, buildCardPrompt, cardAnswer, cardOf, judgeCard, openQuestionOf, CARD_TOOL } from './model'
+
+const ASK3 = {
+  tool: 'AskUserQuestion' as const,
+  questions: [
+    {
+      question: '어느 쪽으로 할까요?',
+      header: '방식',
+      multiSelect: false,
+      options: [
+        { label: '작게 (추천)', description: '' },
+        { label: '크게', description: '' },
+        { label: '안 함', description: '' },
+      ],
+    },
+  ],
+}
+const Q3 = '어느 쪽으로 할까요?'
+const CARD_TITLE = '답을 기다리는 중'
+type Asked = Promise<{ deny?: string; result?: { answers?: Record<string, string> } }>
+
+// The engine's own dialog beneath the mod: it stays open until the test ends it (as when a person answers in the
+// chat), and it is cut — as the engine cuts its dialog — when a hook above answered first.
+const dialog = (on: On) => {
+  const held: { end: ((result: unknown) => void) | null; asked: number; cut: number } = { end: null, asked: 0, cut: 0 }
+  on('tool.call', ((_: unknown, e: { tool: string }, next: { signal?: AbortSignal } | undefined) => {
+    if (e.tool !== 'AskUserQuestion') return { result: {} }
+    held.asked += 1
+
+    return new Promise(resolve => {
+      held.end = resolve as (result: unknown) => void
+      next?.signal?.addEventListener('abort', () => {
+        held.cut += 1
+        resolve({ deny: 'cut' })
+      })
+    })
+  }) as never)
+
+  return held
+}
+const cardButtons = async (ui: { findAll: (q: { type: 'Button' }) => Promise<{ key?: string; props: Record<string, unknown> }[]> }) =>
+  (await ui.findAll({ type: 'Button' })).filter(button => String(button.key ?? '').startsWith('card-answer-'))
+const SURFACE = { hasInput: true, isMirror: false }
+
+test('card T18 카드 도구의 안내는 계획이 진행 중일 때만 실린다 — 더해진 글의 크기를 남긴다', async ($, on) => {
+  const active = parsePlan({ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  const archived = { ...parsePlan({ slug: 'z', ...plan({ title: 'z', status: 'done', steps: FIVE }), isArchived: true }) }
+  expect(buildCardPrompt([archived])).toBeNull()
+  expect(buildCardPrompt([])).toBeNull()
+  const guide = buildCardPrompt([active]) ?? ''
+  expect(guide).toContain(CARD_TOOL)
+  const bytes = new TextEncoder().encode(guide).length
+  const out = (globalThis as { console?: { log: (line: string) => void } }).console
+  out?.log(`card T18 더해진 글 ${bytes}바이트`)
+  expect(bytes).toBeLessThan(1200)
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: FIVE }) })
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base', scope: 'shared' as const }] }))
+  on('tool.check', () => ({ decision: 'ask' as const }))
+  await start($)
+  const composed = await $.prompt.compose(COMPOSE)
+  const added = composed.sections.find(section => section.id === 'scv-dashboard:turn-card')
+  expect(added?.scope).toBe('session')
+  expect(added?.text).toBe(guide)
+  // the tool answers with no permission window, as the step tool does
+  expect((await $.tool.check({ tool: CARD_TOOL, input: { goal: 'g' } } as never)).decision).toBe('allow')
+  expect(cardAnswer({ extra: { lines: [], files: [], at: 0 }, refused: [] })).toContain('받은 것이 없습니다')
+})
+
+test('card T18b 계획이 없는 프로젝트의 안내에는 카드 도구의 이름이 없다', async ($, on) => {
+  engine(on, {}, { at: 1_000_000 }, { z: plan({ title: 'z', status: 'done', steps: FIVE }) })
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'base', scope: 'shared' as const }] }))
+  await start($)
+  const composed = await $.prompt.compose(COMPOSE)
+  expect(composed.sections.filter(section => section.text.includes(CARD_TOOL))).toHaveLength(0)
+})
+
+test('card T19 거울 세션의 창에는 카드가 보이되 단추와 입력 칸이 없다', async ($, on) => {
+  const open = openQuestionOf(ASK3 as never, 5)
+  expect(cardOf(open, null, { hasInput: true, isMirror: true })).toEqual({ questions: [Q3], options: [], canPress: false, canType: false, lines: [], files: [] })
+
+  await startPresser($, on, {
+    question: open,
+    cardExtra: { lines: [{ label: '목표', text: '단계 흐름에 움직임을 넣는다' }], files: [{ path: 'shot.png', size: 12, kind: 'image' }], at: 5 },
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^이렇게 이해했음/)).toBe('이렇게 이해했음 — 맞나요?')
+  expect(await text(ui, /^어느 쪽으로/)).toBe(Q3)
+  expect(await text(ui, /^단계 흐름에 움직임/)).toBe('단계 흐름에 움직임을 넣는다')
+  expect(await text(ui, /shot\.png/)).toBe('증거: shot.png')
+  expect(await cardButtons(ui)).toHaveLength(0)
+  expect(await hasInput(ui, 'card-text')).toBe(false)
+  expect(await has(ui, 'card-send')).toBe(false)
+  await ui.unmount()
+
+  // the question closed on the working session: the card goes here too
+  await hostSends($, HOST_STATE())
+  const after = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(after, /^내 차례/)).toBeUndefined()
+  await after.unmount()
+})
+
+// While a question is open its call is still running, and a mounted drawing waits for running calls: these tests
+// read the pane through the engine's own render and press through the engine, as a surface does.
+type Drawn = { type?: string; props?: Record<string, unknown>; children?: unknown[] }
+const flatNodes = (node: unknown): Drawn[] => {
+  if (Array.isArray(node)) return node.flatMap(flatNodes)
+  if (!node || typeof node !== 'object') return []
+  const one = node as Drawn
+
+  return [one, ...flatNodes(one.children ?? [])]
+}
+const drawnNodes = async ($: Engine) => flatNodes(JSON.parse(await drawnText($)))
+const textsOf = (nodes: readonly Drawn[]) => nodes.filter(node => node.type === 'Text').map(node => (node.children ?? []).filter(child => typeof child === 'string').join(''))
+const keyed = (nodes: readonly Drawn[], type: string, prefix: string) => nodes.filter(node => node.type === type && String(node.props?.key ?? '').startsWith(prefix))
+const pressHere = ($: Engine, key: string) => $.ui.press({ plugin: 'scv-dashboard', key } as never)
+
+test('card T11 열린 질문이 창 맨 위의 카드로 뜬다 — 내 차례 표시 · 질문 글 · 보기 단추 셋 · 직접 쓰는 칸', async ($, on) => {
+  const open = openQuestionOf(ASK3 as never, 5)
+  expect(open).toEqual({ questions: [{ question: Q3, options: ['작게 (추천)', '크게', '안 함'], isMulti: false }], at: 5 })
+  expect(cardOf(open, null, SURFACE)).toEqual({ questions: [Q3], options: ['작게 (추천)', '크게', '안 함'], canPress: true, canType: true, lines: [], files: [] })
+  expect(cardOf(null, null, SURFACE)).toBeNull()
+  expect(openQuestionOf({ questions: [] }, 5)).toBeNull()
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  const held = dialog(on)
+  await start($)
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  const nodes = await drawnNodes($)
+  expect(textsOf(nodes)).toContain(CARD_TITLE)
+  expect(textsOf(nodes)).toContain(Q3)
+  expect(keyed(nodes, 'Button', 'card-answer-').map(button => button.props?.label)).toEqual(['작게 (추천)', '크게', '안 함'])
+  expect(keyed(nodes, 'Input', 'card-text')).toHaveLength(1)
+  // the card is the first bordered box of the pane, in the colour of the person's turn
+  const firstBox = nodes.find(node => node.props?.borderStyle !== undefined)
+  expect(firstBox?.props?.key).toBe('turn-card')
+  expect(firstBox?.props?.borderColor).toBe(NODE_COLOR.yourTurn)
+  held.end?.({ result: { answers: {} } })
+  await asked
+})
+
+test('card T12 카드의 단추를 누르면 그 질문의 답이 된다 — 보기 글 그대로, 카드는 사라진다', async ($, on) => {
+  const card = cardOf(openQuestionOf(ASK3 as never, 5), null, SURFACE)
+  expect(answerOf(card, 1, null)).toBe('크게')
+  expect(answerOf(card, 7, null)).toBeNull()
+  expect(answerOf(null, 0, null)).toBeNull()
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  const held = dialog(on)
+  await start($)
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  expect(keyed(await drawnNodes($), 'Button', 'card-answer-')).toHaveLength(3)
+  await pressHere($, 'card-answer-1')
+  const got = await asked
+  expect(got.deny).toBeUndefined()
+  expect(got.result?.answers?.[Q3]).toBe('크게')
+  // the engine's own dialog was cut when the pane answered: what it says afterwards does not count
+  expect(held.cut).toBe(1)
+  held.end?.({ result: { answers: { [Q3]: '대화창의 답' } } })
+  await settle()
+  const after = await drawnNodes($)
+  expect(textsOf(after)).not.toContain(CARD_TITLE)
+  expect(keyed(after, 'Button', 'card-answer-')).toHaveLength(0)
+  expect(held.asked).toBe(1)
+})
+
+test('card T13 대화창에서 답해도 카드가 사라지고, 창은 답을 따로 보내지 않는다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  const held = dialog(on)
+  await start($)
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  expect(textsOf(await drawnNodes($))).toContain(CARD_TITLE)
+  held.end?.({ result: { answers: { [Q3]: '안 함' } } })
+  const got = await asked
+  expect(got.result?.answers?.[Q3]).toBe('안 함')
+  expect(held.asked).toBe(1)
+  expect(held.cut).toBe(0)
+  await settle()
+  const after = await drawnNodes($)
+  expect(textsOf(after)).not.toContain(CARD_TITLE)
+  expect(keyed(after, 'Button', 'card-answer-')).toHaveLength(0)
+})
+
+test('card T14 직접 쓴 글이 답이 된다 — 빈 글은 답이 되지 않는다', async ($, on) => {
+  const card = cardOf(openQuestionOf(ASK3 as never, 5), null, SURFACE)
+  expect(answerOf(card, null, '  둘 다 조금씩  ')).toBe('둘 다 조금씩')
+  // an empty text is no answer: nothing is sent, and the pane says so under the field
+  expect(answerOf(card, null, '   ')).toBeNull()
+  expect(answerOf(card, null, '')).toBeNull()
+  expect(answerOf(card, null, null)).toBeNull()
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  const held = dialog(on)
+  await start($)
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  const nodes = await drawnNodes($)
+  expect(keyed(nodes, 'Input', 'card-text')).toHaveLength(1)
+  // one way to send: the field's own send button — no second button beside it
+  expect(keyed(nodes, 'Input', 'card-text')[0]?.props?.submitLabel).toBe('보내기')
+  expect(keyed(nodes, 'Button', 'card-send')).toHaveLength(0)
+  await $.ui.input({ plugin: 'scv-dashboard', key: 'card-text', text: '둘 다 조금씩' } as never)
+  const got = await asked
+  expect(got.result?.answers?.[Q3]).toBe('둘 다 조금씩')
+  expect(held.cut).toBe(1)
+  await settle()
+  expect(textsOf(await drawnNodes($))).not.toContain(CARD_TITLE)
+  // Not seen in this kit: the line under the field after an empty send. Here a press or an input of the pane that
+  // does not answer ends the open call (as it does with the pane's other buttons), so the question is gone before
+  // the line could be read; whether the app does the same is checked by hand in the real pane.
+})
+
+test('card T15 단추로 답할 수 없는 질문은 내용만 보인다 — 질문 둘 · 여러 개 고르기 · 입력 칸이 없는 화면', async ($, on) => {
+  const one = ASK3.questions[0]!
+  const two = openQuestionOf({ questions: [one, { ...one, question: '둘째 질문도 있나요?' }] }, 5)
+  const many = openQuestionOf({ questions: [{ ...one, multiSelect: true }] }, 5)
+  expect(cardOf(two, null, SURFACE)).toEqual({ questions: [Q3, '둘째 질문도 있나요?'], options: [], canPress: false, canType: false, lines: [], files: [] })
+  expect(cardOf(many, null, SURFACE)?.canPress).toBe(false)
+  expect(cardOf(many, null, SURFACE)?.options).toEqual([])
+  // a surface with no input field: the buttons stay, the field does not
+  const noField = cardOf(openQuestionOf(ASK3 as never, 5), null, { hasInput: false, isMirror: false })
+  expect(noField?.canPress).toBe(true)
+  expect(noField?.canType).toBe(false)
+  expect(answerOf(noField, null, '글')).toBeNull()
+  expect(answerOf(cardOf(two, null, SURFACE), 0, null)).toBeNull()
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  const held = dialog(on)
+  await start($)
+  const asked = $.tool.call({ tool: 'AskUserQuestion', questions: [one, { ...one, question: '둘째 질문도 있나요?' }] } as never)
+  await settle()
+  const nodes = await drawnNodes($)
+  expect(textsOf(nodes)).toContain(CARD_TITLE)
+  expect(textsOf(nodes)).toContain('둘째 질문도 있나요?')
+  expect(textsOf(nodes)).toContain('대화창에서 답하세요')
+  expect(keyed(nodes, 'Button', 'card-answer-')).toHaveLength(0)
+  expect(keyed(nodes, 'Input', 'card-text')).toHaveLength(0)
+  held.end?.({ result: { answers: {} } })
+  await asked
+})
+
+test('card T16 요구를 확인받는 카드에 이해한 것 세 줄이 보인다 — 보낸 질문에만', async ($, on) => {
+  const sent = judgeCard({ goal: ' 단계 흐름에 움직임을 넣는다 ', notDoing: '터미널 화면', check: '시험 305개 통과', paths: [] }, [], 9)
+  expect(sent.refused).toEqual([])
+  expect(sent.extra.lines).toEqual([
+    { label: '목표', text: '단계 흐름에 움직임을 넣는다' },
+    { label: '안 하는 것', text: '터미널 화면' },
+    { label: '확인 방법', text: '시험 305개 통과' },
+  ])
+  // a line that was not sent is not shown
+  expect(judgeCard({ goal: '목표만', paths: [] }, [], 9).extra.lines).toEqual([{ label: '목표', text: '목표만' }])
+  expect(cardOf(openQuestionOf(ASK3 as never, 5), sent.extra, SURFACE)?.lines).toEqual(sent.extra.lines)
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  const held = dialog(on)
+  await start($)
+  const answered = (await $.tool.call({ tool: CARD_TOOL, goal: '단계 흐름에 움직임을 넣는다', not_doing: '터미널 화면', check: '시험 305개 통과' } as never)) as { deny?: string; result?: unknown }
+  expect(answered.deny).toBeUndefined()
+  expect(String(answered.result)).toContain('세 줄 3개')
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  const labels = ['목표', '안 하는 것', '확인 방법']
+  const texts = textsOf(await drawnNodes($))
+  expect(texts.filter(one => labels.includes(one))).toEqual(labels)
+  expect(texts).toContain('단계 흐름에 움직임을 넣는다')
+  expect(texts).toContain('터미널 화면')
+  expect(texts).toContain('시험 305개 통과')
+  held.end?.({ result: { answers: { [Q3]: '크게' } } })
+  await asked
+
+  // the next question carries nothing of the one before
+  const again = $.tool.call(ASK3) as Asked
+  await settle()
+  const next = textsOf(await drawnNodes($))
+  expect(next).toContain(CARD_TITLE)
+  expect(next).not.toContain('단계 흐름에 움직임을 넣는다')
+  expect(next.filter(one => labels.includes(one))).toEqual([])
+  held.end?.({ result: { answers: {} } })
+  await again
+})
+
+test('card T17 결과를 확인받는 카드에 증거가 보인다 — 그림은 그려지고, 영상은 여는 단추, 소스 파일은 받지 않는다', async ($, on) => {
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  evidenceFiles(on, { '/work/shot.png': { base64: 'iVBORw0KGgo=', mtimeMs: 1 }, '/work/run.mp4': { base64: 'AA', mtimeMs: 1 }, '/work/src/a.ts': { text: 'export {}', mtimeMs: 1 } })
+  const held = dialog(on)
+  await start($)
+  const answered = (await $.tool.call({ tool: CARD_TOOL, evidence: ['shot.png', 'run.mp4', 'src/a.ts', 'gone.png'] } as never)) as { deny?: string; result?: unknown }
+  expect(answered.deny).toBeUndefined()
+  const said = String(answered.result)
+  expect(said).toContain('증거 2개')
+  expect(said).toContain('src/a.ts')
+  expect(said).toContain('gone.png')
+  expect(said).not.toContain('shot.png')
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  const nodes = await drawnNodes($)
+  const pictures = nodes.filter(node => node.type === 'Svg' && String(node.props?.alt ?? '').startsWith('증거 그림 '))
+  expect(pictures.map(one => one.props?.alt)).toEqual(['증거 그림 shot.png'])
+  expect(String(pictures[0]?.props?.source ?? '')).toContain('data:image/png;base64,iVBORw0KGgo=')
+  expect(textsOf(nodes)).toContain('증거: shot.png')
+  expect(textsOf(nodes)).toContain('증거: run.mp4')
+  expect(keyed(nodes, 'Button', 'card-big-').map(one => one.props?.key)).toEqual(['card-big-0'])
+  expect(keyed(nodes, 'Button', 'card-open-').map(one => one.props?.key)).toEqual(['card-open-1'])
+  held.end?.({ result: { answers: {} } })
+  await asked
+})
+
+// ── two jobs at once, and the order of the pane's parts ──
+import { cardTitle, choiceRecordOf, dotSvg, iconSvg, isRedoOpen, joinViewOf, lanesOf, nowCardOf, nowWords, paneOrder, tagSvg, textWidth, withoutAsked } from './model'
+
+// A plan file with more lines in its head (the keys a split or a join writes).
+const withHead = (file: { planText: string; testsText: string }, extra: Record<string, string>) => ({
+  ...file,
+  planText: file.planText.replace(
+    /\n---\n/,
+    `\n${Object.entries(extra)
+      .map(([key, value]) => `${key}: ${value}`)
+      .join('\n')}\n---\n`,
+  ),
+})
+const BOSS_SPLIT = () =>
+  withHead(plan({ title: '보스 체력', status: 'in_progress', steps: ['[x] 측정 도구', '[x] 기본 값', '[~] 1번 보스', '2번 보스', '3번 보스'] }), {
+    split_with: 'b',
+    split_on: '2026-11-09 11:09',
+    split_at: '3',
+    split_dir: '/w/repo.split-a',
+    split_branch: 'scv-split/a',
+    split_base: 'abc',
+  })
+const HIT_SPLIT = () => withHead(plan({ title: '피해 고치기', status: 'in_progress', steps: ['[x] 피해 두 배로', '[~] 앱에서 확인'] }), { split_with: 'a', split_on: '2026-11-09 11:09' })
+const stagesOf = (one: Plan) => deriveStages(one).stages
+const svgs = (nodes: readonly Drawn[], alt: string) => nodes.filter(node => node.type === 'Svg' && node.props?.alt === alt)
+
+test('lanes T28 동시에 도는 동안 두 일이 가른 단계 밑에 나란히 보인다', async ($, on) => {
+  const plans = parsePlans([
+    { slug: 'a', ...BOSS_SPLIT() },
+    { slug: 'b', ...HIT_SPLIT() },
+  ])
+  const lanes = lanesOf(plans, 'a', stagesOf)
+  expect(lanes?.under).toBe(3)
+  expect(lanes?.when).toBe('11:09')
+  expect(lanes?.lanes.map(lane => [lane.label, lane.tone, lane.title, lane.from, lane.stages.length])).toEqual([
+    ['분기', 'away', '보스 체력', 3, 3],
+    ['원본', 'here', '피해 고치기', 1, 2],
+  ])
+  expect(lanes?.lanes[0]?.stages.map(stage => stage.state)).toEqual(['doing', 'waiting', 'waiting'])
+  expect(lanes?.lanes[1]?.stages.map(stage => stage.state)).toEqual(['done', 'doing'])
+  // seen from the other plan, the same two columns hang above its first step
+  expect(lanesOf(plans, 'b', stagesOf)?.under).toBe(0)
+  expect(lanesOf(plans, 'b', stagesOf)?.lanes.map(lane => lane.slug)).toEqual(['a', 'b'])
+  // a plan whose partner is gone, and a plan that is not split, have none
+  expect(lanesOf(parsePlans([{ slug: 'a', ...BOSS_SPLIT() }]), 'a', stagesOf)).toBeNull()
+  expect(lanesOf(parsePlans([{ slug: 'c', ...plan({ title: 'c', status: 'in_progress', steps: ['a'] }) }]), 'c', stagesOf)).toBeNull()
+  // while two jobs run, what is being done now is a card of its own: both jobs with their tags, and where to go back
+  expect(nowCardOf(plans.find(one => one.slug === 'a') as Plan, plans, lanes, null)).toEqual({
+    now: '두 일을 동시에',
+    jobs: [
+      { label: '분기', tone: 'away', title: '보스 체력' },
+      { label: '원본', tone: 'here', title: '피해 고치기' },
+    ],
+    back: '없음',
+  })
+
+  engine(on, { a: BOSS_SPLIT(), b: HIT_SPLIT() })
+  await start($)
+  await drawnText($)
+  await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'a' } as never)
+  const nodes = await drawnNodes($)
+  const texts = textsOf(nodes)
+  expect(texts).toContain('갈라짐 11:09 · 확인 결과 저장함')
+  expect(texts).toContain('둘 다 끝나면 합치고 비교함')
+  // each of the two notes has its small sign beside it: the split, the join to come
+  expect(svgs(nodes, '갈라짐')).toHaveLength(1)
+  expect(svgs(nodes, '합침')).toHaveLength(1)
+  // the step the two were split at says both run
+  expect(texts).toContain('두 일이 동시에 도는 중')
+  expect(texts).not.toContain('진행 중  ◀ 지금 여기')
+  // the card over the flow: now · both jobs with their tags · where to go back
+  const nowCard = keyed(nodes, 'Box', 'now-card')[0]
+  expect(textsOf(flatNodes(nowCard))).toEqual(['지금', '두 일을 동시에', '보스 체력', '피해 고치기', '돌아갈 곳', '없음'])
+  expect(flatNodes(nowCard).filter(node => node.type === 'Svg').map(node => node.props?.alt)).toEqual(['분기', '원본'])
+  // a tag is a picture of its label on its tone's ground: purple for the separate folder (분기), blue for the original (원본)
+  expect(String(svgs(nodes, '분기')[0]?.props?.source)).toContain('#3c3489')
+  expect(String(svgs(nodes, '원본')[0]?.props?.source)).toContain('#0c447c')
+  expect(svgs(nodes, '분기')).toHaveLength(2)
+  expect(svgs(nodes, '원본')).toHaveLength(2)
+  // the names of before (2026-11-28: the person found them awkward) are drawn nowhere
+  expect(JSON.stringify(nodes)).not.toContain('따로 만든 폴더')
+  expect(JSON.stringify(nodes)).not.toContain('원래 폴더')
+  // two columns side by side, each with its label, its job's name, and its steps with their states
+  const row = nodes.find(node => node.props?.key === 'lanes-row')
+  expect(row?.props?.flexDirection).toBe('row')
+  const columns = keyed(nodes, 'Box', 'lane-')
+  expect(columns.map(column => column.props?.key)).toEqual(['lane-a', 'lane-b'])
+  // a column: its tag, its job's name, then a row per step — a dot of the step's state, its name, its state in colour
+  expect(columns.map(column => textsOf(flatNodes(column)))).toEqual([
+    ['보스 체력', ' · 진행 중', ' · 대기', ' · 대기'],
+    ['피해 고치기', ' · 완료', ' · 진행 중'],
+  ])
+  // a step's name is a button (2026-11-28: it was plain text): pressing it opens that step's detail under the flow
+  expect(columns.map(column => keyed(flatNodes(column), 'Button', 'lane-step-').map(button => [button.props?.key, button.props?.label]))).toEqual([
+    [
+      ['lane-step-a-3', '1번 보스'],
+      ['lane-step-a-4', '2번 보스'],
+      ['lane-step-a-5', '3번 보스'],
+    ],
+    [
+      ['lane-step-b-1', '피해 두 배로'],
+      ['lane-step-b-2', '앱에서 확인'],
+    ],
+  ])
+  expect(columns.map(column => flatNodes(column).filter(node => node.type === 'Svg').map(node => node.props?.alt))).toEqual([
+    ['분기', '진행 중', '대기', '대기'],
+    ['원본', '완료', '진행 중'],
+  ])
+  const stateText = (label: string) => nodes.find(node => node.type === 'Text' && (node.children ?? []).join('') === label)?.props?.color
+  expect(stateText(' · 완료')).toBe('#3fb950')
+  expect(stateText(' · 진행 중')).toBe('#e3b341')
+  // the columns hang under the step the plan was split at: after its row, before the next step's
+  const order = keyed(nodes, 'Button', 'step-').map(button => String(button.props?.key))
+  expect(order).toEqual(['step-1', 'step-2', 'step-3', 'step-4', 'step-5'])
+  const drawn = await drawnText($)
+  expect(drawn.indexOf('"key":"step-3"')).toBeLessThan(drawn.indexOf('"key":"lanes"'))
+  expect(drawn.indexOf('"key":"lanes"')).toBeLessThan(drawn.indexOf('"key":"step-4"'))
+  // while two jobs run, the card that says what is being done comes above the flow, and no line repeats it below
+  expect(drawn.indexOf('"key":"now-card"')).toBeGreaterThan(0)
+  expect(drawn.indexOf('"key":"now-card"')).toBeLessThan(drawn.indexOf('"key":"step-1"'))
+  expect(texts.filter(one => one.startsWith('지금: '))).toEqual([])
+})
+
+test('lanes T29 합친 뒤 달라진 결과와 다시 할 일이 흐름에 보이고, 나란한 두 칸은 더 보이지 않는다', async ($, on) => {
+  const joined = () =>
+    withHead(plan({ title: '보스 체력', status: 'in_progress', steps: ['[x] 측정 도구', '[x] 기본 값', '[x] 1번 보스', '결과 확인', '[~] 다시 하기: 달라진 결과 맞추기 — 보스 10 → 5'] }), {
+      joined_with: 'b',
+      joined_on: '2026-11-09 15:02',
+      joined_changed: '보스 10 → 5',
+      joined_at: '3',
+      joined_redo: '5',
+    })
+  const other = () => withHead(plan({ title: '피해 고치기', status: 'in_progress', steps: ['[x] 피해 두 배로', '[x] 앱에서 확인'] }), { joined_with: 'a', joined_on: '2026-11-09 15:02', joined_changed: '보스 10 → 5' })
+  const plans = parsePlans([
+    { slug: 'a', ...joined() },
+    { slug: 'b', ...other() },
+  ])
+  const a = plans.find(one => one.slug === 'a') as Plan
+  const redo = { step: 5, name: '달라진 결과 맞추기', state: 'doing' }
+  // work stands at the step the join added, not at the first open step: that one waits
+  expect(stagesOf(a).map(stage => stage.state)).toEqual(['done', 'done', 'done', 'waiting', 'doing'])
+  expect(joinViewOf(a, plans, stagesOf(a), '14:40')).toEqual({ under: 3, partner: '피해 고치기', partnerEnd: '14:40', when: '15:02', changed: ['보스 10 → 5'], redo })
+  expect(isRedoOpen(joinViewOf(a, plans, stagesOf(a)))).toBe(true)
+  expect(lanesOf(plans, 'a', stagesOf)).toBeNull()
+  // a record that names no redo step still finds it by the step's name; a plan read from its file names it itself
+  expect(joinViewOf({ ...a, joinedRedo: '' }, plans, stagesOf(a))?.redo).toEqual(redo)
+  expect(parsePlans([{ slug: 'a', ...withHead(plan({ title: 't', status: 'in_progress', steps: ['[x] a', 'b', '다시 하기: 달라진 결과 맞추기 — x 1 → 2'] }), { joined_with: 'b', joined_at: '1' }) }])[0]?.joinedRedo).toBe('3')
+  // nothing changed: no result is listed and there is no redo; a plan that was never joined has no record
+  expect(joinViewOf({ ...a, joinedChanged: '', joinedRedo: '' }, plans, stagesOf(a).slice(0, 4))).toEqual({ under: 3, partner: '피해 고치기', partnerEnd: '', when: '15:02', changed: [], redo: null })
+  expect(joinViewOf({ ...a, joinedWith: '' }, plans)).toBeNull()
+  expect(joinViewOf({ ...a, joinedChanged: '보스 10 → 5 · 확인 명령 통과 → 실패' }, plans)?.changed).toEqual(['보스 10 → 5', '확인 명령 통과 → 실패'])
+  // while the redo is open, what is being done now is the redo, as a card over the flow
+  expect(nowCardOf(a, plans, null, joinViewOf(a, plans, stagesOf(a)))).toEqual({ now: '달라진 결과 맞추기', jobs: [], back: '없음' })
+  expect(nowCardOf({ ...a, returnTo: 'b' }, plans, null, joinViewOf(a, plans, stagesOf(a)))?.back).toBe('피해 고치기')
+  expect(nowCardOf(a, plans, null, joinViewOf(a, plans, [...stagesOf(a).slice(0, 4), { name: '다시 하기: 달라진 결과 맞추기', state: 'done', refs: [] }]))).toBeNull()
+
+  engine(on, { a: joined(), b: other() })
+  await start($)
+  await drawnText($)
+  await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'a' } as never)
+  const nodes = await drawnNodes($)
+  const texts = textsOf(nodes)
+  // the record under the step the two were split at: the job done alongside with its tag, the join with its sign,
+  // the results that changed, and the redo with its arrow and its own state
+  const join = keyed(nodes, 'Box', 'join')[0]
+  expect(textsOf(flatNodes(join))).toEqual(['피해 고치기', '끝', '합침 15:02 · 비교함', '같은 줄 충돌 없음', '달라진 결과 1개: 보스 10 → 5', '진행 중'])
+  expect(flatNodes(join).filter(node => node.type === 'Svg').map(node => node.props?.alt)).toEqual(['함께 한 일', '합침', '다시 하기'])
+  expect(String(svgs(nodes, '함께 한 일')[0]?.props?.source)).toContain('#0c447c')
+  expect(keyed(nodes, 'Box', 'lane-')).toHaveLength(0)
+  expect(texts).not.toContain('둘 다 끝나면 합치고 비교함')
+  // the redo is drawn inside that record, not as a row of the flow: the flow keeps its four steps
+  expect(keyed(nodes, 'Button', 'step-').map(button => String(button.props?.key))).toEqual(['step-1', 'step-2', 'step-3', 'step-5', 'step-4'])
+  expect(JSON.stringify(keyed(nodes, 'Button', 'step-5')[0])).toContain('달라진 결과 맞추기')
+  expect(JSON.stringify(keyed(nodes, 'Button', 'step-5')[0])).not.toContain('5. 다시 하기')
+  // the step the record hangs under reads as being checked again; the step after it waits
+  expect(texts).toContain('다시 확인 중')
+  expect(texts).not.toContain('진행 중  ◀ 지금 여기')
+  expect(textsOf(flatNodes(keyed(nodes, 'Box', 'now-card')[0]))).toEqual(['지금', '달라진 결과 맞추기', '돌아갈 곳', '없음'])
+  const drawn = await drawnText($)
+  expect(drawn.indexOf('"key":"now-card"')).toBeLessThan(drawn.indexOf('"key":"step-1"'))
+  expect(drawn.indexOf('"key":"step-3"')).toBeLessThan(drawn.indexOf('"key":"join"'))
+  expect(drawn.indexOf('"key":"join"')).toBeLessThan(drawn.indexOf('"key":"step-4"'))
+})
+
+test('lanes T30 가른 일이 없으면 단계 흐름에 두 칸도 합친 기록도 없다', async ($, on) => {
+  const plain = parsePlans([{ slug: 'a', ...plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) }])
+  expect(lanesOf(plain, 'a', stagesOf)).toBeNull()
+  expect(joinViewOf(plain[0] as Plan, plain)).toBeNull()
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  await start($)
+  const nodes = await drawnNodes($)
+  expect(keyed(nodes, 'Box', 'lane')).toHaveLength(0)
+  expect(keyed(nodes, 'Box', 'join')).toHaveLength(0)
+  expect(textsOf(nodes).filter(one => /^(갈라짐|합침|함께 한 일|달라진 결과)/.test(one))).toEqual([])
+  expect(keyed(nodes, 'Box', 'now-card')).toHaveLength(0)
+  expect(nowCardOf(plain[0] as Plan, plain, null, null)).toBeNull()
+})
+
+test('order T31 내 차례 카드가 맨 위에, 지금 하는 일 한 줄이 단계 흐름 아래에 온다', async ($, on) => {
+  expect(paneOrder(['limits', 'askMode', 'gears', 'steps', 'more'], true, false)).toEqual(['card', 'limits', 'askMode', 'gears', 'steps', 'now', 'more'])
+  expect(paneOrder(['limits', 'steps', 'more'], false, false)).toEqual(['limits', 'steps', 'now', 'more'])
+  expect(paneOrder(['limits', 'steps', 'more'], false, true)).toEqual(['limits', 'now', 'steps', 'more'])
+  // no plan: no step flow, so no line about what is being done
+  expect(paneOrder(['limits'], true, false)).toEqual(['card', 'limits'])
+  expect(nowWords('yourTurn', { text: 'x' })).toBe('지금: 기다리는 중 — 아무것도 움직이지 않음')
+  expect(nowWords('working', { text: 'npm test' })).toBe('지금: npm test')
+  expect(nowWords('background', { text: '뒤에서 도는 일을 기다리는 중 — 측정' })).toBe('지금: 뒤에서 도는 일을 기다리는 중 — 측정')
+
+  const kit = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  withProject(kit, {})
+  on('session.usage', () => ({ value: { rateLimits: LIMITS, context: { percent: 40 } } }) as never)
+  turnEngine(on)
+  const held = dialog(on)
+  await start($)
+
+  // (가) a question is open: its card comes before the usage · ask-mode · gear cards
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  const open = await drawnText($)
+  const firstBox = flatNodes(JSON.parse(open)).find(node => node.props?.borderStyle !== undefined)
+  expect(firstBox?.props?.key).toBe('turn-card')
+  for (const later of ['컨텍스트', '묻기 방식']) {
+    expect(open.indexOf(later)).toBeGreaterThan(0)
+    expect(open.indexOf('답을 기다리는 중')).toBeLessThan(open.indexOf(later))
+  }
+  // (나) at work: the line says what is being done, under the step flow
+  const working = textsOf(flatNodes(JSON.parse(open))).filter(one => one.startsWith('지금: '))
+  expect(working).toHaveLength(1)
+  expect(open.indexOf('"key":"step-3"')).toBeLessThan(open.indexOf('지금: '))
+  held.end?.({ result: { answers: {} } })
+  await asked
+
+  // (다) the person's turn: nothing moves, and the line says so
+  await turnEnd($, 'answer', 5_000)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await text(ui, /^지금: /)).toBe('지금: 기다리는 중 — 아무것도 움직이지 않음')
+  await ui.unmount()
+})
+
+test('lanes T34 이름표는 글만큼 넓은 둥근 그림이고, 표지와 점은 한 색의 작은 그림이다', async () => {
+  // a wide letter takes one em, a space a third, any other letter a little over half
+  expect(textWidth('함께 한 일', 11)).toBe(52)
+  expect(textWidth('분기', 11)).toBe(22)
+  expect(textWidth('Separate folder', 11)).toBe(93)
+  expect(textWidth('', 11)).toBe(0)
+  const away = tagSvg('분기', 'away')
+  expect([away.width, away.height]).toEqual([38, 18])
+  expect(away.source).toContain('<rect width="38" height="18" rx="8" fill="#3c3489"/>')
+  expect(away.source).toContain('fill="#cecbf6">분기</text>')
+  const here = tagSvg('원본', 'here')
+  expect(here.width).toBe(38)
+  expect(here.source).toContain('fill="#0c447c"')
+  expect(here.source).toContain('fill="#b5d4f4">원본</text>')
+  // a longer label gets a wider tag
+  expect(tagSvg('함께 한 일', 'here').width).toBe(68)
+  // what a label carries is drawn as text, never as markup
+  expect(tagSvg('a<b&c', 'here').source).toContain('>a&lt;b&amp;c</text>')
+  // a sign: one colour, lines only
+  for (const name of ['branch', 'merge', 'arrow'] as const) {
+    const sign = iconSvg(name, '#8b949e')
+    expect(sign.startsWith('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"')).toBe(true)
+    expect(sign).toContain('stroke="#8b949e"')
+    expect(sign).toContain('fill="none"')
+  }
+  expect(iconSvg('branch', '#000')).not.toBe(iconSvg('merge', '#000'))
+  expect(iconSvg('arrow', '#000', 12)).toContain('width="12" height="12"')
+  // a dot: a ring for a step that waits, a filled dot of the state's colour for any other
+  expect(dotSvg('waiting')).toContain('fill="none" stroke="#6e7681"')
+  expect(dotSvg('done')).toContain('<circle cx="4" cy="4" r="4" fill="#3fb950"/>')
+  expect(dotSvg('doing')).toContain('fill="#e3b341"')
+  expect(dotSvg('blocked')).toContain('fill="#f85149"')
+})
+
+test('card T35 카드의 머리는 내 차례 이름표와 질문의 종류이고, 카드로 뜬 질문은 막힌 작업 칸에 다시 적히지 않는다', async ($, on) => {
+  expect(cardTitle({ lines: [{ label: '목표', text: 'x' }], files: [] })).toBe('이렇게 이해했음 — 맞나요?')
+  expect(cardTitle({ lines: [], files: [{ path: 'a.png', size: 1, kind: 'image' }] })).toBe('확인할 것 — 결과가 맞나요?')
+  expect(cardTitle({ lines: [], files: [] })).toBe('답을 기다리는 중')
+  const blocks = [
+    { kind: 'permit', title: '허락 기다림 — AskUserQuestion: 어느 쪽', detail: 'd' },
+    { kind: 'waiting', title: '답을 기다리는 중', detail: '어느 쪽' },
+    { kind: 'permit', title: '허락 기다림 — Bash: rm x', detail: 'd' },
+    { kind: 'test', title: '시험 실패', detail: 'T1' },
+  ] as const
+  expect(withoutAsked(blocks, true).map(block => block.title)).toEqual(['허락 기다림 — Bash: rm x', '시험 실패'])
+  expect(withoutAsked(blocks, false)).toHaveLength(4)
+
+  engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  const held = dialog(on)
+  await start($)
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  const nodes = await drawnNodes($)
+  const card = keyed(nodes, 'Box', 'turn-card')[0]
+  // the head: the tag of the person's turn, then what kind of question it is
+  expect(flatNodes(card).filter(node => node.type === 'Svg').map(node => node.props?.alt)).toEqual(['내 차례'])
+  expect(String(flatNodes(card).find(node => node.type === 'Svg')?.props?.source)).toContain('#3c3489')
+  expect(textsOf(flatNodes(card))[0]).toBe('답을 기다리는 중')
+  // the same question is not listed again as blocked work: the card alone says an answer is awaited
+  expect(textsOf(nodes).filter(one => one === '답을 기다리는 중')).toHaveLength(1)
+  expect(textsOf(nodes).filter(one => one.startsWith('막힌 작업'))).toEqual([])
+  held.end?.({ result: { answers: {} } })
+  await asked
+})
+
+test('card T36 카드로 답하면 SCV 의 선택 기록 훅을 같은 입력으로 돌린다 — 계획 이력에 그 답이 남게', async ($, on) => {
+  const record = choiceRecordOf('/core', 's-1', [{ question: 'Q' }], 'Q', '가')
+  expect(record?.argv).toEqual(['bash', '/core/vendor/scv-core/core/template/hooks/on-choice-answer.sh'])
+  expect(JSON.parse(record?.stdin ?? '{}')).toEqual({ session_id: 's-1', tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Q' }] }, tool_response: { answers: { Q: '가' } } })
+  expect(JSON.parse(choiceRecordOf('/core', null, [], 'Q', '가')?.stdin ?? '{}').session_id).toBeUndefined()
+  // SCV is not installed: nothing to tell
+  expect(choiceRecordOf(null, 's-1', [], 'Q', '가')).toBeNull()
+  expect(choiceRecordOf('', 's-1', [], 'Q', '가')).toBeNull()
+
+  const kit = engine(on, { a: plan({ title: 'p', status: 'in_progress', steps: ['[x] a', 'b', 'c'] }) })
+  withProject(kit, {})
+  const held = dialog(on)
+  await start($)
+  const asked = $.tool.call(ASK3) as Asked
+  await settle()
+  await drawnText($)
+  const before = kit.runs.length
+  await pressHere($, 'card-answer-1')
+  const got = await asked
+  expect(got.result?.answers?.[Q3]).toBe('크게')
+  const told = kit.runs.slice(before).filter(run => run.argv[1]?.endsWith('/template/hooks/on-choice-answer.sh'))
+  expect(told).toHaveLength(1)
+  expect(told[0]?.argv[1]).toBe(`${CORE_DIR}/vendor/scv-core/core/template/hooks/on-choice-answer.sh`)
+  expect(JSON.parse(told[0]?.stdin ?? '{}').tool_response).toEqual({ answers: { [Q3]: '크게' } })
+  expect(JSON.parse(told[0]?.stdin ?? '{}').tool_input.questions).toHaveLength(1)
+  expect(held.cut).toBe(1)
+
+  // answered in the conversation's own dialog: the host tells SCV itself, the pane tells nothing
+  const again = $.tool.call(ASK3) as Asked
+  await settle()
+  const mark = kit.runs.length
+  held.end?.({ result: { answers: { [Q3]: '작게 (추천)' } } })
+  await again
+  expect(kit.runs.slice(mark).filter(run => run.argv[1]?.endsWith('/template/hooks/on-choice-answer.sh'))).toHaveLength(0)
+})
+
+// ── the flow's line: unbroken from node to node, and the title level with the node ──
+import { RAIL_CELLS, RAIL_PIECE_HEIGHT, cellsOf, lineColorOf, railPieceSvg, titlePadOf } from './model'
+
+// The straight lines a picture draws, top to bottom, and how far down its node sits.
+const linesOf = (source: string) =>
+  [...source.matchAll(/<line x1="([\d.]+)" y1="([\d.]+)" x2="([\d.]+)" y2="([\d.]+)" stroke="(#[0-9a-f]+)" stroke-width="([\d.]+)"\/>/g)].map(found => ({
+    x: Number(found[1]),
+    from: Number(found[2]),
+    to: Number(found[4]),
+    color: String(found[5]),
+    width: Number(found[6]),
+  }))
+const nodeY = (source: string) => Number(/<circle cx="[\d.]+" cy="([\d.]+)" r="7"/.exec(source)?.[1])
+const boxOf = (nodes: readonly Drawn[], child: Drawn | undefined) => nodes.find(node => node.type === 'Box' && child !== undefined && (node.children ?? []).includes(child))
+const elementsOf = (node: Drawn | undefined) => (node?.children ?? []).filter((child): child is Drawn => typeof child === 'object' && child !== null)
+const openPlan = async ($: Engine, slug: string) => {
+  await start($)
+  await drawnText($)
+  await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: slug } as never)
+
+  return drawnNodes($)
+}
+
+test('rail T38 (순수부) 움직이는 흐름의 그림은 선이 위 끝에서 꼭짓점으로 내려오고 꼭짓점에서 아래 끝까지 가는 실선이고, 멈춘 그림은 그대로다', () => {
+  expect(STATES.map(lineColorOf)).toEqual([NODE_COLOR.done, NODE_COLOR.waiting, NODE_COLOR.waiting, NODE_COLOR.waiting, NODE_COLOR.waiting])
+
+  type Draw = (state: (typeof STATES)[number], next: (typeof STATES)[number] | null, prev: (typeof STATES)[number] | null) => string
+  const pictures: Draw[] = [
+    (state, next, prev) => nodeMotionSvg(state, next, false, 44, false, prev),
+    (state, next, prev) => nodeMotionSvg(state, next, false, 44, true, prev),
+    (state, next, prev) => nodeMotionSvg(state, next, true, 44, true, prev),
+    (state, next, prev) => stepPictureOf(true, true, state, next, false, prev).source,
+    (state, next, prev) => stepPictureOf(true, false, state, next, true, prev).source,
+  ]
+  for (const draw of pictures) {
+    // a step in the middle: a piece from the picture's top edge down to its node in the colour of the step before,
+    // and a piece from its node to the bottom edge in its own — so one picture's bottom meets the next one's top
+    const middle = draw('doing', 'waiting', 'done')
+    const y = nodeY(middle)
+    expect(y).toBe(14)
+    expect(linesOf(middle)).toEqual([
+      { x: MOTION_WIDTH / 2, from: 0, to: y - 9, color: NODE_COLOR.done, width: 2.5 },
+      { x: MOTION_WIDTH / 2, from: y + 9, to: 44, color: NODE_COLOR.waiting, width: 2.5 },
+    ])
+    expect(middle).not.toContain('stroke-dasharray')
+    // the first step has nothing above it, the last nothing below, a lone step neither
+    expect(linesOf(draw('done', 'doing', null)).map(line => [line.from, line.to, line.color])).toEqual([[y + 9, 44, NODE_COLOR.done]])
+    expect(linesOf(draw('waiting', null, 'doing')).map(line => [line.from, line.to, line.color])).toEqual([[0, y - 9, NODE_COLOR.waiting]])
+    expect(linesOf(draw('waiting', null, null))).toEqual([])
+  }
+  // drawn without the step before it, a picture has no piece from above: the piece is the only thing a step before adds
+  expect(nodeMotionSvg('doing', 'waiting', false, 44, true, null)).toBe(nodeMotionSvg('doing', 'waiting', false))
+  expect(linesOf(nodeMotionSvg('doing', 'waiting', false)).map(line => [line.from, line.to])).toEqual([[23, 44]])
+
+  // the still picture of before the moving flow is not changed: whatever step comes before, it is nodeIconSvg's
+  // picture to the letter, dashes and all
+  for (const prev of [null, ...STATES]) expect(stepPictureOf(false, false, 'doing', 'waiting', false, prev)).toEqual({ source: nodeIconSvg('doing', 'waiting'), width: 22, isInteractive: false })
+  expect(nodeIconSvg('doing', 'waiting')).toContain('stroke-dasharray="3 3"')
+
+  // the top of the line beside what hangs under a step: as wide as the step pictures, the line in its middle
+  expect(linesOf(railPieceSvg(MOTION_WIDTH, NODE_COLOR.done))).toEqual([{ x: MOTION_WIDTH / 2, from: 0, to: RAIL_PIECE_HEIGHT, color: NODE_COLOR.done, width: 2.5 }])
+  expect(linesOf(railPieceSvg(22, NODE_COLOR.waiting))[0]?.x).toBe(11)
+  expect(railPieceSvg(22, NODE_COLOR.waiting)).toContain('width="22"')
+  expect(railPieceSvg(MOTION_WIDTH, null)).not.toContain('<line')
+
+  // the title's line (20 px tall) is level with the node of the moving flow: the space over it, in halves of a line.
+  // With the switch off there is no space: that layout stays as it was (the still node is within a pixel of the line)
+  expect(titlePadOf(true)).toBe((nodeY(nodeMotionSvg('done', null, false)) - 10) / 10)
+  expect([titlePadOf(true), titlePadOf(false)]).toEqual([0.4, 0])
+  expect(Math.abs(nodeY(nodeIconSvg('done', null)) - 10)).toBeLessThanOrEqual(1)
+
+  // the piece a Box draws is as thick as the picture's line: 2.5 px in cells of about 8.6 px
+  expect(cellsOf(8.6)).toBe(1)
+  expect(RAIL_CELLS).toBe(cellsOf(2.5))
+  expect(RAIL_CELLS).toBe(0.29)
+})
+
+test('rail T39 (창) 두 칸이 끼어 있어도 선이 가른 단계에서 다음 단계까지 이어지고, 제목 줄은 꼭짓점 높이에 맞는다', async ($, on) => {
+  engine(on, { a: BOSS_SPLIT(), b: HIT_SPLIT() })
+  const nodes = await openPlan($, 'a')
+  const icons = nodes.filter(node => node.type === 'Svg' && isStepIcon(node as never))
+  expect(icons.map(icon => icon.props?.alt)).toEqual(['1단계 완료', '2단계 완료', '3단계 진행 중', '4단계 대기', '5단계 대기'])
+
+  // every picture after the first draws the piece that comes down from the step before, in that step's colour
+  expect(icons.map(icon => linesOf(String(icon.props?.source)).filter(line => line.from === 0).map(line => line.color))).toEqual([
+    [],
+    [NODE_COLOR.done],
+    [NODE_COLOR.done],
+    [NODE_COLOR.waiting],
+    [NODE_COLOR.waiting],
+  ])
+  // under each picture but the last, a piece of the same colour that takes whatever height the row has left
+  const fill = (color: string) => ({ flexGrow: 1, width: RAIL_CELLS, backgroundColor: color })
+  expect(icons.map(icon => elementsOf(boxOf(nodes, icon)).filter(child => child !== icon).map(child => child.props))).toEqual([
+    [fill(NODE_COLOR.done)],
+    [fill(NODE_COLOR.done)],
+    [fill(NODE_COLOR.waiting)],
+    [fill(NODE_COLOR.waiting)],
+    [],
+  ])
+  expect(icons.map(icon => boxOf(nodes, icon)?.props)).toEqual(icons.map(() => ({ flexDirection: 'column', alignItems: 'center', flexShrink: 0 })))
+
+  // the two columns stand beside the line: a row of [the line — its top piece, then the piece that stretches | the columns]
+  const lanes = nodes.find(node => node.props?.key === 'lanes')
+  const hang = boxOf(nodes, lanes)
+  expect(hang?.props).toEqual({ flexDirection: 'row', gap: 1 })
+  const [rail, hung] = elementsOf(hang)
+  expect(hung).toBe(lanes)
+  expect(rail?.props).toEqual({ flexDirection: 'column', alignItems: 'center', flexShrink: 0 })
+  const [piece, stretch] = elementsOf(rail)
+  expect(piece?.type).toBe('Svg')
+  expect(piece?.props).toEqual({ source: railPieceSvg(MOTION_WIDTH, NODE_COLOR.waiting), alt: '다음 단계로 이어지는 선', width: MOTION_WIDTH, height: RAIL_PIECE_HEIGHT })
+  expect(stretch?.props).toEqual(fill(NODE_COLOR.waiting))
+  // the columns keep no indent of their own: the line's room is their indent
+  expect(lanes?.props?.paddingLeft).toBe(0)
+
+  // from step 3 to step 4 nothing is without the line: step 3's row, the columns' row, then step 4's row — in that order,
+  // with no other row between them
+  const flow = boxOf(nodes, hang)
+  const rows = elementsOf(flow)
+  const rowOf = (key: string) => rows.findIndex(row => flatNodes(row).some(node => node.props?.key === key))
+  expect([rowOf('step-3'), rows.indexOf(hang as Drawn), rowOf('step-4')]).toEqual([2, 3, 4])
+  expect(rows).toHaveLength(6)
+
+  // the title's line is level with the node: the same space over every title
+  const titles = keyed(nodes, 'Button', 'step-')
+  expect(titles.map(title => boxOf(nodes, title)?.props?.paddingTop)).toEqual([0.4, 0.4, 0.4, 0.4, 0.4])
+})
+
+test('rail T40 (창) 합친 기록 옆에도 선이 이어지고, 다시 맞추는 일이 끝나면 그 선이 초록이다', async ($, on) => {
+  const joined = (redo: string) =>
+    withHead(plan({ title: '보스 체력', status: 'in_progress', steps: ['[x] 측정 도구', '[x] 기본 값', '[x] 1번 보스', '결과 확인', `${redo} 다시 하기: 달라진 결과 맞추기 — 보스 10 → 5`] }), {
+      joined_with: 'b',
+      joined_on: '2026-11-09 15:02',
+      joined_changed: '보스 10 → 5',
+      joined_at: '3',
+      joined_redo: '5',
+    })
+  const other = () => withHead(plan({ title: '피해 고치기', status: 'in_progress', steps: ['[x] 피해 두 배로', '[x] 앱에서 확인'] }), { joined_with: 'a', joined_on: '2026-11-09 15:02', joined_changed: '보스 10 → 5' })
+  engine(on, { a: joined('[~]'), b: other(), c: joined('[x]') })
+  const railBeside = (nodes: readonly Drawn[]) => {
+    const join = nodes.find(node => node.props?.key === 'join')
+    const [rail, hung] = elementsOf(boxOf(nodes, join))
+    expect(hung).toBe(join)
+    expect(join?.props?.paddingLeft).toBe(0)
+
+    return elementsOf(rail).map(part => (part.type === 'Svg' ? linesOf(String(part.props?.source))[0]?.color : part.props?.backgroundColor))
+  }
+
+  // the redo is open: the step the record hangs under reads as being checked again, and its line is the grey of a step not finished
+  const open = await openPlan($, 'a')
+  expect(textsOf(open)).toContain('다시 확인 중')
+  expect(railBeside(open)).toEqual([NODE_COLOR.waiting, NODE_COLOR.waiting])
+  // the picture of the step after the record takes its piece from above in the same grey
+  const after = (nodes: readonly Drawn[]) => linesOf(String(nodes.find(node => node.type === 'Svg' && String(node.props?.alt).startsWith('4단계 '))?.props?.source)).filter(line => line.from === 0).map(line => line.color)
+  expect(after(open)).toEqual([NODE_COLOR.waiting])
+
+  // the redo is done: the step is finished again, and the line beside the record is green down to the next step
+  await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'c' } as never)
+  const closed = await drawnNodes($)
+  expect(textsOf(closed)).not.toContain('다시 확인 중')
+  expect(railBeside(closed)).toEqual([NODE_COLOR.done, NODE_COLOR.done])
+  expect(after(closed)).toEqual([NODE_COLOR.done])
+})
+
+test('rail T41 (창) 움직임을 끄면 그림과 제목 자리는 그대로이고 두 칸 옆의 선만 좁은 그림에 맞춰 더해지며, 마지막 단계 밑의 두 칸 옆에는 선 없이 자리만 있다', async ($, on) => {
+  const last = () => withHead(plan({ title: '보스 체력', status: 'in_progress', steps: ['[x] 측정 도구', '[~] 1번 보스'] }), { split_with: 'b', split_on: '2026-11-09 11:09', split_at: '2', split_dir: '/w/repo.split-a' })
+  const { store } = engine(on, { a: BOSS_SPLIT(), b: HIT_SPLIT(), z: last() })
+  store.set(MOTION_STORE, false)
+  const nodes = await openPlan($, 'a')
+  const lanes = nodes.find(node => node.props?.key === 'lanes')
+  const [rail] = elementsOf(boxOf(nodes, lanes))
+  const [piece, stretch] = elementsOf(rail)
+  // the still pictures are 22 px wide: the top piece is as wide, and the line stands in its middle
+  expect(piece?.props?.width).toBe(22)
+  expect(linesOf(String(piece?.props?.source))).toEqual([{ x: 11, from: 0, to: RAIL_PIECE_HEIGHT, color: NODE_COLOR.waiting, width: 2.5 }])
+  expect(stretch?.props).toEqual({ flexGrow: 1, width: RAIL_CELLS, backgroundColor: NODE_COLOR.waiting })
+  // the still pictures themselves are not changed: each is nodeIconSvg's picture to the letter
+  const icons = nodes.filter(node => node.type === 'Svg' && isStepIcon(node as never))
+  const states = ['done', 'done', 'doing', 'waiting', 'waiting'] as const
+  expect(icons.map(icon => icon.props?.width)).toEqual([22, 22, 22, 22, 22])
+  expect(icons.map(icon => String(icon.props?.source))).toEqual(states.map((state, i) => nodeIconSvg(state, states[i + 1] ?? null)))
+  // the titles stay where they were before the moving flow: no space is put over them
+  expect(keyed(nodes, 'Button', 'step-').map(title => boxOf(nodes, title)?.props?.paddingTop)).toEqual([undefined, undefined, undefined, undefined, undefined])
+
+  // two columns under the last step: no step follows, so no line — only the room a line takes, so the columns stay in place
+  await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'z' } as never)
+  const end = await drawnNodes($)
+  const lone = end.find(node => node.props?.key === 'lanes')
+  const [room, hung] = elementsOf(boxOf(end, lone))
+  expect(hung).toBe(lone)
+  expect(room?.type).toBe('Box')
+  expect(room?.props).toEqual({ width: cellsOf(22), flexShrink: 0 })
+  expect(elementsOf(room)).toEqual([])
+  expect(flatNodes(boxOf(end, lone)).filter(node => node.props?.alt === '다음 단계로 이어지는 선')).toEqual([])
+})
+
+// ── a step pressed in one of the two columns ──
+import { focusSubject, pressFocus } from './model'
+
+test('lanes T43 (순수부) 누른 단계에 따라 자세한 칸이 보일 단계가 정해진다 — 이 계획의 단계는 흐름처럼, 상대 일의 단계는 따로', () => {
+  // a step of the plan in view toggles as a row of the flow does, and lets go of the other job's step
+  expect(pressFocus(null, null, 'a', { plan: 'a', step: 2 })).toEqual({ own: 2, other: null })
+  expect(pressFocus(2, null, 'a', { plan: 'a', step: 2 })).toEqual({ own: null, other: null })
+  expect(pressFocus(1, { plan: 'b', step: 0 }, 'a', { plan: 'a', step: 3 })).toEqual({ own: 3, other: null })
+  // a step of the other job toggles that step and leaves the plan's own focus as it was
+  expect(pressFocus(1, null, 'a', { plan: 'b', step: 1 })).toEqual({ own: 1, other: { plan: 'b', step: 1 } })
+  expect(pressFocus(1, { plan: 'b', step: 1 }, 'a', { plan: 'b', step: 1 })).toEqual({ own: 1, other: null })
+  expect(pressFocus(null, { plan: 'b', step: 0 }, 'a', { plan: 'b', step: 1 })).toEqual({ own: null, other: { plan: 'b', step: 1 } })
+
+  // the detail shows the other job's step while that job runs beside the plan in view
+  expect(focusSubject(1, { plan: 'b', step: 1 }, 'a', 2, 'b')).toEqual({ plan: 'b', step: 1 })
+  // …and the plan's own step when no other step is in focus: the pressed one, else the step work stands at
+  expect(focusSubject(1, null, 'a', 2, 'b')).toEqual({ plan: 'a', step: 1 })
+  expect(focusSubject(null, null, 'a', 2, 'b')).toEqual({ plan: 'a', step: 2 })
+  expect(focusSubject(null, null, 'a', null, 'b')).toBeNull()
+  // a step of a job that no longer runs beside this plan (joined, or another plan is in view) is not shown
+  expect(focusSubject(null, { plan: 'b', step: 1 }, 'a', 2, null)).toEqual({ plan: 'a', step: 2 })
+  expect(focusSubject(0, { plan: 'c', step: 1 }, 'a', 2, 'b')).toEqual({ plan: 'a', step: 0 })
+})
+
+test('lanes T44 (창) 두 칸 안의 단계를 누르면 그 단계의 자세한 칸이 흐름 아래에 뜬다 — 상대 일의 단계도', async ($, on) => {
+  engine(on, { a: BOSS_SPLIT(), b: HIT_SPLIT() })
+  const nodes = await openPlan($, 'a')
+  const detailOf = (all: readonly Drawn[]) => all.find(node => node.props?.key === 'step-detail')
+  const detailTexts = (all: readonly Drawn[]) => textsOf(flatNodes(detailOf(all)))
+  const litRows = (all: readonly Drawn[]) =>
+    all.filter(node => node.type === 'Box' && node.props?.backgroundColor === '#1f242c').map(row => keyed(flatNodes(row), 'Button', '').map(button => button.props?.key))
+  // at first the detail is the plan's own step in progress; its row is lit in the flow and in its own column
+  expect(detailTexts(nodes)[0]).toBe('3. 1번 보스 — 진행 중')
+  expect(litRows(nodes)).toEqual([['step-3'], ['lane-step-a-3']])
+
+  // a step of the other job: its detail opens, under its tag and its job's name
+  await pressHere($, 'lane-step-b-2')
+  const other = await drawnNodes($)
+  expect(detailTexts(other).slice(0, 5)).toEqual(['피해 고치기', '2. 앱에서 확인 — 진행 중', '하는 일', '순수함수 없음', '앱에서 확인'])
+  expect(detailTexts(other)).toContain('지금 진행')
+  expect(detailTexts(other)).toContain('이 단계에서 한 일')
+  expect(
+    flatNodes(detailOf(other))
+      .filter(node => node.type === 'Svg')
+      .map(node => node.props?.alt),
+  ).toEqual(['원본'])
+  // the pressed row is lit in its column, and no row of the flow is
+  expect(litRows(other)).toEqual([['lane-step-b-2']])
+
+  // a finished step of the other job has no progress to show
+  await pressHere($, 'lane-step-b-1')
+  const done = await drawnNodes($)
+  expect(detailTexts(done).slice(0, 2)).toEqual(['피해 고치기', '1. 피해 두 배로 — 완료'])
+  expect(detailTexts(done)).not.toContain('지금 진행')
+  // pressed again, it lets go: the detail is the plan's own step again
+  await pressHere($, 'lane-step-b-1')
+  expect(detailTexts(await drawnNodes($))[0]).toBe('3. 1번 보스 — 진행 중')
+
+  // a step of this plan pressed in its own column is the step of the flow: both rows are lit, no tag over the detail
+  await pressHere($, 'lane-step-b-2')
+  await pressHere($, 'lane-step-a-4')
+  const own = await drawnNodes($)
+  expect(detailTexts(own)[0]).toBe('4. 2번 보스 — 대기')
+  expect(flatNodes(detailOf(own)).filter(node => node.type === 'Svg')).toEqual([])
+  expect(litRows(own)).toEqual([['lane-step-a-4'], ['step-4']])
+
+  // a step of the flow lets go of the other job's step
+  await pressHere($, 'lane-step-b-2')
+  await pressHere($, 'step-1')
+  expect(detailTexts(await drawnNodes($))[0]).toBe('1. 측정 도구 — 완료')
+
+  // the two columns take all the room beside the line
+  expect(nodes.find(node => node.props?.key === 'lanes')?.props?.flexGrow).toBe(1)
+  // …and each keeps to its half whatever it holds: a long name is cut short inside its column instead of pushing the other out
+  expect(keyed(nodes, 'Box', 'lane-').map(lane => [lane.props?.width, lane.props?.minWidth])).toEqual([
+    ['50%', 0],
+    ['50%', 0],
+  ])
+})
+

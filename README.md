@@ -31,7 +31,9 @@ The project is the nearest folder at or above the session's folder that holds `s
 - a one-line summary: where the work stands, anything stuck, time left (an estimate, marked as one)
 - the next thing to do, with a button that puts its command in the prompt box
 - the step flow as connected nodes: done, doing, doing in the background, blocked, waiting
-- press a step to see what it does, what was done during it, and its evidence (pictures, videos, pages to open); a picture opens full size
+- motion that carries one meaning each: the step in progress pulses, a light runs to the next step when one finishes, and nothing moves while it is your turn (a button turns motion off)
+- two jobs running at once: under the step they were split at, two columns (branch · original) with each job's steps; after the join, what changed and what to redo
+- press a step — in the flow or in a column — to see what it does, what was done during it, and its evidence (pictures, videos, pages to open); a picture opens full size
 - a plan picker when there are several plans
 
 **The work**
@@ -43,7 +45,8 @@ The project is the nearest folder at or above the session's folder that holds `s
 
 **What waits on you**
 
-- cards: waiting for your answer, waiting for your permission, a turn stopped by an error or a refusal, a failed test run
+- an open question as a card on top: Claude's reading of the request (goal · not doing · check) or the evidence of the result, with buttons that answer it
+- cards: waiting for your permission, a turn stopped by an error or a refusal, a failed test run
 - alerts for the same, for a turn of 2 minutes or more that finished, and for a usage window past 90%; they also reach your phone while Remote Control is connected
 
 Sections you do not need now fold under "more"; a blocked card never folds.
@@ -61,6 +64,8 @@ Sections you do not need now fold under "more"; a blocked card never folds.
 | a language | the pane's text and Claude's answers follow it |
 | the branch name | a branch list; pick one to switch |
 | the next-step button | its command goes into the prompt box |
+| an answer on the question card | the open question gets that answer |
+| the motion button | the step pictures stop or move again |
 
 **Auto-clear.** When a turn ends with the context past the threshold, the pane clears the conversation instead of summarizing it; the new conversation starts from the end of the SCV record. Right after, it shows the last three exchanges again (`/scv-last-talk`) and has Claude bring the task list back. The settings are `SCV_CLEAR_AUTO` and `SCV_CLEAR_PERCENT` in `scv/scv_settings.json` (default: on, 50%). A project with no SCV record is summarized as before.
 

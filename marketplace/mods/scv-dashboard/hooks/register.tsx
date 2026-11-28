@@ -1,11 +1,32 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
-import type { ActNote, AgentState, BigProof, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, ViewPicks, Viewers, WordsView, WorkEntry } from '../types'
+import type { ActNote, AgentState, BigProof, CardExtra, DoneEntry, Evidence, Expanded, GearAsks, GearForm, GearRun, GearWait, JobBoard, Live, Mirror, Permit, Plan, PlanFile, Since, Snapshot, StageState, StepFunctions, StepSignal, Stopped, TestRun, UsageLimit, ViewPicks, Viewers, WordsView, WorkEntry, OpenQuestion } from '../types'
 import type { FileFact, MirrorAct } from './model'
 import { LANG_OPTIONS, cleanLang, langChoice, langFromSettings, langSaveArgv, packFile, packFor, packRequest, parsePack, sayElements, toLang } from './lang'
 import {
   STEP_TOOL,
+  CARD_TOOL,
+  joinViewOf,
+  lanesOf,
+  nowWords,
+  paneOrder,
+  cardTitle,
+  choiceRecordOf,
+  dotSvg,
+  iconSvg,
+  isRedoOpen,
+  nowCardOf,
+  tagSvg,
+  withoutAsked,
+  answerOf,
+  buildCardPrompt,
+  cardAnswer,
+  cardExtraFromWire,
+  cardOf,
+  judgeCard,
+  openQuestionOf,
+  questionFromWire,
   isMirrorDue,
   isOwnAddress,
   isViewerOf,
@@ -39,12 +60,23 @@ import {
   liveOf,
   classifyTurnEnd,
   countStages,
-  nodeIconSvg,
+  motionOf,
+  justDoneOf,
+  stepPictureOf,
+  pressFocus,
+  focusSubject,
+  lineColorOf,
+  railPieceSvg,
+  titlePadOf,
+  cellsOf,
+  RAIL_CELLS,
+  RAIL_PIECE_HEIGHT,
   deriveStages,
   describeTool,
   estimateEta,
   eventsSince,
   findBlocks,
+  formatReset,
   formatDuration,
   headline,
   isMainLoop,
@@ -192,7 +224,7 @@ import {
   wordsRemoveCommand,
   wordsSaid,
 } from './model'
-import type { AskMode, BranchNow, ClearKept, Talk, ConfirmStop, Flight, JobEnd, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, TabSeen, WordDraft } from './model'
+import type { AskMode, BranchNow, ClearKept, Talk, ConfirmStop, Flight, IconName, JobEnd, LaneFocus, LightSettings, PaneSection, Place, RunPlan, StepFunctionView, TabSeen, TagTone, WordDraft } from './model'
 
 const PANE = 'scv-dashboard'
 const TITLE = 'SCV'
@@ -229,6 +261,9 @@ const gearForms = atom({ plugin: 'scv-dashboard', key: 'gearForms' } as const, {
 const gearAsks = atom({ plugin: 'scv-dashboard', key: 'gearAsks' } as const, { index: null, byName: {} } as GearAsks)
 // The fold of the cards under '더 보기' is kept across sessions, by this key in the mod's store.
 const MORE_KEY = 'scv-dashboard:more'
+// The switch of the moving flow (step pictures that move) is kept across sessions too; absent, it is on.
+const MOTION_KEY = 'scv-dashboard:motion'
+const motion = atom({ plugin: 'scv-dashboard', key: 'motion' } as const, true)
 // A run from the pane that took this long is a long one: its end is announced.
 const GEAR_RUN_MS = 30_000
 // The gear that fits what is being typed (its name), and the one the person turned down for this text.
@@ -449,8 +484,18 @@ const fitGear = async ($: Api, text: string) => {
   if ((await read($, gearHint)) !== name) await update($, gearHint, () => name)
 }
 const focusStep = atom({ plugin: 'scv-dashboard', key: 'focusStep' } as const, null as number | null)
+// A step of the other of two jobs, pressed in its column: the detail under the flow shows it instead of the plan's own step.
+const focusLane = atom({ plugin: 'scv-dashboard', key: 'focusLane' } as const, null as LaneFocus | null)
 // The proof picture a person pressed to see large; while it stands, the pane draws that picture alone.
 const bigProof = atom({ plugin: 'scv-dashboard', key: 'bigProof' } as const, null as BigProof | null)
+// The person's turn as a card: the question open now, what Claude sent for the next question's card, the line
+// under the card's field, and the card picture shown large.
+const openQuestion = atom({ plugin: 'scv-dashboard', key: 'question' } as const, null as OpenQuestion | null)
+const cardExtra = atom({ plugin: 'scv-dashboard', key: 'cardExtra' } as const, null as CardExtra | null)
+const cardNote = atom({ plugin: 'scv-dashboard', key: 'cardNote' } as const, null as string | null)
+const cardBig = atom({ plugin: 'scv-dashboard', key: 'cardBig' } as const, null as number | null)
+// The way an answer given in the pane reaches the open question's call, and what is typed in the card's field.
+const cardGate: { resolve: ((answer: string) => void) | null } = { resolve: null }
 const stepLog = atom({ plugin: 'scv-dashboard', key: 'stepLog' } as const, {} as Record<string, WorkEntry[]>)
 // The functions each step made and called, by `<plan>#<step index>`; kept per project like the step signals.
 const stepFunctions = atom({ plugin: 'scv-dashboard', key: 'stepFunctions' } as const, {} as Record<string, StepFunctions>)
@@ -495,6 +540,9 @@ const fromMirror = atom({ plugin: 'scv-dashboard', key: 'fromMirror' } as const,
 const STATE_LABEL: Record<StageState, string> = { done: '완료', doing: '진행 중', blocked: '막힘', waiting: '대기', yourTurn: '사용자 차례' }
 const STATE_MARK: Record<StageState, string> = { done: '●', doing: '◉', blocked: '●', waiting: '○', yourTurn: '◉' }
 const STATE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#8b949e', yourTurn: '#a371f7' }
+// The blue of work under way (a job's sign after a join, the state of its redo) and the grey of a note.
+const ACCENT = '#4f8cff'
+const NOTE_COLOR = '#8b949e'
 const RESULT_LABEL = { pass: '통과', fail: '실패', none: '결과 없음' } as const
 const RESULT_COLOR = { pass: '#3fb950', fail: '#f85149', none: '#8b949e' } as const
 
@@ -1019,7 +1067,55 @@ const alert = async ($: Api, text: string) => {
 }
 
 // Calls the mod makes itself (its phone notification) are not the work it watches.
-const OWN_TOOLS = new Set<string>([STEP_TOOL, 'PushNotification'])
+const OWN_TOOLS = new Set<string>([STEP_TOOL, CARD_TOOL, 'PushNotification'])
+
+// The card tool, declared and matched as the step tool is.
+const CARD_TOOL_NAME = new RegExp(`^${CARD_TOOL}$`)
+
+const CARD_TOOL_SPEC = {
+  name: 'scv_card',
+  description:
+    "Send what the next question's card in the SCV pane shows beside the question, right before you ask with AskUserQuestion. For a question that confirms requirements: goal, not_doing and check — one short line each, what you understood. For a question that confirms a result: evidence — project files a person can look at (png, jpg, jpeg, gif, webp, svg, mp4, webm, mov, html, pdf); any other file, a missing one or one outside the project is left out and named in the answer. It belongs to the next question only. Changes no file.",
+  inputSchema: {
+    type: 'object',
+    properties: {
+      goal: { type: 'string', description: 'One short line: the goal as you understood it' },
+      not_doing: { type: 'string', description: 'One short line: what will not be done' },
+      check: { type: 'string', description: 'One short line: how the result will be checked' },
+      evidence: { type: 'array', items: { type: 'string' }, description: 'Project files a person can look at — picture, video, html or pdf — relative to the project or absolute' },
+    },
+    additionalProperties: false,
+  },
+}
+
+// The open question is answered by whichever comes first: the conversation's own dialog (below), or the pane's card.
+// An answer from the card is returned while the dialog still waits; the engine then ends the dialog.
+const askedOrCard = async <R,>($: Api, input: Record<string, unknown>, below: Promise<R>): Promise<R> => {
+  const fromCard = new Promise<string>(resolve => {
+    cardGate.resolve = resolve
+  })
+  const fromBelow = below.then(result => ({ result }))
+  const won = await Promise.race([fromBelow, fromCard.then(answer => ({ answer }))])
+  cardGate.resolve = null
+  if ('result' in won) return won.result
+  // The dialog that still waits is cut by the engine once this returns: whatever it comes to is not an answer.
+  void fromBelow.catch(() => undefined)
+  const first = (await read($, openQuestion))?.questions[0]?.question ?? ''
+  // SCV's own record of a choice hears only the dialog's answers: tell it of this one before the answer goes back.
+  await recordChoice($, input.questions, first, won.answer)
+
+  return { result: { questions: input.questions, answers: { [first]: won.answer } } } as R
+}
+
+// Tells SCV of a question answered from the card, the way the host tells it of one answered in the dialog. A failure
+// costs only that record: the answer still goes back.
+const recordChoice = async ($: Api, questions: unknown, question: string, answer: string) => {
+  const shot = await read($, snapshot)
+  const record = choiceRecordOf(shot.core, await $.session.id().catch(() => null), questions, question, answer)
+  if (!record) return
+  await $.process.run(record.argv, { ...(shot.cwd ? { cwd: shot.cwd } : {}), stdin: record.stdin, timeoutMs: 15_000 }).catch(() => undefined)
+}
+
 
 // Takes a job off the board when its end is heard, and writes the line it leaves in 'recently finished'.
 const endJob = async ($: Api, end: JobEnd | null) => {
@@ -1109,6 +1205,8 @@ const mirrorState = async ($: Api) => ({
   gearAsks: await read($, gearAsks).then(async kept => (kept.index === ((await read($, snapshot)).gearsText ?? null) ? kept.byName : {})),
   gearRecent: await read($, gearRecent),
   gearLive: [...liveRuns.keys()],
+  // After 0.7.2: the question open here with what was sent for its card — a viewer shows the card, with no button.
+  ...((await read($, openQuestion)) ? { question: await read($, openQuestion), cardExtra: await read($, cardExtra) } : {}),
 })
 
 // sentAt: the working session's clock when it sent; a version before it sends none.
@@ -1188,6 +1286,9 @@ const takeMirror = async ($: Api, body: string) => {
   await update($, snapshot, () => state.snapshot)
   await update($, runs, () => state.runs ?? [])
   await update($, waiting, () => state.waiting ?? null)
+  const openThere = questionFromWire(state.question)
+  await update($, openQuestion, () => openThere)
+  await update($, cardExtra, () => (openThere ? cardExtraFromWire(state.cardExtra) : null))
   await update($, live, () => state.live ?? { isWorking: false, turnStartedAt: 0, tool: null })
   await update($, jobs, () => (Array.isArray(state.jobs?.jobs) ? { jobs: state.jobs.jobs, extra: Number(state.jobs.extra) || 0 } : { jobs: [], extra: 0 }))
   await update($, doneLog, () => (Array.isArray(state.doneLog) ? state.doneLog : []))
@@ -1733,8 +1834,11 @@ export const register: Register = on => {
     await $.command.register({ name: TALK_COMMAND, description: 'Show the last exchanges from before the conversation was cleared' })
     await $.command.register({ name: 'scv-mirror', description: "Draw another session's SCV pane here: /scv-mirror <address>, or /scv-mirror stop", argumentHint: '<address> | stop' })
     await $.tool.register(STEP_TOOL_SPEC).catch(() => undefined)
+    await $.tool.register(CARD_TOOL_SPEC).catch(() => undefined)
     const more = await $.store.get(MORE_KEY).catch(() => undefined)
     await update($, expanded, value => ({ ...value, more: more === true }))
+    const keptMotion = await $.store.get(MOTION_KEY).catch(() => undefined)
+    await update($, motion, () => keptMotion !== false)
     const keptLight = await $.store.get(LIGHT_KEY).catch(() => undefined)
     await update($, light, () => parseLight(keptLight))
     const lately = await $.store.get(recentKey(project)).catch(() => undefined)
@@ -2125,13 +2229,34 @@ export const register: Register = on => {
 
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
-    const text = buildStepPrompt(parsePlans((await read($, snapshot)).plans))
+    const open = parsePlans((await read($, snapshot)).plans)
+    const text = buildStepPrompt(open)
+    const cardText = buildCardPrompt(open)
+    if (!text && !cardText) return composed
 
-    return text ? { sections: [...composed.sections, { id: 'scv-dashboard:step-signal', text, scope: 'session' as const }] } : composed
+    return {
+      sections: [
+        ...composed.sections,
+        ...(text ? [{ id: 'scv-dashboard:step-signal', text, scope: 'session' as const }] : []),
+        ...(cardText ? [{ id: 'scv-dashboard:turn-card', text: cardText, scope: 'session' as const }] : []),
+      ],
+    }
   })
 
   // The mod's own tool asks no permission; every other tool's verdict is left as it is.
   on('tool.check', { tool: STEP_TOOL_NAME }, () => ({ decision: 'allow' as const }))
+  on('tool.check', { tool: CARD_TOOL_NAME }, () => ({ decision: 'allow' as const }))
+
+  // What Claude sends for the next question's card: kept until that question closes.
+  on('tool.call', { tool: CARD_TOOL_NAME }, async ($, e) => {
+    const input = e as unknown as Record<string, unknown>
+    const shot = await read($, snapshot)
+    const paths = Array.isArray(input.evidence) ? input.evidence.filter((one): one is string => typeof one === 'string' && one.trim() !== '') : []
+    const judged = judgeCard({ goal: input.goal, notDoing: input.not_doing, check: input.check, paths }, await fileFacts($, shot.cwd, paths), await $.clock.now())
+    await update($, cardExtra, () => (judged.extra.lines.length + judged.extra.files.length > 0 ? judged.extra : null))
+
+    return { result: cardAnswer(judged) }
+  })
 
   // Signals are written one at a time, so two sent together cannot both build on the same old record.
   let signalQueue: Promise<unknown> = Promise.resolve()
@@ -2220,11 +2345,12 @@ export const register: Register = on => {
     if (e.tool === 'AskUserQuestion') {
       const question = describeTool(e.tool, input) || '질문'
       await update($, waiting, () => question)
+      await update($, openQuestion, () => openQuestionOf(input, at))
       await alert($, `답을 기다리는 중 — ${question}`)
     }
 
     try {
-      const ran = await next(e)
+      const ran = await (e.tool === 'AskUserQuestion' ? askedOrCard($, input, next(e)) : next(e))
       if (isMain && !ran.deny && !ran.isError) {
         const started = jobStartOf(e.tool, input, { result: ran.result, text: ran.text }, at)
         if (started) await update($, jobs, board => applyJobEvent(board, { kind: 'start', job: started }))
@@ -2249,7 +2375,15 @@ export const register: Register = on => {
 
       return ran
     } finally {
-      if (e.tool === 'AskUserQuestion') await update($, waiting, () => null)
+      if (e.tool === 'AskUserQuestion') {
+        await update($, waiting, () => null)
+        // the question is closed, however it was answered: its card goes, with what was sent for it
+        await update($, openQuestion, () => null)
+        await update($, cardExtra, () => null)
+        await update($, cardNote, () => null)
+        await update($, cardBig, () => null)
+        cardGate.resolve = null
+      }
       // allowed and run, or refused: either way the prompt is gone
       await update($, permit, value => (value?.tool === e.tool ? null : value))
       if (isMain) await update($, live, value => (value.tool?.startedAt === at ? { ...value, tool: null } : value))
@@ -2949,6 +3083,99 @@ export const register: Register = on => {
         </Box>,
       )
 
+    // The small pictures of the card and of the two-jobs view: a tag, a sign, a dot. A surface that draws no
+    // pictures writes the tag's label and the dot's mark.
+    // The space over a state dot (8 px) that puts it in the middle of a text line (20 px), in a Box's vertical units.
+    // The dot's own Box names its alignment: the desktop app centres a picture that sits straight in a row Box with
+    // no alignItems, which put the dot between the lines of a name that wraps (seen in the real pane, 2026-11-28).
+    const DOT_PAD = 0.6
+    const tagEl = (label: string, tone: TagTone) => {
+      const picture = tagSvg(say(label), tone)
+
+      return Svg ? <Svg source={picture.source} alt={label} width={picture.width} height={picture.height} /> : <Text color={tone === 'away' ? STATE_COLOR.yourTurn : ACCENT}>{`[${label}]`}</Text>
+    }
+    const iconEl = (name: IconName, color: string, alt: string) => (Svg ? <Svg source={iconSvg(name, color)} alt={alt} width={16} height={16} /> : null)
+    const dotEl = (state: StageState) => (Svg ? <Svg source={dotSvg(state)} alt={STATE_LABEL[state]} width={8} height={8} /> : <Text color={STATE_COLOR[state]}>{STATE_MARK[state]}</Text>)
+
+    // The person's turn as a card: the question open now, with what Claude sent for it. A press or a typed text of
+    // this pane answers the question; a pane that mirrors another session's only shows it.
+    const turnCard = cardOf(await read($, openQuestion), await read($, cardExtra), { hasInput: Boolean(Input), isMirror: Boolean(mirrored) })
+    const cardFull = (path: string) => (path.startsWith('/') ? path : `${shot.cwd}/${path}`)
+    const cardPictures =
+      turnCard && Svg && !mirrored ? await Promise.all(turnCard.files.map(file => (isDrawable(file) ? evidencePicture($, cardFull(file.path), file.size) : Promise.resolve(null)))) : []
+    const cardSaid = await read($, cardNote)
+    const answerCard = (pressed: number | null, typed: string | null) => {
+      const answer = answerOf(turnCard, pressed, typed)
+      if (answer === null) return void update($, cardNote, () => (typed !== null ? '빈 글은 보내지 않습니다 — 답을 적어 주세요' : null))
+      cardGate.resolve?.(answer)
+    }
+    const turnCardEl = turnCard ? (
+      <Box key="turn-card" flexDirection="column" borderStyle="round" borderColor={STATE_COLOR.yourTurn} paddingX={1} marginBottom={1}>
+        <Box flexDirection="row" gap={1} alignItems="center">
+          {tagEl('내 차례', 'away')}
+          <Text bold>{cardTitle(turnCard)}</Text>
+        </Box>
+        {turnCard.lines.map(line => (
+          <Box flexDirection="row" gap={1}>
+            <Box width={10} flexShrink={0}>
+              <Text dimColor>{line.label}</Text>
+            </Box>
+            <Text>{line.text}</Text>
+          </Box>
+        ))}
+        {turnCard.questions.map(question => (
+          <Text>{question}</Text>
+        ))}
+        {turnCard.files.map((file, i) => (
+          <Box flexDirection="column">
+            <Text dimColor>{`증거: ${file.path}`}</Text>
+            {Svg && cardPictures[i] ? <Svg source={cardPictures[i] as string} alt={`증거 그림 ${file.path}`} width={320} height={200} /> : null}
+            {mirrored ? null : Svg && cardPictures[i] ? (
+              <Button key={`card-big-${i}`} label="⤢ 크게 보기" onPress={() => void update($, cardBig, () => i)} />
+            ) : (
+              <Button key={`card-open-${i}`} plain onPress={() => void openThing($, cardFull(file.path))}>
+                {`▸ ${file.path} 열기`}
+              </Button>
+            )}
+          </Box>
+        ))}
+        {turnCard.canPress ? (
+          <Box flexDirection="row" gap={1}>
+            {turnCard.options.map((label, i) => (
+              <Button key={`card-answer-${i}`} label={label} onPress={() => answerCard(i, null)} />
+            ))}
+          </Box>
+        ) : (
+          <Text dimColor>{mirrored ? '작업 세션의 대화창에서 답합니다' : '대화창에서 답하세요'}</Text>
+        )}
+        {turnCard.canType && Input ? (
+          <Input key="card-text" label="직접 쓰기" placeholder="보기에 없는 답" value="" submitLabel="보내기" onSubmit={(value: string) => answerCard(null, value)} />
+        ) : null}
+        {cardSaid ? <Text color="#f85149">{cardSaid}</Text> : null}
+      </Box>
+    ) : null
+    // A picture of the card a person pressed to see large, drawn in place of the whole pane until they close it.
+    const bigCardAt = turnCard && !mirrored ? await read($, cardBig) : null
+    const bigCardFile = bigCardAt !== null ? turnCard?.files[bigCardAt] : undefined
+    const bigCardPicture = Svg && bigCardFile && isDrawable(bigCardFile) ? await evidencePicture($, cardFull(bigCardFile.path), bigCardFile.size, BIG_WIDTH, BIG_HEIGHT) : null
+    if (Svg && bigCardFile && bigCardPicture) {
+      const closeBigCard = () => void update($, cardBig, () => null)
+
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row" justifyContent="space-between">
+            <Text bold>{`증거 크게 보기 — ${bigCardFile.path}`}</Text>
+            <Button key="card-big-close" label="✕ 닫기" onPress={closeBigCard} />
+          </Box>
+          <Svg source={bigCardPicture} alt={`증거 그림 크게 ${bigCardFile.path}`} />
+          <Box flexDirection="row" gap={1}>
+            <Button key="card-big-open" label="새 창으로 열기" onPress={() => void openThing($, cardFull(bigCardFile.path))} />
+            <Button key="card-big-back" label="돌아가기" onPress={closeBigCard} />
+          </Box>
+        </Box>
+      )
+    }
+
     // Always on top: context · usage, then ask mode and gears where this session's project is read. The word
     // dictionary is not among them: it sits right under the plan (under the two lines that say there is none).
     const hasProject = shot.settingsText !== undefined
@@ -2979,6 +3206,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           {mirrorLine}
+          {turnCardEl}
           <Text bold>SCV 대시보드</Text>
           {topCards(sections)}
           <Text dimColor>이 폴더에 진행 중인 SCV 계획이 없습니다. /scv:promote 로 계획을 만들면 여기에 보입니다.</Text>
@@ -2999,30 +3227,165 @@ export const register: Register = on => {
     const behind = backgroundSteps(reported, plan.slug)
     const stages = applyTurn(applyBlocks(derived.stages, blocks), turn, behind)
     const wordOf = (state: StageState, i: number) => (state === 'doing' ? doingWord(behind.includes(i + 1)) : STATE_LABEL[state])
+    // What the blocked-work card lists: the question shown as the card of the person's turn is not repeated there.
+    const shownBlocks = withoutAsked(blocks, turnCard !== null)
+    // The moving flow: whether the step pictures move now, and the step that has just finished (its light runs
+    // once). The pane's clock is a few seconds behind a signal that has just come, so the newest signal's own
+    // time counts as now too: the light starts the moment the step ends.
+    const isMotionOn = await read($, motion)
+    const isMoving = motionOf(isMotionOn, turn)
+    const flowAt = reported.reduce((latest, one) => (one.plan === plan.slug && one.at > latest ? one.at : latest), at)
+    const justDone = isMoving ? justDoneOf(reported, plan.slug, flowAt) : null
+    // Two jobs at once: the two columns under the step the plan was split at, and after the join its record.
+    const lanesNow = lanesOf(plans, plan.slug, one => (one.slug === plan.slug ? stages : deriveStages(mergeMarks(one, reported)).stages))
+    // When the job done alongside ended: the last step of it this session heard was done ('' when it heard none).
+    const partnerDoneAt = reported.reduce((latest, one) => (one.plan === plan.joinedWith && one.state === 'done' && one.at > latest ? one.at : latest), 0)
+    const joinNow = joinViewOf(plan, plans, stages, partnerDoneAt > 0 ? formatReset(new Date(partnerDoneAt).toISOString(), offsetAt(partnerDoneAt), false) : '')
+    const nowTop = nowCardOf(plan, plans, lanesNow, joinNow)
     // Steps worked on at the same time are all 'here'; the one opened by default is the step this session's work
     // goes to (the last it said it started), else the first of them.
     const isHere = (state: StageState | undefined) => state === 'doing' || state === 'blocked' || state === 'yourTurn'
     const lastStarted = [...(await read($, startedSteps))].reverse().find(one => one.plan === plan.slug && isHere(stages[one.step - 1]?.state))
     const here = lastStarted ? lastStarted.step - 1 : stages.findIndex(stage => isHere(stage.state))
-    const focused = (await read($, focusStep)) ?? (here >= 0 ? here : null)
-    const focusedStage = focused === null ? undefined : stages[focused]
-    const work = focused === null ? [] : ((await read($, stepLog))[`${plan.slug}#${focused}`] ?? [])
+    // The step in focus, whose detail is drawn under the flow: a step of the plan in view, or — while two jobs
+    // run — a step of the other job pressed in its column (subjectPlan: the plan that step belongs to).
+    const ownFocus = await read($, focusStep)
+    const otherFocus = await read($, focusLane)
+    const partnerPlan = lanesNow ? plans.find(one => one.slug !== plan.slug && lanesNow.lanes.some(lane => lane.slug === one.slug)) : undefined
+    const subject = focusSubject(ownFocus, otherFocus, plan.slug, here >= 0 ? here : null, partnerPlan?.slug ?? null)
+    const isOther = subject !== null && partnerPlan !== undefined && subject.plan === partnerPlan.slug
+    const subjectPlan = isOther && partnerPlan ? partnerPlan : plan
+    const subjectStages = isOther && partnerPlan ? deriveStages(mergeMarks(partnerPlan, reported)).stages : stages
+    const subjectLane = isOther ? lanesNow?.lanes.find(lane => lane.slug === subjectPlan.slug) : undefined
+    const focused = subject ? subject.step : null
+    const focusedStage = focused === null ? undefined : subjectStages[focused]
+    // The word for a step in progress follows the plan the step belongs to (its own background steps).
+    const subjectBehind = isOther ? backgroundSteps(reported, subjectPlan.slug) : behind
+    const subjectWord = (state: StageState, i: number) => (state === 'doing' ? doingWord(subjectBehind.includes(i + 1)) : STATE_LABEL[state])
+    const pressStep = (pressed: LaneFocus) => () => {
+      const next = pressFocus(ownFocus, otherFocus, plan.slug, pressed)
+      void update($, focusLane, () => next.other)
+      void update($, focusStep, () => next.own)
+    }
+    // Where the flow draws its line as pictures, what hangs under a step stands beside that line (blockRow), so it
+    // needs no indent of its own.
+    const hangPad = Svg ? 0 : 4
+    const lanesEl = lanesNow ? (
+      <Box key="lanes" flexDirection="column" paddingLeft={hangPad} gap="xs" {...(Svg ? { flexGrow: 1, flexShrink: 1, minWidth: 0 } : {})}>
+        <Box flexDirection="row" gap={1} alignItems="center">
+          {iconEl('branch', NOTE_COLOR, '갈라짐')}
+          <Text dimColor>{`갈라짐 ${lanesNow.when} · 확인 결과 저장함`}</Text>
+        </Box>
+        <Box key="lanes-row" flexDirection="row" gap={1}>
+          {lanesNow.lanes.map(lane => (
+            <Box key={`lane-${lane.slug}`} flexDirection="column" borderStyle="round" borderColor="#30363d" paddingX={1} width="50%" flexShrink={1} minWidth={0}>
+              {tagEl(lane.label, lane.tone)}
+              <Text bold>{lane.title}</Text>
+              {lane.stages.map((stage, k) => {
+                // A step of a column is pressed as a step of the flow is: its detail opens under the flow.
+                const at = lane.from - 1 + k
+                const isPicked = subject !== null && subject.plan === lane.slug && subject.step === at
+
+                // The dot stays on the name's line; a name too long for the column is cut short (its detail shows
+                // it whole), and a state that does not fit beside the name goes under it.
+                return (
+                  <Box flexDirection="row" backgroundColor={isPicked ? '#1f242c' : undefined}>
+                    <Box flexShrink={0} alignItems="flex-start" {...(Svg ? { paddingTop: DOT_PAD } : {})}>
+                      {dotEl(stage.state)}
+                    </Box>
+                    <Box flexDirection="row" flexWrap="wrap" flexShrink={1} alignItems="center" overflow="hidden">
+                      <Button key={`lane-step-${lane.slug}-${at + 1}`} plain onPress={pressStep({ plan: lane.slug, step: at })}>
+                        {stage.name}
+                      </Button>
+                      <Text color={STATE_COLOR[stage.state]}>{` · ${STATE_LABEL[stage.state]}`}</Text>
+                    </Box>
+                  </Box>
+                )
+              })}
+            </Box>
+          ))}
+        </Box>
+        <Box flexDirection="row" gap={1} alignItems="center">
+          {iconEl('merge', NOTE_COLOR, '합침')}
+          <Text dimColor>둘 다 끝나면 합치고 비교함</Text>
+        </Box>
+      </Box>
+    ) : null
+    const redoAt = joinNow?.redo ? joinNow.redo.step - 1 : -1
+    const joinEl = joinNow ? (
+      <Box key="join" flexDirection="column" paddingLeft={hangPad} gap="xs" {...(Svg ? { flexGrow: 1, flexShrink: 1, minWidth: 0 } : {})}>
+        <Box flexDirection="column">
+          <Box flexDirection="row" gap={1} alignItems="center">
+            {tagEl('함께 한 일', 'here')}
+            <Text>{joinNow.partner}</Text>
+          </Box>
+          <Text color={STATE_COLOR.done}>{joinNow.partnerEnd ? `끝 ${joinNow.partnerEnd}` : '끝'}</Text>
+        </Box>
+        <Box flexDirection="column">
+          <Box flexDirection="row" gap={1} alignItems="center">
+            {iconEl('merge', ACCENT, '합침')}
+            <Text>{`합침 ${joinNow.when} · 비교함`}</Text>
+          </Box>
+          <Text dimColor>같은 줄 충돌 없음</Text>
+          {joinNow.changed.length > 0 ? <Text color={STATE_COLOR.doing}>{`달라진 결과 ${joinNow.changed.length}개: ${joinNow.changed.join(' · ')}`}</Text> : <Text dimColor>달라진 결과 없음</Text>}
+        </Box>
+        {joinNow.redo ? (
+          <Box key="join-redo" flexDirection="column">
+            <Box flexDirection="row" gap={1} alignItems="center">
+              {iconEl('arrow', ACCENT, '다시 하기')}
+              <Button key={`step-${joinNow.redo.step}`} plain onPress={pressStep({ plan: plan.slug, step: redoAt })}>
+                {joinNow.redo.name}
+              </Button>
+            </Box>
+            <Text color={joinNow.redo.state === 'doing' ? ACCENT : STATE_COLOR[joinNow.redo.state]}>{wordOf(joinNow.redo.state, redoAt)}</Text>
+          </Box>
+        ) : null}
+      </Box>
+    ) : null
+    // What is being done now, as a card over the step flow: both jobs with their tags, or the redo after a join.
+    const nowTopEl = nowTop ? (
+      <Box key="now-card" flexDirection="column" borderStyle="round" borderColor="#30363d" paddingX={1} marginBottom={1}>
+        <Box flexDirection="row" gap={1}>
+          <Box width={9} flexShrink={0}>
+            <Text dimColor>지금</Text>
+          </Box>
+          <Text>{nowTop.now}</Text>
+        </Box>
+        {nowTop.jobs.map(job => (
+          <Box flexDirection="row" gap={1} alignItems="center" paddingLeft={10}>
+            {tagEl(job.label, job.tone)}
+            <Text>{job.title}</Text>
+          </Box>
+        ))}
+        <Box flexDirection="row" gap={1}>
+          <Box width={9} flexShrink={0}>
+            <Text dimColor>돌아갈 곳</Text>
+          </Box>
+          <Text dimColor={nowTop.back === '없음'}>{nowTop.back}</Text>
+        </Box>
+      </Box>
+    ) : null
+    const toggleMotion = async () => {
+      const value = await update($, motion, one => !one)
+      await $.store.set(MOTION_KEY, value).catch(() => undefined)
+    }
+    const work = focused === null ? [] : ((await read($, stepLog))[`${subjectPlan.slug}#${focused}`] ?? [])
     const catalog = shot.catalog ?? {}
     const functionLog = await read($, stepFunctions)
     // Each step's functions: what it builds, what it made and used. Only the step in focus shows them, in its
     // detail under the flow — finished or not. A line of the flow is the step's sentence and its state, nothing more.
-    const viewOf = (i: number) => stepFunctionView(i, stages, plan.slug, plan.pipeline, catalog, functionLog)
+    const viewOf = (i: number) => stepFunctionView(i, subjectStages, subjectPlan.slug, subjectPlan.pipeline, catalog, functionLog)
     const focusedView = focused === null ? null : viewOf(focused)
     const did = focusedView?.did
     const builds = focusedView?.builds ?? []
     const callsOpen = await read($, showCalls)
-    const focusedSignal = focused === null ? undefined : lastSignalOf(await read($, signals), plan.slug, focused + 1)
+    const focusedSignal = focused === null ? undefined : lastSignalOf(await read($, signals), subjectPlan.slug, focused + 1)
     const fullOf = (path: string) => (path.startsWith('/') ? path : `${shot.cwd}/${path}`)
     // A finished step's proof: only what a person can look at. A picture is drawn; a video or a page gets a button.
     const proof = focusedStage?.state === 'done' ? proofView(focusedSignal?.evidence, focusedStage.refs) : null
     const pictures = proof ? await Promise.all(proof.files.map(file => (file.kind === 'image' ? evidencePicture($, fullOf(file.path), file.size) : Promise.resolve(null)))) : []
     // The picture a person pressed to see large, drawn in place of the whole pane until they close it.
-    const bigAt = proof ? bigIndexOf(await read($, bigProof), plan.slug, focused, proof.files) : null
+    const bigAt = proof ? bigIndexOf(await read($, bigProof), subjectPlan.slug, focused, proof.files) : null
     const bigFile = proof && bigAt !== null ? proof.files[bigAt] : undefined
     const bigPicture = bigFile ? await evidencePicture($, fullOf(bigFile.path), bigFile.size, BIG_WIDTH, BIG_HEIGHT) : null
     const liveSource = focusedStage && isHere(focusedStage.state) && focusedSignal?.state !== 'done' ? focusedSignal?.source : undefined
@@ -3086,7 +3449,7 @@ export const register: Register = on => {
     if (Svg && proof && bigFile && bigPicture && bigAt !== null && focusedStage && focused !== null) {
       const shown = proof.files.filter(isDrawable)
       const closeBig = () => void update($, bigProof, () => null)
-      const turn = (delta: 1 | -1) => () => void update($, bigProof, () => ({ plan: plan.slug, step: focused, index: turnPicture(bigAt, proof.files, delta) }))
+      const turn = (delta: 1 | -1) => () => void update($, bigProof, () => ({ plan: subjectPlan.slug, step: focused, index: turnPicture(bigAt, proof.files, delta) }))
 
       return (
         <Box flexDirection="column">
@@ -3106,11 +3469,55 @@ export const register: Register = on => {
       )
     }
 
-    const sections = sectionsOf(true, blocks.length > 0)
+    const sections = sectionsOf(true, shownBlocks.length > 0)
+    const order = paneOrder(sections, turnCard !== null, nowTop !== null)
+    const nowText = nowWords(
+      turn,
+      nowLine({ tasks: todo, step: current && here >= 0 ? { number: here + 1, name: current.name } : null, tool: state.tool, jobs: board.jobs, extra: board.extra, isWorking: state.isWorking, turnStartedAt: state.turnStartedAt }),
+    )
+    // What is being done now: a card over the step flow while two jobs run or a redo is open, else one line under the steps.
+    const isNowFirst = order.indexOf('now') < order.indexOf('steps')
+    const nowEl = !order.includes('now') ? null : isNowFirst ? nowTopEl : <Text key="now-line">{nowText}</Text>
+    // The steps the flow draws as rows of their own: a join's redo is drawn inside that join's record instead.
+    // What each row shows: the step two jobs were split at says so while both run; the step a join's record hangs
+    // under reads as being checked again while that join's redo is open.
+    const flowRows = stages
+      .map((stage, i) => ({ stage, i }))
+      .filter(({ i }) => i !== redoAt)
+      .map(({ stage, i }) => {
+        const isSplitHere = lanesNow !== null && lanesNow.under === i + 1 && stage.state === 'doing'
+        const isRecheck = joinNow !== null && joinNow.under === i + 1 && isRedoOpen(joinNow) && stage.state === 'done'
+        const shown: StageState = isRecheck ? 'doing' : stage.state
+
+        return { stage, i, isSplitHere, isRecheck, shown }
+      })
+    // The flow's line outside the step pictures. railFill: the piece that takes whatever height is left (a row
+    // taller than its picture, what hangs under a step), in the colour of the line that leaves that step.
+    // hangRow: what hangs under a step, beside the line that runs on to the next step (after: the step the line
+    // leaves; null when no step follows, so there is no line and only the room for one).
+    const railWidth = stepPictureOf(isMotionOn, false, 'waiting', null, false).width
+    const railFill = (after: StageState) => <Box flexGrow={1} width={RAIL_CELLS} backgroundColor={lineColorOf(after)} />
+    const hangRow = (hung: RenderChildren, after: StageState | null) =>
+      Svg ? (
+        <Box flexDirection="row" gap={1}>
+          {after === null ? (
+            <Box width={cellsOf(railWidth)} flexShrink={0} />
+          ) : (
+            <Box flexDirection="column" alignItems="center" flexShrink={0}>
+              <Svg source={railPieceSvg(railWidth, lineColorOf(after))} alt="다음 단계로 이어지는 선" width={railWidth} height={RAIL_PIECE_HEIGHT} />
+              {railFill(after)}
+            </Box>
+          )}
+          {hung}
+        </Box>
+      ) : (
+        hung
+      )
 
     return (
       <Box flexDirection="column">
         {mirrorLine}
+        {order[0] === 'card' ? turnCardEl : null}
         {topCards(sections)}
         {plans.length > 1 && Select ? (
           <Select
@@ -3124,14 +3531,14 @@ export const register: Register = on => {
         {plan.isArchived ? <Text dimColor>진행 중인 계획이 없어 최근 끝난 계획을 보여 줍니다.</Text> : null}
         {plans.length > 1 && Select ? null : <Text bold>{plan.title}</Text>}
         <Text dimColor>{`상태: ${statusWords(plan.status, stages, plan.pausedBy ? titleOf(plans, plan.pausedBy) : '')}`}</Text>
-        {blocks.length > 0
+        {shownBlocks.length > 0
           ? card(
               <>
                 <Box flexDirection="row" justifyContent="space-between">
-                  <Text bold color="#f85149">{`막힌 작업 ${blocks.length}`}</Text>
+                  <Text bold color="#f85149">{`막힌 작업 ${shownBlocks.length}`}</Text>
                   <Button key="blocks-toggle" label={open.blocks ? '접기' : '펼치기'} onPress={toggle('blocks')} />
                 </Box>
-                {blocks.map(block => (
+                {shownBlocks.map(block => (
                   <>
                     <Text color="#f85149">{block.title}</Text>
                     {open.blocks && <Text dimColor>{block.detail}</Text>}
@@ -3142,39 +3549,67 @@ export const register: Register = on => {
             )
           : null}
 
+        {isNowFirst ? nowEl : null}
         {card(
           <>
             <Box flexDirection="row" justifyContent="space-between">
               <Text bold>단계 흐름{isEstimated ? ' (추정)' : ''}</Text>
+              {Svg ? <Button key="motion-toggle" label={isMotionOn ? '움직임 끄기' : '움직임 켜기'} onPress={() => void toggleMotion().catch(() => undefined)} /> : null}
             </Box>
             <Box flexDirection="column">
-              {stages.map((stage, i) => (
-                <Box flexDirection="row" gap={1} backgroundColor={i === focused ? '#1f242c' : undefined}>
-                  {Svg ? (
-                    <Svg
-                      source={nodeIconSvg(stage.state, stages[i + 1]?.state ?? null)}
-                      alt={`${i + 1}단계 ${wordOf(stage.state, i)}`}
-                      width={22}
-                      height={44}
-                    />
-                  ) : (
-                    <Text color={STATE_COLOR[stage.state]}>{STATE_MARK[stage.state]}</Text>
-                  )}
-                  <Box flexDirection="column" flexShrink={1}>
-                    <Button key={`step-${i + 1}`} plain onPress={() => void update($, focusStep, value => (value === i ? null : i))}>
-                      {`${i + 1}. ${stage.name}`}
-                    </Button>
-                    <Text color={STATE_COLOR[stage.state]}>
-                      {isHere(stage.state) ? `${wordOf(stage.state, i)}  ◀ 지금 여기` : wordOf(stage.state, i)}
-                    </Text>
+              {lanesNow && lanesEl && lanesNow.under === 0 ? hangRow(lanesEl, null) : null}
+              {joinNow && joinEl && joinNow.under === 0 ? hangRow(joinEl, null) : null}
+              {flowRows.flatMap(({ stage, i, isSplitHere, isRecheck, shown }, at) => {
+                // The line runs from each node to the next without a break: a step's picture draws the piece from
+                // the step before and the piece below its node, and under the picture the line takes whatever
+                // height the row has left. The title's line is level with the node.
+                const after = flowRows[at + 1] ? shown : null
+                const picture = stepPictureOf(isMotionOn, isMoving, shown, flowRows[at + 1]?.stage.state ?? null, justDone === i + 1, flowRows[at - 1]?.shown ?? null)
+                const row = (
+                  <Box flexDirection="row" gap={1} backgroundColor={!isOther && i === focused ? '#1f242c' : undefined}>
+                    {Svg ? (
+                      <Box flexDirection="column" alignItems="center" flexShrink={0}>
+                        <Svg
+                          source={picture.source}
+                          alt={`${i + 1}단계 ${wordOf(shown, i)}`}
+                          width={picture.width}
+                          height={44}
+                          {...(picture.isInteractive ? { isInteractive: true } : {})}
+                        />
+                        {after === null ? null : railFill(after)}
+                      </Box>
+                    ) : (
+                      <Text color={STATE_COLOR[shown]}>{STATE_MARK[shown]}</Text>
+                    )}
+                    <Box flexDirection="column" flexShrink={1} {...(Svg && titlePadOf(isMotionOn) > 0 ? { paddingTop: titlePadOf(isMotionOn) } : {})}>
+                      <Button key={`step-${i + 1}`} plain onPress={pressStep({ plan: plan.slug, step: i })}>
+                        {`${i + 1}. ${stage.name}`}
+                      </Button>
+                      <Text color={STATE_COLOR[shown]}>
+                        {isSplitHere ? '두 일이 동시에 도는 중' : isRecheck ? '다시 확인 중' : isHere(stage.state) ? `${wordOf(stage.state, i)}  ◀ 지금 여기` : wordOf(stage.state, i)}
+                      </Text>
+                    </Box>
                   </Box>
-                </Box>
-              ))}
+                )
+
+                return [
+                  row,
+                  ...(lanesNow && lanesEl && lanesNow.under === i + 1 ? [hangRow(lanesEl, after)] : []),
+                  ...(joinNow && joinEl && joinNow.under === i + 1 ? [hangRow(joinEl, after)] : []),
+                ]
+              })}
             </Box>
+            {isNowFirst ? null : nowEl}
             <Text dimColor>{`완료 ${count.done} · 진행 ${count.doing} · 막힘 ${count.blocked} · 대기 ${count.waiting} — 단계를 누르면 자세히`}</Text>
             {focusedStage && focused !== null ? (
-              <Box flexDirection="column" borderStyle="round" borderColor={STATE_COLOR[focusedStage.state]} paddingX={1} marginTop={1}>
-                <Text bold color={STATE_COLOR[focusedStage.state]}>{`${focused + 1}. ${focusedStage.name} — ${wordOf(focusedStage.state, focused)}`}</Text>
+              <Box key="step-detail" flexDirection="column" borderStyle="round" borderColor={STATE_COLOR[focusedStage.state]} paddingX={1} marginTop={1}>
+                {subjectLane ? (
+                  <Box flexDirection="row" gap={1} alignItems="center">
+                    {tagEl(subjectLane.label, subjectLane.tone)}
+                    <Text>{subjectPlan.title}</Text>
+                  </Box>
+                ) : null}
+                <Text bold color={STATE_COLOR[focusedStage.state]}>{`${focused + 1}. ${focusedStage.name} — ${subjectWord(focusedStage.state, focused)}`}</Text>
                 <Text bold>하는 일</Text>
                 {builds.length > 0 ? (
                   buildsPart(builds)
@@ -3193,7 +3628,7 @@ export const register: Register = on => {
                       <Box flexDirection="column">
                         {Svg && pictures[i] ? <Svg source={pictures[i] as string} alt={`증거 그림 ${file.path}`} width={320} height={200} /> : null}
                         {Svg && pictures[i] && focused !== null ? (
-                          <Button key={`evidence-big-${i}`} label="⤢ 크게 보기" onPress={() => void update($, bigProof, () => ({ plan: plan.slug, step: focused, index: i }))} />
+                          <Button key={`evidence-big-${i}`} label="⤢ 크게 보기" onPress={() => void update($, bigProof, () => ({ plan: subjectPlan.slug, step: focused, index: i }))} />
                         ) : null}
                         <Button key={`evidence-${i}`} plain onPress={() => void openThing($, fullOf(file.path))}>
                           {`▸ ${file.path} 열기`}

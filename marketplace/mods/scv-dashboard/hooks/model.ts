@@ -5,6 +5,9 @@ import type {
   AgentState,
   BigProof,
   Block,
+  CardExtra,
+  CardLine,
+  OpenQuestion,
   Catalog,
   DoneEntry,
   Evidence,
@@ -126,7 +129,7 @@ const withProgress = (steps: StepMark[], planText: string): StepMark[] => {
   return steps.map((step, i) => (step.mark || !marks.has(i + 1) ? step : { ...step, mark: marks.get(i + 1), isReported: true }))
 }
 
-export const parsePlan = (file: PlanFile): Plan => ({
+export const parsePlan = (file: PlanFile): Plan => withRedo({
   slug: file.slug,
   title: frontmatter(file.planText, 'title') ?? file.slug,
   status: file.isArchived ? 'archived' : (frontmatter(file.planText, 'status') ?? 'planned'),
@@ -145,8 +148,26 @@ export const parsePlan = (file: PlanFile): Plan => ({
   pausedBy: frontmatter(file.planText, 'paused_by') ?? '',
   resumeAt: frontmatter(file.planText, 'resume_at') ?? '',
   returnTo: frontmatter(file.planText, 'return_to') ?? '',
+  splitWith: frontmatter(file.planText, 'split_with') ?? '',
+  splitOn: frontmatter(file.planText, 'split_on') ?? '',
+  splitAt: frontmatter(file.planText, 'split_at') ?? '',
+  splitDir: frontmatter(file.planText, 'split_dir') ?? '',
+  joinedWith: frontmatter(file.planText, 'joined_with') ?? '',
+  joinedOn: frontmatter(file.planText, 'joined_on') ?? '',
+  joinedAt: frontmatter(file.planText, 'joined_at') ?? '',
+  joinedChanged: frontmatter(file.planText, 'joined_changed') ?? '',
+  joinedRedo: frontmatter(file.planText, 'joined_redo') ?? '',
   history: historyOf(file.planText),
 })
+
+// A joined plan's redo step: the one its record names, else the first step past the split whose name says so.
+const withRedo = (plan: Plan): Plan => {
+  if (plan.joinedRedo || !plan.joinedWith) return plan
+  const under = Number(plan.joinedAt) || 0
+  const at = plan.steps.findIndex((step, i) => i >= under && step.name.startsWith(JOIN_REDO))
+
+  return at < 0 ? plan : { ...plan, joinedRedo: String(at + 1) }
+}
 
 // A plan's title from its folder name; the folder name itself when that plan is not in the list.
 export const titleOf = (plans: readonly Plan[], slug: string) => plans.find(plan => plan.slug === slug)?.title ?? slug
@@ -194,7 +215,9 @@ export const deriveStages = (plan: Plan): { stages: Stage[]; isEstimated: boolea
   // A step reported as started or blocked (a step signal, a progress line) is so wherever it stands: steps worked on
   // at the same time are all in progress. With no such report, work stands at one place — the first step not done —
   // and only that step may be doing or blocked: a mark left by hand on a later step says nothing, it is still waiting.
-  const current = plan.steps.findIndex(step => step.mark !== 'done')
+  // After a join that added a step to do changed results again, work stands at that step until it is done.
+  const redoAt = (Number(plan.joinedRedo) || 0) - 1
+  const current = redoAt >= 0 && plan.steps[redoAt] && plan.steps[redoAt]?.mark !== 'done' ? redoAt : plan.steps.findIndex(step => step.mark !== 'done')
   const isReportedOpen = (step: StepMark) => step.isReported === true && (step.mark === 'doing' || step.mark === 'blocked')
   const hasReportedOpen = plan.steps.some(isReportedOpen)
   const stages: Stage[] = plan.steps.map((step, i) => {
@@ -942,6 +965,337 @@ export const buildStepPrompt = (plans: readonly Plan[], tool = STEP_TOOL): strin
   ].join(' ')
 }
 
+// ── two jobs at once ──
+
+// The clock part of a time written as 'date time' ('2026-11-09 11:09' → '11:09'); the text itself when it has none.
+const clockPart = (when: string) => when.trim().split(' ').pop() ?? ''
+
+// A tag's tone: the job that went to a separate folder (the person's own turn wears it too), or the job that stayed
+// in the original folder (and the job done alongside).
+export type TagTone = 'away' | 'here'
+
+// One of the two jobs that run at once, as a column: where it is worked on, its plan, and its steps from `from` on.
+export type Lane = { label: string; tone: TagTone; slug: string; title: string; from: number; stages: Stage[] }
+// under: the step of the plan in view the two columns hang under (0: above its first step).
+export type Lanes = { under: number; when: string; lanes: Lane[] }
+
+// The two jobs that run at once, for the plan in view: the plan whose work went to a separate folder shows its steps
+// from the one it was split at, the plan that stayed in the original folder shows all of its own. Seen from the plan
+// that was split, the columns hang under that step; seen from the other, above its first step.
+// null: the plan is not split, its partner is not among the plans, or neither names a separate folder.
+export const lanesOf = (plans: readonly Plan[], slug: string, stagesOf: (plan: Plan) => readonly Stage[]): Lanes | null => {
+  const plan = plans.find(one => one.slug === slug)
+  const other = plan?.splitWith ? plans.find(one => one.slug === plan.splitWith) : undefined
+  if (!plan || !other) return null
+  const away = plan.splitDir ? plan : other.splitDir ? other : null
+  if (!away) return null
+  const here = away === plan ? other : plan
+  const at = Math.max(1, Number(away.splitAt) || 1)
+  const lane = (one: Plan, label: string, tone: TagTone, from: number): Lane => ({ label, tone, slug: one.slug, title: one.title, from, stages: stagesOf(one).slice(from - 1) })
+
+  // The tags name where each job is worked on: 분기 (the separate folder, on its own branch) and 원본 (the original
+  // folder). 2026-11-28: they read '따로 만든 폴더' · '원래 폴더' — the person found those awkward as names.
+  return { under: plan === away ? at : 0, when: clockPart(plan.splitOn ?? ''), lanes: [lane(away, '분기', 'away', at), lane(here, '원본', 'here', 1)] }
+}
+
+// ── a step pressed in one of the two columns ──
+
+// A step of one of the two jobs: its plan, and the step's place in that plan (0 = the first step).
+export type LaneFocus = { plan: string; step: number }
+
+// What is in focus after a step is pressed (own: the step of the plan in view, null = the step work stands at;
+// other: a step of the other job, pressed in its column). A step of the plan in view toggles as a row of the flow
+// does and lets go of the other job's step; a step of the other job toggles that step and leaves own as it was.
+export const pressFocus = (own: number | null, other: LaneFocus | null, viewSlug: string, pressed: LaneFocus): { own: number | null; other: LaneFocus | null } =>
+  pressed.plan === viewSlug
+    ? { own: own === pressed.step ? null : pressed.step, other: null }
+    : { own, other: other !== null && other.plan === pressed.plan && other.step === pressed.step ? null : pressed }
+
+// Whose step the detail under the flow shows: the other job's step when one is in focus and that job still runs
+// beside the plan in view (partner: its plan, null when no job does), else the plan's own step in focus — the
+// step work stands at (here) when none was pressed. null: nothing to show.
+export const focusSubject = (own: number | null, other: LaneFocus | null, viewSlug: string, here: number | null, partner: string | null): LaneFocus | null => {
+  if (other !== null && partner !== null && other.plan === partner) return other
+  const step = own ?? here
+
+  return step === null ? null : { plan: viewSlug, step }
+}
+
+// The step a join added to do the changed results again: its number, its name without the leading words, its state.
+export type Redo = { step: number; name: string; state: StageState }
+// under: the step of the plan in view the record hangs under (0: above its first step). partnerEnd: the clock time
+// the job done alongside ended ('' when not known). changed: the results that differ from the ones kept at the split.
+export type JoinView = { under: number; partner: string; partnerEnd: string; when: string; changed: string[]; redo: Redo | null }
+
+const REDO_WORDS = '다시 하기: '
+const JOIN_REDO = '다시 하기: 달라진 결과'
+
+// What a plan's record of a join says, for the flow to show under the step the two were split at: the job done
+// alongside, when the two were joined, the results that changed, and the step added to do them again — the one the
+// record names, else the first step past the split whose name says so. null: the plan was not joined.
+export const joinViewOf = (plan: Plan, plans: readonly Plan[], stages: readonly Stage[] = [], partnerEnd = ''): JoinView | null => {
+  if (!plan.joinedWith) return null
+  const under = Number(plan.joinedAt) || 0
+  const changed = (plan.joinedChanged ?? '')
+    .split(' · ')
+    .map(one => one.trim())
+    .filter(Boolean)
+  const named = Number(plan.joinedRedo) || 0
+  const at = named > 0 ? named - 1 : stages.findIndex((stage, i) => i >= under && stage.name.startsWith(JOIN_REDO))
+  const stage = stages[at]
+  const redo: Redo | null = stage ? { step: at + 1, name: stage.name.startsWith(REDO_WORDS) ? stage.name.slice(REDO_WORDS.length) : stage.name, state: stage.state } : null
+
+  return { under, partner: titleOf(plans, plan.joinedWith), partnerEnd, when: clockPart(plan.joinedOn ?? ''), changed, redo }
+}
+
+// Whether a join's redo is still to be done: the step its record hangs under then reads as being checked again.
+export const isRedoOpen = (join: JoinView | null): boolean => Boolean(join?.redo && join.redo.state !== 'done')
+
+// The card over the step flow while two jobs run at once, or while a join's redo is open: what is being done now —
+// both jobs, each with its tag, or the redo — and the plan the work goes back to. null: neither is the case.
+export type NowCard = { now: string; jobs: { label: string; tone: TagTone; title: string }[]; back: string }
+
+export const nowCardOf = (plan: Plan, plans: readonly Plan[], lanes: Lanes | null, join: JoinView | null): NowCard | null => {
+  const back = plan.returnTo ? titleOf(plans, plan.returnTo) : '없음'
+  if (lanes) return { now: '두 일을 동시에', jobs: lanes.lanes.map(lane => ({ label: lane.label, tone: lane.tone, title: lane.title })), back }
+  if (join?.redo && isRedoOpen(join)) return { now: join.redo.name, jobs: [], back }
+
+  return null
+}
+
+export type PanePart = PaneSection | 'card' | 'now'
+
+// The order the pane's parts are drawn in. The card of the person's turn comes first of all while a question is
+// open. What is being done now comes right under the step flow, as one line — above it, as a card of its own, while
+// two jobs run at once or a join's redo is open.
+export const paneOrder = (sections: readonly PaneSection[], hasCard: boolean, isNowOnTop: boolean): PanePart[] => {
+  const parts = sections.flatMap((section): PanePart[] => (section === 'steps' ? (isNowOnTop ? ['now', 'steps'] : ['steps', 'now']) : [section]))
+
+  return hasCard ? ['card', ...parts] : parts
+}
+
+// The one line that says what is being done now: on the person's turn, that nothing moves; else what Claude is doing.
+export const nowWords = (turn: TurnState, now: { text: string }): string =>
+  turn === 'yourTurn' ? '지금: 기다리는 중 — 아무것도 움직이지 않음' : `지금: ${now.text}`
+
+// ── the small pictures of the two-jobs view and the card: tags, signs, dots ──
+
+const isWideLetter = (letter: string) => {
+  const code = letter.codePointAt(0) ?? 0
+
+  return (code >= 0x1100 && code <= 0x11ff) || (code >= 0x2e80 && code <= 0xa4cf) || (code >= 0xac00 && code <= 0xd7a3) || (code >= 0xf900 && code <= 0xfaff) || (code >= 0xff00 && code <= 0xffef)
+}
+
+// About how wide a text is drawn at a font size, in pixels: a wide letter (Hangul, kana, a CJK ideograph, a
+// full-width form) takes one em, a space a third of one, any other letter a little over half.
+export const textWidth = (text: string, size: number): number =>
+  Math.ceil([...text].reduce((sum, letter) => sum + (letter === ' ' ? 0.32 : isWideLetter(letter) ? 1 : 0.58), 0) * size)
+
+export type Picture = { source: string; width: number; height: number }
+
+const TAG_COLOR: Record<TagTone, { fill: string; text: string }> = { away: { fill: '#3c3489', text: '#cecbf6' }, here: { fill: '#0c447c', text: '#b5d4f4' } }
+const TAG_FONT = 11
+const TAG_HEIGHT = 18
+const PICTURE_FONT = "-apple-system, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif"
+const xmlText = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+
+// A tag: a short label on a rounded ground of its tone's colour, as wide as the label needs.
+export const tagSvg = (label: string, tone: TagTone): Picture => {
+  const width = textWidth(label, TAG_FONT) + 16
+  const color = TAG_COLOR[tone]
+
+  return {
+    width,
+    height: TAG_HEIGHT,
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${TAG_HEIGHT}" viewBox="0 0 ${width} ${TAG_HEIGHT}"><rect width="${width}" height="${TAG_HEIGHT}" rx="8" fill="${color.fill}"/><text x="${width / 2}" y="13" text-anchor="middle" font-family="${PICTURE_FONT}" font-size="${TAG_FONT}" fill="${color.text}">${xmlText(label)}</text></svg>`,
+  }
+}
+
+export type IconName = 'branch' | 'merge' | 'arrow'
+
+const ICON_SHAPES: Record<IconName, string> = {
+  branch: '<circle cx="7" cy="6" r="2.2"/><circle cx="7" cy="18" r="2.2"/><circle cx="17" cy="7" r="2.2"/><path d="M7 8.2v7.6"/><path d="M17 9.2c0 3.6-3.6 4.4-10 4.8"/>',
+  merge: '<circle cx="7" cy="6" r="2.2"/><circle cx="7" cy="18" r="2.2"/><circle cx="17" cy="12" r="2.2"/><path d="M7 8.2v7.6"/><path d="M7.5 8.1c1 2.6 3.4 3.9 7.3 3.9"/>',
+  arrow: '<path d="M5 12h14"/><path d="M13 6l6 6-6 6"/>',
+}
+
+// A small sign in one colour: two lines parting (a split), two lines meeting (a join), an arrow (what comes next).
+export const iconSvg = (name: IconName, color: string, size = 16): string =>
+  `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_SHAPES[name]}</svg>`
+
+// A step's state as a small dot: a ring for a step that waits, a filled dot of the state's colour for any other.
+export const dotSvg = (state: StageState, size = 8): string => {
+  const half = size / 2
+  const shape = state === 'waiting' ? `<circle cx="${half}" cy="${half}" r="${half - 1}" fill="none" stroke="${NODE_COLOR.waiting}" stroke-width="1.5"/>` : `<circle cx="${half}" cy="${half}" r="${half}" fill="${NODE_COLOR[state]}"/>`
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${shape}</svg>`
+}
+
+// ── the person's turn as a card ──
+
+// This mod's own tool that carries what the card shows beside a question.
+export const CARD_TOOL = 'mcp__scv-dashboard__scv_card'
+
+// The card of the person's turn. options: the one question's options as buttons (empty when the pane cannot answer
+// it); canPress: a button of the pane answers it; canType: a text typed in the pane does too.
+export type TurnCard = { questions: string[]; options: string[]; canPress: boolean; canType: boolean; lines: CardLine[]; files: EvidenceFile[] }
+
+// The question tool's input as the pane keeps it while the question is open. null: no question in it to show.
+export const openQuestionOf = (input: Record<string, unknown>, at: number): OpenQuestion | null => {
+  const questions = (Array.isArray(input.questions) ? input.questions : []).flatMap(one => {
+    if (!one || typeof one !== 'object') return []
+    const item = one as Record<string, unknown>
+    if (typeof item.question !== 'string' || item.question.trim() === '') return []
+    const options = (Array.isArray(item.options) ? item.options : []).flatMap(option => {
+      const label = option && typeof option === 'object' ? (option as { label?: unknown }).label : undefined
+
+      return typeof label === 'string' && label !== '' ? [label] : []
+    })
+
+    return [{ question: item.question, options, isMulti: item.multiSelect === true }]
+  })
+
+  return questions.length > 0 ? { questions, at } : null
+}
+
+// The card for the open question, with what Claude sent for it. A pane answers only one question that takes one
+// option; several questions in one call, a question that takes several options, and a pane that mirrors another
+// session's show the question and leave the answer to the conversation. null: no question is open.
+export const cardOf = (open: OpenQuestion | null, extra: CardExtra | null, surface: { hasInput: boolean; isMirror: boolean }): TurnCard | null => {
+  if (!open) return null
+  const only = open.questions.length === 1 ? open.questions[0] : undefined
+  const canPress = only !== undefined && !only.isMulti && only.options.length > 0 && !surface.isMirror
+
+  return {
+    questions: open.questions.map(one => one.question),
+    options: canPress && only ? only.options : [],
+    canPress,
+    canType: canPress && surface.hasInput,
+    lines: extra?.lines ?? [],
+    files: extra?.files ?? [],
+  }
+}
+
+// The answer a press or a typed text gives the card's question: the pressed option's label to the letter, or the
+// typed text (trimmed). null: nothing to send — no card the pane answers, no such option, an empty text, or a pane
+// with no field to type in.
+export const answerOf = (card: TurnCard | null, pressed: number | null, typed: string | null): string | null => {
+  if (!card || !card.canPress) return null
+  if (pressed !== null) return card.options[pressed] ?? null
+  const text = (typed ?? '').trim()
+
+  return card.canType && text !== '' ? text : null
+}
+
+// The labels of the three lines a question that confirms requirements carries, in the order they are shown.
+export const CARD_LINE_LABELS = { goal: '목표', notDoing: '안 하는 것', check: '확인 방법' } as const
+const CARD_LINE_ROOM = 200
+
+export type CardCheck = { extra: CardExtra; refused: string[] }
+
+// What the card tool sent, as the card will show it: the lines that were given (trimmed, shortened), and the files
+// a person can look at that are found inside the project. Any other file is left out and named in refused with
+// why — the same rule a step's proof stands under.
+export const judgeCard = (sent: { goal?: unknown; notDoing?: unknown; check?: unknown; paths: readonly string[] }, facts: readonly FileFact[], at: number): CardCheck => {
+  const lines = (['goal', 'notDoing', 'check'] as const).flatMap(key => {
+    const value = sent[key]
+    const text = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+
+    return text ? [{ label: CARD_LINE_LABELS[key], text: shorten(text, CARD_LINE_ROOM) }] : []
+  })
+  const files: EvidenceFile[] = []
+  const refused: string[] = []
+  for (const path of sent.paths) {
+    const kind = evidenceKind(path)
+    const fact = facts.find(one => one.path === path)
+    if (kind === null) refused.push(`${path} — 눈으로 볼 수 있는 파일이 아님(소스코드 · 글 파일)`)
+    else if (!fact || !fact.isFound) refused.push(`${path} — 파일이 없음`)
+    else if (!fact.isInside) refused.push(`${path} — 프로젝트 밖 파일`)
+    else files.push({ path, size: fact.size, kind })
+  }
+
+  return { extra: { lines, files, at }, refused }
+}
+
+// What the card tool answers: what the next question's card will show, and each file it did not take, with why.
+export const cardAnswer = (judged: CardCheck): string => {
+  const took = judged.extra.lines.length + judged.extra.files.length
+  const left = judged.refused.length > 0 ? ` 받지 않은 파일: ${judged.refused.join(' / ')}` : ''
+  if (took === 0) return `받은 것이 없습니다 — 다음 질문의 카드에는 질문과 보기만 보입니다.${left}`
+
+  return `받음: 세 줄 ${judged.extra.lines.length}개 · 증거 ${judged.extra.files.length}개 — 다음 질문의 카드에 보입니다.${left}`
+}
+
+// A question and what was sent for its card as another session's state carries them, read back with care: a shape
+// that is not one is dropped (null), and a file that is not something to look at is left out.
+export const questionFromWire = (value: unknown): OpenQuestion | null => {
+  if (!value || typeof value !== 'object') return null
+  const sent = value as { questions?: unknown; at?: unknown }
+  const questions = (Array.isArray(sent.questions) ? sent.questions : []).flatMap(one => {
+    if (!one || typeof one !== 'object') return []
+    const item = one as { question?: unknown; options?: unknown; isMulti?: unknown }
+    if (typeof item.question !== 'string' || item.question === '') return []
+    const options = (Array.isArray(item.options) ? item.options : []).filter((option): option is string => typeof option === 'string')
+
+    return [{ question: item.question, options, isMulti: item.isMulti === true }]
+  })
+
+  return questions.length > 0 ? { questions, at: Number(sent.at) || 0 } : null
+}
+
+export const cardExtraFromWire = (value: unknown): CardExtra | null => {
+  if (!value || typeof value !== 'object') return null
+  const sent = value as { lines?: unknown; files?: unknown; at?: unknown }
+  const lines = (Array.isArray(sent.lines) ? sent.lines : []).flatMap(one => {
+    const line = one as { label?: unknown; text?: unknown } | null
+
+    return line && typeof line.label === 'string' && typeof line.text === 'string' ? [{ label: line.label, text: line.text }] : []
+  })
+  const files = (Array.isArray(sent.files) ? sent.files : []).flatMap(one => {
+    const file = one as { path?: unknown; size?: unknown } | null
+    const kind = file && typeof file.path === 'string' ? evidenceKind(file.path) : null
+
+    return file && typeof file.path === 'string' && kind ? [{ path: file.path, size: Number(file.size) || 0, kind }] : []
+  })
+
+  return lines.length + files.length > 0 ? { lines, files, at: Number(sent.at) || 0 } : null
+}
+
+// The few lines added to Claude's instructions for the card tool, only while a plan is in progress.
+export const buildCardPrompt = (plans: readonly Plan[], tool = CARD_TOOL): string | null => {
+  if (!plans.some(plan => !plan.isArchived && plan.status !== 'done')) return null
+
+  return [
+    `SCV turn card (scv-dashboard mod): right before you ask the person with AskUserQuestion, you may call the ${tool} tool once, so the question's card in the SCV pane carries what they need to answer at a glance.`,
+    'Before a question that confirms requirements, send goal, not_doing and check: one short line each, what you understood.',
+    'Before a question that confirms a result, send evidence: project files a person can look at (a picture, a video, an html or pdf page); any other file is left out and named in the answer.',
+    'What you send belongs to the next question only and changes no file. If the tool is listed as deferred, load it with ToolSearch first.',
+  ].join(' ')
+}
+
+// The words over a card: what kind of question it is, by what Claude sent with it. A question with nothing sent
+// says what the blocked-work list used to say of it: an answer is awaited.
+export const cardTitle = (card: Pick<TurnCard, 'lines' | 'files'>): string =>
+  card.lines.length > 0 ? '이렇게 이해했음 — 맞나요?' : card.files.length > 0 ? '확인할 것 — 결과가 맞나요?' : '답을 기다리는 중'
+
+// With the question shown as the card of the person's turn, the blocked-work list does not repeat it: the wait for
+// the answer and the wait for the question tool's permission both go.
+export const withoutAsked = (blocks: readonly Block[], hasCard: boolean): Block[] =>
+  hasCard ? blocks.filter(block => block.kind !== 'waiting' && !(block.kind === 'permit' && block.title.includes('AskUserQuestion'))) : [...blocks]
+
+// The run that tells SCV a question was answered from the pane's card: SCV's own hook for a choice answer, given
+// what the host would have given it — whose turn it is, the questions, and the answer. An answer from the card never
+// reaches that hook otherwise, so the plan's history would miss the choice. null: SCV is not installed here.
+export type ChoiceRecord = { argv: string[]; stdin: string }
+
+export const choiceRecordOf = (core: string | null | undefined, sessionId: string | null, questions: unknown, question: string, answer: string): ChoiceRecord | null =>
+  core
+    ? {
+        argv: ['bash', `${core}/vendor/scv-core/core/template/hooks/on-choice-answer.sh`],
+        stdin: JSON.stringify({ ...(sessionId ? { session_id: sessionId } : {}), tool_name: 'AskUserQuestion', tool_input: { questions }, tool_response: { answers: { [question]: answer } } }),
+      }
+    : null
+
 // ── alerts: the moments worth calling the person back for ──
 
 export const ALERT_AFTER_MS = 2 * 60_000
@@ -1125,6 +1479,44 @@ export const formatDuration = (ms: number) => {
 
 export const NODE_COLOR: Record<StageState, string> = { done: '#3fb950', doing: '#e3b341', blocked: '#f85149', waiting: '#6e7681', yourTurn: '#a371f7' }
 
+// ── the line from one step to the next ──
+
+// The colour of the line that leaves a step: green after a finished step, grey after any other. In the moving
+// flow the line is solid along its whole length, so the piece a step's picture draws and the piece that stretches
+// beside it read as one. (The still picture of before the moving flow keeps its dashes: it is not changed.)
+export const lineColorOf = (state: StageState): string => (state === 'done' ? NODE_COLOR.done : NODE_COLOR.waiting)
+
+// A Box counts its width in cells. In the desktop pane a cell is the width of the digit 0 in its text: about
+// 8.6 px (measured on a capture of the real pane, 2026-11-28). cellsOf: a width in pixels as cells.
+const CELL_PX = 8.6
+
+export const cellsOf = (px: number): number => Math.round((px / CELL_PX) * 100) / 100
+
+// How thick the line is: in a picture's pixels, and — for the piece a Box draws — in cells.
+const RAIL_STROKE = 2.5
+export const RAIL_CELLS = cellsOf(RAIL_STROKE)
+
+// The line inside one step's picture of the moving flow: the piece that comes down into the node from the step
+// before (none for the first step) and the piece that goes on to the picture's bottom edge (none for the last
+// step). Each stops a pixel short of the node's rim. The piece from above takes the colour of the step it comes from.
+const railLines =(x: number, y: number, height: number, state: StageState, next: StageState | null, prev: StageState | null): string => {
+  const piece = (from: number, to: number, color: string) => `<line x1="${x}" y1="${from}" x2="${x}" y2="${to}" stroke="${color}" stroke-width="${RAIL_STROKE}"/>`
+
+  return `${prev === null ? '' : piece(0, y - 9, lineColorOf(prev))}${next === null ? '' : piece(y + 9, height, lineColorOf(state))}`
+}
+
+// The top of the line beside what hangs under a step (two jobs side by side, a join's record): a short picture as
+// wide as the step pictures, so the line that stretches under it stands exactly under theirs. Without a colour it
+// draws no line (nothing follows the step) and only keeps the width.
+export const RAIL_PIECE_HEIGHT = 2
+
+export const railPieceSvg = (width: number, color: string | null, height = RAIL_PIECE_HEIGHT): string => {
+  const x = width / 2
+  const line = color === null ? '' : `<line x1="${x}" y1="0" x2="${x}" y2="${height}" stroke="${color}" stroke-width="${RAIL_STROKE}"/>`
+
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${line}</svg>`
+}
+
 // One step's node as a small picture: a traffic-light circle, and below it the line to the next step
 // (solid after a finished step, dashed after any other; none after the last).
 export const nodeIconSvg = (state: StageState, next: StageState | null, height = 44) => {
@@ -1138,6 +1530,88 @@ export const nodeIconSvg = (state: StageState, next: StageState | null, height =
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="22" height="${height}" viewBox="0 0 22 ${height}">${line}${ring}<circle cx="11" cy="11" r="7" fill="${fill}" stroke="${color}" stroke-width="2"/></svg>`
 }
+
+// ── the moving flow: one movement per meaning ──
+
+// Whether the step pictures move now: the switch is on and it is not the person's turn. While the person is
+// awaited nothing moves, so a still pane says "your move".
+export const motionOf = (isOn: boolean, turn: TurnState): boolean => isOn && turn !== 'yourTurn'
+
+// The step of a plan that finished within `windowMs` before `at`: the one that finished last, or null.
+// A step whose newest signal is not "done" (it went back to work) has not just finished.
+export const justDoneOf = (signals: readonly StepSignal[], plan: string, at: number, windowMs = 5000): number | null => {
+  const newest = new Map<number, StepSignal>()
+  for (const signal of signals) if (signal.plan === plan) newest.set(signal.step, signal)
+  const fresh = [...newest.values()].filter(signal => signal.state === 'done' && at >= signal.at && at - signal.at <= windowMs)
+  if (fresh.length === 0) return null
+
+  return fresh.reduce((last, signal) => (signal.at >= last.at ? signal : last)).step
+}
+
+// The width every picture of the moving flow is drawn at, and how far down its node sits: room for the ring to
+// spread around the node without being cut at the picture's edge.
+export const MOTION_WIDTH = 32
+const MOTION_NODE_Y = 14
+
+// Whether a step's picture has something that moves: a step in progress (its ring spreads), or a step that has
+// just finished and has a next step (a light runs down the line to it, once).
+export const hasMotion = (state: StageState, next: StageState | null, isJustDone: boolean): boolean =>
+  state === 'doing' || (state === 'done' && isJustDone && next !== null)
+
+// One step's node for the moving flow: the still picture's node and line on the wider canvas, and over them the
+// one movement that says what the step is doing. The movement is CSS: a move of position written as SMIL was not
+// drawn in the real pane (2026-11-27), and CSS is turned off by a device that asks for less motion.
+// A picture with nothing to move holds no animation at all, so it can be drawn as a plain image.
+// isMoving false: nothing moves now (the person's turn) — every step, one in progress too, is the still picture on
+// the same canvas, with the ring the still picture of before gives a step in progress.
+export const nodeMotionSvg = (state: StageState, next: StageState | null, isJustDone: boolean, height = 44, isMoving = true, prev: StageState | null = null): string => {
+  const color = NODE_COLOR[state]
+  const x = MOTION_WIDTH / 2
+  const y = MOTION_NODE_Y
+  const open = `<svg xmlns="http://www.w3.org/2000/svg" width="${MOTION_WIDTH}" height="${height}" viewBox="0 0 ${MOTION_WIDTH} ${height}">`
+  const line = railLines(x, y, height, state, next, prev)
+  const node = `<circle cx="${x}" cy="${y}" r="7" fill="${state === 'waiting' ? 'none' : color}" stroke="${color}" stroke-width="2"/>`
+  if (!isMoving || !hasMotion(state, next, isJustDone)) {
+    const ring =
+      state === 'doing' || state === 'blocked' || state === 'yourTurn' ? `<circle cx="${x}" cy="${y}" r="10" fill="none" stroke="${color}" stroke-width="1.5" opacity="0.5"/>` : ''
+
+    return `${open}${line}${ring}${node}</svg>`
+  }
+  if (state === 'doing') {
+    const style =
+      '<style>@keyframes spread{from{transform:scale(1);opacity:.8}to{transform:scale(2);opacity:0}}.spread{transform-box:fill-box;transform-origin:center;animation:spread 1.6s ease-out infinite}@media (prefers-reduced-motion:reduce){.spread{animation:none;transform:scale(1.4);opacity:.5}}</style>'
+
+    return `${open}${style}${line}<circle class="spread" cx="${x}" cy="${y}" r="7" fill="none" stroke="${color}" stroke-width="2"/>${node}</svg>`
+  }
+  const style = `<style>@keyframes run{from{transform:translateY(0);opacity:1}to{transform:translateY(${height - y}px);opacity:0}}.run{animation:run .9s ease-in 1 forwards}@media (prefers-reduced-motion:reduce){.run{animation:none;opacity:0}}</style>`
+
+  // The light is paler than the green line it runs down, inside a soft green halo: a green dot on that line is not seen.
+  const light = `<g class="run"><circle cx="${x}" cy="${y}" r="6" fill="${NODE_COLOR.done}" opacity="0.4"/><circle cx="${x}" cy="${y}" r="3" fill="#dafbe1"/></g>`
+
+  return `${open}${style}${line}${node}${light}</svg>`
+}
+
+// One step's picture as the pane draws it: its source, the width it is drawn at, and whether it needs the frame
+// that lets a picture move (only a picture with something moving in it does).
+// Switch off: the still picture of before the moving flow, to the letter. Switch on: the moving flow's picture at
+// one width whether anything moves now or not, so the names beside the pictures do not jump when the turn
+// changes hands.
+export type StepPicture = { source: string; width: number; isInteractive: boolean }
+
+export const stepPictureOf = (isOn: boolean, isMoving: boolean, state: StageState, next: StageState | null, isJustDone: boolean, prev: StageState | null = null): StepPicture =>
+  isOn
+    ? { source: nodeMotionSvg(state, next, isJustDone, 44, isMoving, prev), width: MOTION_WIDTH, isInteractive: isMoving && hasMotion(state, next, isJustDone) }
+    : { source: nodeIconSvg(state, next), width: 22, isInteractive: false }
+
+// The desktop pane's text line is 20 px tall (the app's body text: read from its drawing rules and measured on a
+// capture of the real pane, 2026-11-28), and a Box counts its vertical spacing in halves of that line.
+const TEXT_LINE_PX = 20
+
+// The space over a step's title, in a Box's vertical units, that puts the middle of the title's line level with
+// the step's node in the moving flow: its node sits lower in its picture than half a text line. With the switch
+// off there is none: the still picture's node is within a pixel of the title's line, and that layout stays as it
+// was before the moving flow (the plan's promise for a pane with the switch off).
+export const titlePadOf = (isOn: boolean): number => (isOn ? (MOTION_NODE_Y - TEXT_LINE_PX / 2) / (TEXT_LINE_PX / 2) : 0)
 
 // The plan's status in plain words, read together with its steps so the two never disagree.
 // A paused plan names the plan it waits for (its title, given by the caller) when there is one.
