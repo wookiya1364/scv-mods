@@ -33,6 +33,7 @@ The project is the nearest folder at or above the session's folder that holds `s
 - the step flow as connected nodes: done, doing, doing in the background, blocked, waiting
 - motion that carries one meaning each: the step in progress pulses, a light runs to the next step when one finishes, and nothing moves while it is your turn (a button turns motion off)
 - two jobs running at once: under the step they were split at, two columns (branch · original) with each job's steps; after the join, what changed and what to redo
+- one plan set aside for another: under the step that waits, the plan done first with its steps; on that plan, where it came from and where the work returns — each a button that shows the other plan
 - press a step — in the flow or in a column — to see what it does, what was done during it, and its evidence (pictures, videos, pages to open); a picture opens full size
 - a plan picker when there are several plans
 
@@ -66,6 +67,7 @@ Sections you do not need now fold under "more"; a blocked card never folds.
 | the next-step button | its command goes into the prompt box |
 | an answer on the question card | the open question gets that answer |
 | the motion button | the step pictures stop or move again |
+| a plan's name or a return line of a pause | the pane shows that plan |
 
 **Auto-clear.** When a turn ends with the context past the threshold, the pane clears the conversation instead of summarizing it; the new conversation starts from the end of the SCV record. Right after, it shows the last three exchanges again (`/scv-last-talk`) and has Claude bring the task list back. The settings are `SCV_CLEAR_AUTO` and `SCV_CLEAR_PERCENT` in `scv/scv_settings.json` (default: on, 50%). A project with no SCV record is summarized as before.
 

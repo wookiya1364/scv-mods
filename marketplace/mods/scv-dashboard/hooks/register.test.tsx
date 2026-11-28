@@ -8064,3 +8064,315 @@ test('lanes T44 (창) 두 칸 안의 단계를 누르면 그 단계의 자세한
   ])
 })
 
+
+// ── one plan first (a pause): the plan that waits and the plan done first, drawn as one picture ──
+import { detourOf, detourWords, originOf, pauseNoteOf, planJump } from './model'
+
+const PAUSE_NOTE = '\n## 변경 이력\n\n- **2026-11-28 보류** — 먼저 할 계획: 환불 규칙 정하기\n  - 다시 시작: 3단계부터\n  - 이유: 환불 규칙이 먼저 정해져야 함\n'
+const withNote = (file: { planText: string; testsText: string }, note: string) => ({ ...file, planText: `${file.planText}${note}` })
+const PAY_PAUSED = (note = PAUSE_NOTE) =>
+  withNote(withHead(plan({ title: '결제 화면 고치기', status: 'paused', steps: ['[x] 화면 틀 만들기', '[x] 금액 계산 붙이기', '[~] 환불 버튼 붙이기', '결과 확인 받기'] }), { paused_by: 'b', resume_at: '3' }), note)
+const REFUND_FIRST = () => withHead(plan({ title: '환불 규칙 정하기', status: 'in_progress', steps: ['[x] 규칙 표 만들기', '[~] 시험 쓰기', '문서 고치기'] }), { return_to: 'a' })
+const pausePlans = () =>
+  parsePlans([
+    { slug: 'a', ...PAY_PAUSED() },
+    { slug: 'b', ...REFUND_FIRST() },
+  ])
+const boxes = (nodes: readonly Drawn[], key: string) => nodes.filter(node => node.type === 'Box' && node.props?.key === key)
+const buttons = (nodes: readonly Drawn[], prefix: string) => keyed(nodes, 'Button', prefix).map(button => [String(button.props?.key), String(button.props?.label)])
+
+test('detour T1 · T2 보류 줄에서 나간 날과 까닭을 읽는다 — 여럿이면 가장 새 것, 없으면 빈 값', async () => {
+  expect(pauseNoteOf(PAY_PAUSED().planText)).toEqual({ day: '11-28', why: '환불 규칙이 먼저 정해져야 함' })
+  const two = '## 변경 이력\n\n- **2026-11-20 보류** — 먼저 할 계획: x\n  - 이유: 옛 까닭\n- **2026-11-21 재개** — 끝난 계획: x\n- **2026-11-28 보류** — 먼저 할 계획: y\n  - 다시 시작: 2단계부터\n  - 이유: 새 까닭\n- **2026-11-28 진행** — 1단계 시작: z\n'
+  expect(pauseNoteOf(two)).toEqual({ day: '11-28', why: '새 까닭' })
+  expect(pauseNoteOf('# 계획\n\n## 변경 이력\n\n- **2026-11-28 진행** — 1단계 시작: z\n')).toEqual({ day: '', why: '' })
+  expect(pauseNoteOf('# 계획\n')).toEqual({ day: '', why: '' })
+  // an entry with no reason line gives the day alone, and never takes the reason of an entry after it
+  expect(pauseNoteOf('## 변경 이력\n\n- **2026-11-28 보류** — 먼저 할 계획: y\n  - 다시 시작: 2단계부터\n- **2026-11-28 추가** — 3단계\n  - 이유: 다른 줄의 까닭\n')).toEqual({ day: '11-28', why: '' })
+  // a plan read from its file carries both
+  expect(['a', 'b'].map(slug => pausePlans().find(one => one.slug === slug)).map(one => [one?.pausedOn, one?.pausedWhy])).toEqual([
+    ['11-28', '환불 규칙이 먼저 정해져야 함'],
+    ['', ''],
+  ])
+})
+
+test('detour T3 · T4 · T5 멈춘 계획과 먼저 하는 계획이 짝지어지고, 그리지 말아야 할 때는 없음이다', async () => {
+  const plans = pausePlans()
+  const waiting = detourOf(plans, 'a', stagesOf)
+  expect(waiting).toEqual({
+    side: 'paused',
+    paused: { slug: 'a', title: '결제 화면 고치기' },
+    first: { slug: 'b', title: '환불 규칙 정하기' },
+    at: 3,
+    stepName: '환불 버튼 붙이기',
+    day: '11-28',
+    why: '환불 규칙이 먼저 정해져야 함',
+    stages: stagesOf(plans.find(one => one.slug === 'b') as Plan),
+  })
+  expect(waiting?.stages.map(stage => [stage.name, stage.state])).toEqual([
+    ['규칙 표 만들기', 'done'],
+    ['시험 쓰기', 'doing'],
+    ['문서 고치기', 'waiting'],
+  ])
+  // seen from the plan done first: the same pair, the other side
+  expect(detourOf(plans, 'b', stagesOf)).toEqual({ ...waiting, side: 'first' })
+  expect(originOf(plans, 'b', stagesOf)?.side).toBe('first')
+  expect(originOf(plans, 'a', stagesOf)).toBeNull()
+  // (가) no pause at all
+  expect(detourOf(parsePlans([{ slug: 'c', ...plan({ title: 'c', status: 'in_progress', steps: ['a'] }) }]), 'c', stagesOf)).toBeNull()
+  // (나) the plan it waits for is not among the plans
+  expect(detourOf(parsePlans([{ slug: 'a', ...PAY_PAUSED() }]), 'a', stagesOf)).toBeNull()
+  // (다) the plan to go back to was resumed: it waits no more
+  const resumed = parsePlans([
+    { slug: 'a', ...plan({ title: '결제 화면 고치기', status: 'in_progress', steps: ['[x] a', '[~] b'] }) },
+    { slug: 'b', ...REFUND_FIRST() },
+  ])
+  expect(detourOf(resumed, 'b', stagesOf)).toBeNull()
+  // (라) the plan to go back to waits for another plan
+  const other = parsePlans([
+    { slug: 'a', ...withHead(plan({ title: '결제 화면 고치기', status: 'paused', steps: ['[x] a', '[~] b'] }), { paused_by: 'z', resume_at: '2' }) },
+    { slug: 'b', ...REFUND_FIRST() },
+  ])
+  expect(detourOf(other, 'b', stagesOf)).toBeNull()
+  // (마) two jobs at once come first: a split plan has no pause to draw
+  const split = parsePlans([
+    { slug: 'a', ...BOSS_SPLIT() },
+    { slug: 'b', ...withHead(HIT_SPLIT(), { return_to: 'a' }) },
+  ])
+  expect(detourOf(split, 'a', stagesOf)).toBeNull()
+  expect(detourOf(split, 'b', stagesOf)).toBeNull()
+  // a pause inside a pause: the plan in the middle is shown as the plan that waits, and still says where it came from
+  const nested = parsePlans([
+    { slug: 'a', ...PAY_PAUSED() },
+    { slug: 'b', ...withHead(plan({ title: '환불 규칙 정하기', status: 'paused', steps: ['[x] 규칙 표 만들기', '[~] 시험 쓰기'] }), { return_to: 'a', paused_by: 'c', resume_at: '2' }) },
+    { slug: 'c', ...withHead(plan({ title: '세금 계산', status: 'in_progress', steps: ['[~] 표 읽기'] }), { return_to: 'b' }) },
+  ])
+  expect(detourOf(nested, 'b', stagesOf)?.side).toBe('paused')
+  expect(detourOf(nested, 'b', stagesOf)?.first.slug).toBe('c')
+  expect(originOf(nested, 'b', stagesOf)?.paused.slug).toBe('a')
+  // a step number the plan does not have still gives a pair: the first step when it is no number
+  expect(detourOf(parsePlans([{ slug: 'a', ...withHead(plan({ title: 'p', status: 'paused', steps: ['a'] }), { paused_by: 'b' }) }, { slug: 'b', ...REFUND_FIRST() }]), 'a', stagesOf)?.at).toBe(1)
+})
+
+test('detour T6 · T7 · T8 창에 보일 글, 맨 위 카드, 누르면 바꿀 값', async () => {
+  const plans = pausePlans()
+  const a = plans.find(one => one.slug === 'a') as Plan
+  const b = plans.find(one => one.slug === 'b') as Plan
+  const waiting = detourOf(plans, 'a', stagesOf)
+  const first = detourOf(plans, 'b', stagesOf)
+  if (!waiting || !first) throw new Error('no pair')
+  expect(detourWords(waiting)).toEqual({
+    paused: '멈춤 — 먼저 하는 계획이 끝나면 여기서 재개',
+    left: '나감 11-28 · 환불 규칙이 먼저 정해져야 함',
+    back: '끝나면 3단계로 돌아옴',
+    origin: '결제 화면 고치기 · 3단계에서 멈추고 나옴 11-28',
+    ret: '끝나면 결제 화면 고치기 3단계로 돌아감',
+  })
+  // what the record does not hold is not made up
+  expect(detourWords({ ...waiting, why: '' }).left).toBe('나감 11-28')
+  expect(detourWords({ ...waiting, why: '', day: '' }).left).toBe('나감')
+  expect(detourWords({ ...waiting, day: '' }).origin).toBe('결제 화면 고치기 · 3단계에서 멈추고 나옴')
+  // the card, from the plan that waits: now · both plans with their tags · the step the work returns to
+  expect(nowCardOf(a, plans, null, null, waiting)).toEqual({
+    now: '다른 계획을 먼저 하는 중',
+    jobs: [
+      { label: '먼저 하는 계획', tone: 'here', title: '환불 규칙 정하기', to: { plan: 'b', step: null } },
+      { label: '멈춘 계획', tone: 'idle', title: '결제 화면 고치기' },
+    ],
+    back: '3단계 · 환불 버튼 붙이기',
+    backTo: { plan: 'a', step: 2 },
+  })
+  // from the plan done first: no words of its own for now, and the plan and step it goes back to
+  expect(nowCardOf(b, plans, null, null, first)).toEqual({ now: '', jobs: [], back: '결제 화면 고치기 · 3단계', backTo: { plan: 'a', step: 2 } })
+  // two jobs at once and a join's redo read as before, with or without a pair; nothing at all gives no card
+  const lanes = lanesOf(parsePlans([{ slug: 'a', ...BOSS_SPLIT() }, { slug: 'b', ...HIT_SPLIT() }]), 'a', stagesOf)
+  expect(nowCardOf(a, plans, lanes, null, waiting)?.now).toBe('두 일을 동시에')
+  expect(nowCardOf(a, plans, null, null)).toBeNull()
+  expect(nowCardOf(a, plans, null, null, null)).toBeNull()
+  // a press on a plan's name shows that plan at the step it is at; on a line that points at a step, with that step open
+  expect(planJump({ plan: 'b', step: null })).toEqual({ chosen: 'b', own: null, other: null })
+  expect(planJump({ plan: 'a', step: 2 })).toEqual({ chosen: 'a', own: 2, other: null })
+  // the tag of a plan that waits is grey; the sign of the way back is a picture of its own
+  expect(tagSvg('멈춘 계획', 'idle').source).toContain('#30363d')
+  expect(iconSvg('back', '#8b949e')).toContain('M9 14l-4-4 4-4')
+})
+
+test('detour T9 멈춘 계획의 창: 멈춘 단계 아래에 먼저 하는 계획이 상자로 붙는다', async ($, on) => {
+  engine(on, { a: PAY_PAUSED(), b: REFUND_FIRST() })
+  await start($)
+  await drawnText($)
+  await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'a' } as never)
+  const nodes = await drawnNodes($)
+  const texts = textsOf(nodes)
+  // the status line of before stays
+  expect(texts).toContain('상태: 보류 · 환불 규칙 정하기 끝나면 재개')
+  // the step that waits says so, stands still, and is not where the work is
+  expect(texts).toContain('멈춤 — 먼저 하는 계획이 끝나면 여기서 재개')
+  expect(texts).not.toContain('진행 중  ◀ 지금 여기')
+  expect(svgs(nodes, '3단계 대기')).toHaveLength(1)
+  // when and why the work left, each note with its small sign
+  expect(texts).toContain('나감 11-28 · 환불 규칙이 먼저 정해져야 함')
+  expect(svgs(nodes, '나감')).toHaveLength(1)
+  expect(svgs(nodes, '돌아옴')).toHaveLength(1)
+  // the box: its tag, the plan done first as a button, a row per step — dot, name as a button, state in colour
+  const box = keyed(nodes, 'Box', 'detour-box')[0]
+  expect(box?.props?.borderStyle).toBe('round')
+  expect(flatNodes(box).filter(node => node.type === 'Svg').map(node => node.props?.alt)).toEqual(['먼저 하는 계획', '완료', '진행 중', '대기'])
+  expect(textsOf(flatNodes(box))).toEqual([' · 완료', ' · 진행 중', ' · 대기'])
+  expect(buttons(flatNodes(box), 'detour-')).toEqual([
+    ['detour-plan', '환불 규칙 정하기'],
+    ['detour-step-1', '1. 규칙 표 만들기'],
+    ['detour-step-2', '2. 시험 쓰기'],
+    ['detour-step-3', '3. 문서 고치기'],
+  ])
+  expect(buttons(nodes, 'detour-back')).toEqual([['detour-back', '끝나면 3단계로 돌아옴']])
+  // it hangs under the step the plan resumes from: after its row, before the next step's
+  const drawn = await drawnText($)
+  expect(drawn.indexOf('"key":"step-3"')).toBeLessThan(drawn.indexOf('"key":"detour"'))
+  expect(drawn.indexOf('"key":"detour"')).toBeLessThan(drawn.indexOf('"key":"step-4"'))
+  // the card over the flow: now · both plans with their tags · the step the work returns to
+  const nowCard = keyed(nodes, 'Box', 'now-card')[0]
+  expect(textsOf(flatNodes(nowCard))).toEqual(['지금', '다른 계획을 먼저 하는 중', '결제 화면 고치기', '돌아갈 곳'])
+  expect(flatNodes(nowCard).filter(node => node.type === 'Svg').map(node => node.props?.alt)).toEqual(['먼저 하는 계획', '멈춘 계획'])
+  expect(buttons(flatNodes(nowCard), 'now-')).toEqual([
+    ['now-job-b', '환불 규칙 정하기'],
+    ['now-back', '3단계 · 환불 버튼 붙이기'],
+  ])
+  expect(String(svgs(nodes, '멈춘 계획')[0]?.props?.source)).toContain('#30363d')
+  expect(drawn.indexOf('"key":"now-card"')).toBeLessThan(drawn.indexOf('"key":"step-1"'))
+  expect(texts.filter(one => one.startsWith('지금: '))).toEqual([])
+  // this plan came from nowhere: no origin line, no return line
+  expect(boxes(nodes, 'origin')).toEqual([])
+})
+
+test('detour T10 먼저 하는 계획의 창: 나온 곳과 돌아갈 곳이 보인다', async ($, on) => {
+  engine(on, { a: PAY_PAUSED(), b: REFUND_FIRST() })
+  await start($)
+  await drawnText($)
+  await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'b' } as never)
+  const nodes = await drawnNodes($)
+  const texts = textsOf(nodes)
+  expect(buttons(nodes, 'origin-')).toEqual([
+    ['origin-plan', '결제 화면 고치기 · 3단계에서 멈추고 나옴 11-28'],
+    ['origin-return-plan', '끝나면 결제 화면 고치기 3단계로 돌아감'],
+  ])
+  expect(svgs(nodes, '나온 곳')).toHaveLength(2)
+  expect(svgs(nodes, '돌아감')).toHaveLength(1)
+  // where it came from stands over the steps, where the work returns under them
+  const drawn = await drawnText($)
+  expect(drawn.indexOf('"key":"origin"')).toBeLessThan(drawn.indexOf('"key":"step-1"'))
+  expect(drawn.indexOf('"key":"step-3"')).toBeLessThan(drawn.indexOf('"key":"origin-return"'))
+  // its own step in progress is where the work is, as before
+  expect(texts).toContain('진행 중  ◀ 지금 여기')
+  expect(texts).not.toContain('멈춤 — 먼저 하는 계획이 끝나면 여기서 재개')
+  expect(boxes(nodes, 'detour')).toEqual([])
+  // the card: what is being done now in the pane's own words, and the plan and step to go back to
+  const nowCard = keyed(nodes, 'Box', 'now-card')[0]
+  const cardTexts = textsOf(flatNodes(nowCard))
+  expect(cardTexts[0]).toBe('지금')
+  expect(cardTexts[1]).not.toBe('')
+  expect(cardTexts[1]?.startsWith('지금: ')).toBe(false)
+  expect(cardTexts[2]).toBe('돌아갈 곳')
+  expect(buttons(flatNodes(nowCard), 'now-')).toEqual([['now-back', '결제 화면 고치기 · 3단계']])
+})
+
+test('detour T11 버튼을 누르면 창이 그 계획으로 옮겨 간다', async ($, on) => {
+  engine(on, { a: PAY_PAUSED(), b: REFUND_FIRST() })
+  await start($)
+  await drawnText($)
+  await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'a' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // the name of the plan done first: the pane shows that plan
+  await ui.press({ key: 'detour-plan' })
+  await settle()
+  const first = await drawnNodes($)
+  expect(buttons(first, 'origin-plan')).toEqual([['origin-plan', '결제 화면 고치기 · 3단계에서 멈추고 나옴 11-28']])
+  expect(boxes(first, 'detour')).toEqual([])
+  // the line that says where the work returns: the pane shows the plan that waits, with that step's detail open
+  await ui.press({ key: 'origin-return-plan' })
+  await settle()
+  const back = await drawnNodes($)
+  expect(boxes(back, 'detour')).toHaveLength(1)
+  expect(textsOf(flatNodes(keyed(back, 'Box', 'step-detail')[0]))[0]?.startsWith('3. 환불 버튼 붙이기 — ')).toBe(true)
+  // a step of the plan done first: that plan, with that step's detail open
+  await ui.press({ key: 'detour-step-3' })
+  await settle()
+  const third = await drawnNodes($)
+  expect(buttons(third, 'origin-plan')).toHaveLength(1)
+  expect(textsOf(flatNodes(keyed(third, 'Box', 'step-detail')[0]))[0]?.startsWith('3. 문서 고치기 — ')).toBe(true)
+  // the card's buttons go the same way
+  await ui.press({ key: 'now-back' })
+  await settle()
+  expect(boxes(await drawnNodes($), 'detour')).toHaveLength(1)
+  await ui.press({ key: 'now-job-b' })
+  await settle()
+  expect(buttons(await drawnNodes($), 'origin-plan')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('detour T12 그리지 말아야 할 때의 창은 전과 같다', async ($, on) => {
+  // a plan with no pause: no card, no new line
+  engine(on, { c: plan({ title: '혼자인 계획', status: 'in_progress', steps: ['[x] a', '[~] b', 'c'] }) })
+  await start($)
+  const alone = await drawnNodes($)
+  expect(keyed(alone, 'Box', 'now-card')).toEqual([])
+  expect(boxes(alone, 'detour')).toEqual([])
+  expect(boxes(alone, 'origin')).toEqual([])
+  expect(textsOf(alone)).toContain('진행 중  ◀ 지금 여기')
+  expect(textsOf(alone).some(one => one.startsWith('지금: '))).toBe(true)
+})
+
+test('detour T12 짝이 목록에 없는 멈춘 계획은 상태 줄만 보인다', async ($, on) => {
+  engine(on, { a: PAY_PAUSED() })
+  await start($)
+  const nodes = await drawnNodes($)
+  expect(textsOf(nodes)).toContain('상태: 보류 · b 끝나면 재개')
+  expect(keyed(nodes, 'Box', 'now-card')).toEqual([])
+  expect(boxes(nodes, 'detour')).toEqual([])
+  expect(textsOf(nodes)).not.toContain('멈춤 — 먼저 하는 계획이 끝나면 여기서 재개')
+})
+
+const PAUSE_OWN = ['결제 화면 고치기', '환불 규칙 정하기', '환불 버튼 붙이기', '화면 틀 만들기', '금액 계산 붙이기', '결과 확인 받기', '규칙 표 만들기', '시험 쓰기', '문서 고치기', '환불 규칙이 먼저 정해져야 함']
+const pauseIn =
+  (settings: string, words: readonly string[]): TestBody =>
+  async ($, on) => {
+    const kit = engine(on, { a: PAY_PAUSED(), b: REFUND_FIRST() })
+    withProject(kit, { settings })
+    await start($)
+    await drawnText($)
+    await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'a' } as never)
+    const waiting = await drawnText($)
+    await $.ui.select({ plugin: 'scv-dashboard', key: 'plan', value: 'b' } as never)
+    const first = await drawnText($)
+    const drawn = `${waiting}\n${first}`
+    for (const word of words) expect(drawn).toContain(word)
+    // what the pane itself wrote about the pause is nowhere left in Korean
+    const rest = PAUSE_OWN.reduce((text, one) => text.split(one).join(''), drawn)
+    for (const korean of ['멈춤', '나감', '돌아옴', '돌아감', '나온 곳', '먼저 하는 계획', '멈춘 계획', '다른 계획을']) expect(rest).not.toContain(korean)
+  }
+
+test(
+  'detour T13 영어로 볼 때 새 글이 영어로 보인다',
+  pauseIn(EN, [
+    'Another plan is done first',
+    'On hold — resumes here when the plan done first ends',
+    'Comes back to step 3 when done',
+    'Left 11-28 · 환불 규칙이 먼저 정해져야 함',
+    '결제 화면 고치기 · left on hold at step 3, 11-28',
+    'Goes back to step 3 of 결제 화면 고치기 when done',
+    'Step 3 · 환불 버튼 붙이기',
+  ]),
+)
+
+test(
+  'detour T13 일본어로 볼 때 새 글이 일본어로 보인다',
+  pauseIn(JA, [
+    '別の計画を先に進行中',
+    '停止 — 先に進める計画が終わったらここから再開',
+    '終わったらステップ 3 に戻る',
+    '離脱 11-28 · 환불 규칙이 먼저 정해져야 함',
+    '결제 화면 고치기 · ステップ 3 で止めて離脱 11-28',
+    '終わったら 결제 화면 고치기 のステップ 3 に戻る',
+    'ステップ 3 · 환불 버튼 붙이기',
+  ]),
+)

@@ -109,6 +109,22 @@ export const historyOf = (planText: string): string[] =>
     .map(line => line.slice(2).replace(/\*\*/g, ''))
     .reverse()
 
+// When and why a plan was set aside, from the newest "- **<day> 보류** — …" entry of its `## 변경 이력`: the day as
+// 'MM-DD' and the text of its "  - 이유: …" line. '' for what the entry does not hold, and for a plan with no such
+// entry. The entry carries a day only, so no clock time can be shown.
+export const pauseNoteOf = (planText: string): { day: string; why: string } => {
+  const lines = section(planText, ['변경 이력'])
+  const head = (line: string) => line.match(/^- \*\*(\S+) 보류\*\*/)
+  const at = lines.reduce((last, line, i) => (head(line) ? i : last), -1)
+  if (at < 0) return { day: '', why: '' }
+  const stamp = head(lines[at] ?? '')?.[1] ?? ''
+  const rest = lines.slice(at + 1)
+  const end = rest.findIndex(line => line.startsWith('- '))
+  const why = (end < 0 ? rest : rest.slice(0, end)).map(line => line.match(/^\s+- 이유:\s*(.+)$/)?.[1]).find(Boolean) ?? ''
+
+  return { day: stamp.match(/(\d{2})-(\d{2})$/)?.[0] ?? stamp, why: why.trim() }
+}
+
 // Step marks from the plan's own progress lines ("- **<day> 진행** — <n>단계 시작|끝|막힘: …"), oldest first so the
 // latest line for a step wins. A step the plan already marks keeps that mark; the mod's own step signals still apply
 // on top (mergeMarks). This is what keeps the pane right when a step report was missed, and without the step tool.
@@ -148,6 +164,8 @@ export const parsePlan = (file: PlanFile): Plan => withRedo({
   pausedBy: frontmatter(file.planText, 'paused_by') ?? '',
   resumeAt: frontmatter(file.planText, 'resume_at') ?? '',
   returnTo: frontmatter(file.planText, 'return_to') ?? '',
+  pausedOn: pauseNoteOf(file.planText).day,
+  pausedWhy: pauseNoteOf(file.planText).why,
   splitWith: frontmatter(file.planText, 'split_with') ?? '',
   splitOn: frontmatter(file.planText, 'split_on') ?? '',
   splitAt: frontmatter(file.planText, 'split_at') ?? '',
@@ -971,8 +989,9 @@ export const buildStepPrompt = (plans: readonly Plan[], tool = STEP_TOOL): strin
 const clockPart = (when: string) => when.trim().split(' ').pop() ?? ''
 
 // A tag's tone: the job that went to a separate folder (the person's own turn wears it too), or the job that stayed
-// in the original folder (and the job done alongside).
-export type TagTone = 'away' | 'here'
+// in the original folder (and the job done alongside, and the plan done first while another waits), or — idle — a
+// plan that waits and the place a plan came from.
+export type TagTone = 'away' | 'here' | 'idle'
 
 // One of the two jobs that run at once, as a column: where it is worked on, its plan, and its steps from `from` on.
 export type Lane = { label: string; tone: TagTone; slug: string; title: string; from: number; stages: Stage[] }
@@ -997,6 +1016,85 @@ export const lanesOf = (plans: readonly Plan[], slug: string, stagesOf: (plan: P
   // folder). 2026-11-28: they read '따로 만든 폴더' · '원래 폴더' — the person found those awkward as names.
   return { under: plan === away ? at : 0, when: clockPart(plan.splitOn ?? ''), lanes: [lane(away, '분기', 'away', at), lane(here, '원본', 'here', 1)] }
 }
+
+// ── one plan first (a pause) ──
+
+// A plan set aside for another, seen from either of the two: the plan that waits, the plan done first, the step
+// the waiting plan resumes from (at, counted from 1) with that step's name, the day and the reason it was set
+// aside ('' when its record holds none), and the steps of the plan done first.
+// side: which of the two is in view — 'paused' (the plan that waits) or 'first' (the plan done first).
+export type Detour = {
+  side: 'paused' | 'first'
+  paused: { slug: string; title: string }
+  first: { slug: string; title: string }
+  at: number
+  stepName: string
+  day: string
+  why: string
+  stages: Stage[]
+}
+
+const detourBetween = (side: Detour['side'], paused: Plan, first: Plan, stagesOf: (plan: Plan) => readonly Stage[]): Detour => {
+  const at = Math.max(1, Number(paused.resumeAt) || 1)
+
+  return {
+    side,
+    paused: { slug: paused.slug, title: paused.title },
+    first: { slug: first.slug, title: first.title },
+    at,
+    stepName: paused.steps[at - 1]?.name ?? '',
+    day: paused.pausedOn ?? '',
+    why: paused.pausedWhy ?? '',
+    stages: [...stagesOf(first)],
+  }
+}
+
+const isSetAside = (plan: Plan) => plan.status === 'paused' && Boolean(plan.pausedBy)
+
+// The plan in view as the plan that waits: it is set aside, and the plan it waits for is among the plans.
+// null: it is not set aside, the plan it waits for is not there, or it is one of two jobs that run at once.
+export const waitingOf = (plans: readonly Plan[], slug: string, stagesOf: (plan: Plan) => readonly Stage[]): Detour | null => {
+  const plan = plans.find(one => one.slug === slug)
+  if (!plan || plan.splitWith || !isSetAside(plan)) return null
+  const first = plans.find(one => one.slug === plan.pausedBy)
+
+  return first ? detourBetween('paused', plan, first, stagesOf) : null
+}
+
+// The plan in view as the plan done first: the plan it goes back to is among the plans and still waits for it.
+// null: it names no plan to go back to, that plan is not there, was resumed, or waits for another plan.
+export const originOf = (plans: readonly Plan[], slug: string, stagesOf: (plan: Plan) => readonly Stage[]): Detour | null => {
+  const plan = plans.find(one => one.slug === slug)
+  if (!plan || plan.splitWith || !plan.returnTo) return null
+  const paused = plans.find(one => one.slug === plan.returnTo)
+
+  return paused && isSetAside(paused) && paused.pausedBy === plan.slug ? detourBetween('first', paused, plan, stagesOf) : null
+}
+
+// The pause the plan in view is part of. A plan that both waits and was made for another plan's pause (a pause
+// inside a pause) is shown as the plan that waits; where it came from is originOf's to say.
+export const detourOf = (plans: readonly Plan[], slug: string, stagesOf: (plan: Plan) => readonly Stage[]): Detour | null =>
+  waitingOf(plans, slug, stagesOf) ?? originOf(plans, slug, stagesOf)
+
+// What the pane says about a pause. paused: under the step that waits. left: when and why the work left that step.
+// back: where the work returns, said from the plan that waits. origin: where the plan done first came from (its
+// tag stands before it). ret: where the work returns, said from the plan done first.
+export type DetourWords = { paused: string; left: string; back: string; origin: string; ret: string }
+
+export const detourWords = (detour: Detour): DetourWords => ({
+  paused: '멈춤 — 먼저 하는 계획이 끝나면 여기서 재개',
+  left: `${['나감', detour.day].filter(Boolean).join(' ')}${detour.why ? ` · ${detour.why}` : ''}`,
+  back: `끝나면 ${detour.at}단계로 돌아옴`,
+  origin: `${detour.paused.title} · ${detour.at}단계에서 멈추고 나옴${detour.day ? ` ${detour.day}` : ''}`,
+  ret: `끝나면 ${detour.paused.title} ${detour.at}단계로 돌아감`,
+})
+
+// Where a press takes the pane: a plan, and the step of it to open (0 = its first step; null: the step it is at).
+export type JumpTarget = { plan: string; step: number | null }
+
+// What a press on a plan's name or on a line that points at one of its steps sets: the plan the pane shows, the
+// step whose detail opens (null: the step the plan is at), and no step of another job's column.
+export const planJump = (target: JumpTarget): { chosen: string; own: number | null; other: null } => ({ chosen: target.plan, own: target.step, other: null })
 
 // ── a step pressed in one of the two columns ──
 
@@ -1053,14 +1151,28 @@ export const isRedoOpen = (join: JoinView | null): boolean => Boolean(join?.redo
 
 // The card over the step flow while two jobs run at once, or while a join's redo is open: what is being done now —
 // both jobs, each with its tag, or the redo — and the plan the work goes back to. null: neither is the case.
-export type NowCard = { now: string; jobs: { label: string; tone: TagTone; title: string }[]; back: string }
+// While one plan waits for another (a pause), the card says so from either side: from the plan that waits, both
+// plans with their tags and the step the work returns to; from the plan done first, the plan and step it goes
+// back to (now: '' — the pane's own line of what is being done stands there). to · backTo: where a press goes.
+export type NowCard = { now: string; jobs: { label: string; tone: TagTone; title: string; to?: JumpTarget }[]; back: string; backTo?: JumpTarget }
 
-export const nowCardOf = (plan: Plan, plans: readonly Plan[], lanes: Lanes | null, join: JoinView | null): NowCard | null => {
+export const nowCardOf = (plan: Plan, plans: readonly Plan[], lanes: Lanes | null, join: JoinView | null, detour: Detour | null = null): NowCard | null => {
   const back = plan.returnTo ? titleOf(plans, plan.returnTo) : '없음'
   if (lanes) return { now: '두 일을 동시에', jobs: lanes.lanes.map(lane => ({ label: lane.label, tone: lane.tone, title: lane.title })), back }
   if (join?.redo && isRedoOpen(join)) return { now: join.redo.name, jobs: [], back }
+  if (!detour) return null
+  const backTo: JumpTarget = { plan: detour.paused.slug, step: detour.at - 1 }
+  if (detour.side === 'first') return { now: '', jobs: [], back: `${detour.paused.title} · ${detour.at}단계`, backTo }
 
-  return null
+  return {
+    now: '다른 계획을 먼저 하는 중',
+    jobs: [
+      { label: '먼저 하는 계획', tone: 'here', title: detour.first.title, to: { plan: detour.first.slug, step: null } },
+      { label: '멈춘 계획', tone: 'idle', title: detour.paused.title },
+    ],
+    back: detour.stepName ? `${detour.at}단계 · ${detour.stepName}` : `${detour.at}단계`,
+    backTo,
+  }
 }
 
 export type PanePart = PaneSection | 'card' | 'now'
@@ -1093,7 +1205,11 @@ export const textWidth = (text: string, size: number): number =>
 
 export type Picture = { source: string; width: number; height: number }
 
-const TAG_COLOR: Record<TagTone, { fill: string; text: string }> = { away: { fill: '#3c3489', text: '#cecbf6' }, here: { fill: '#0c447c', text: '#b5d4f4' } }
+const TAG_COLOR: Record<TagTone, { fill: string; text: string }> = {
+  away: { fill: '#3c3489', text: '#cecbf6' },
+  here: { fill: '#0c447c', text: '#b5d4f4' },
+  idle: { fill: '#30363d', text: '#c9d1d9' },
+}
 const TAG_FONT = 11
 const TAG_HEIGHT = 18
 const PICTURE_FONT = "-apple-system, 'Apple SD Gothic Neo', 'Segoe UI', sans-serif"
@@ -1111,15 +1227,17 @@ export const tagSvg = (label: string, tone: TagTone): Picture => {
   }
 }
 
-export type IconName = 'branch' | 'merge' | 'arrow'
+export type IconName = 'branch' | 'merge' | 'arrow' | 'back'
 
 const ICON_SHAPES: Record<IconName, string> = {
   branch: '<circle cx="7" cy="6" r="2.2"/><circle cx="7" cy="18" r="2.2"/><circle cx="17" cy="7" r="2.2"/><path d="M7 8.2v7.6"/><path d="M17 9.2c0 3.6-3.6 4.4-10 4.8"/>',
   merge: '<circle cx="7" cy="6" r="2.2"/><circle cx="7" cy="18" r="2.2"/><circle cx="17" cy="12" r="2.2"/><path d="M7 8.2v7.6"/><path d="M7.5 8.1c1 2.6 3.4 3.9 7.3 3.9"/>',
   arrow: '<path d="M5 12h14"/><path d="M13 6l6 6-6 6"/>',
+  back: '<path d="M9 14l-4-4 4-4"/><path d="M5 10h11a4 4 0 1 1 0 8h-1"/>',
 }
 
-// A small sign in one colour: two lines parting (a split), two lines meeting (a join), an arrow (what comes next).
+// A small sign in one colour: two lines parting (a split), two lines meeting (a join), an arrow (what comes next),
+// an arrow turning back (where the work returns).
 export const iconSvg = (name: IconName, color: string, size = 16): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_SHAPES[name]}</svg>`
 

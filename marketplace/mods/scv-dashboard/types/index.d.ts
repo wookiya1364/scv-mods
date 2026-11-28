@@ -29,6 +29,9 @@ export type Plan = {
   pausedBy: string
   resumeAt: string
   returnTo: string
+  // When and why it was set aside, from its newest 보류 entry: the day as 'MM-DD' and the reason. '' when absent.
+  pausedOn?: string
+  pausedWhy?: string
   // Two jobs at once (a split): the plan worked on alongside, when the two were split, and — on the plan whose work
   // went to a separate folder — the step it was split at and that folder. After the join: the plan it was joined
   // with, when, the step the record hangs under, and the results that changed (joined by ' · '). '' when absent.
